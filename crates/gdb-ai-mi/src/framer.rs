@@ -2,6 +2,8 @@ use bytes::{Buf, BytesMut};
 
 use crate::{MiError, MiLimits};
 
+/// Frames arbitrary byte chunks before parsing and enforces the untrusted
+/// record-size boundary even when GDB never emits a newline.
 #[derive(Debug)]
 pub struct MiFramer {
     buffer: BytesMut,

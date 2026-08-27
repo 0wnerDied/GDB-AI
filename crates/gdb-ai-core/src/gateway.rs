@@ -111,6 +111,8 @@ impl Gateway {
             .as_ref()
             .map(|entry| entry.handle.profile())
             .unwrap_or(self.config.security.default_profile);
+        // 2026-08-28: Selecting a profile must not grant raw authority; the
+        // transport has to authenticate and explicitly mark an admin caller.
         if profile == Profile::RawAdmin && !caller.admin {
             return Err(Error::new(
                 ErrorCode::PolicyDenied,
@@ -119,6 +121,9 @@ impl Gateway {
         }
         profile.authorize(effect)?;
 
+        // 2026-08-28: A continue-and-wait request holds the mutation guard.
+        // Keep cancellation and interactive I/O outside it while the target
+        // runs.
         let out_of_band = request.method.starts_with("inferior_io.")
             || (request.method == "execution.control"
                 && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"));

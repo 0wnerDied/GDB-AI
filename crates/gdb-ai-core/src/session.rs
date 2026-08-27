@@ -335,6 +335,8 @@ impl SessionHandle {
     }
 }
 
+// 2026-08-28: Compare waits with pre-command state; otherwise an existing
+// stop or snapshot can satisfy a new resume request before a new async event.
 fn wait_satisfied(state: &SessionState, until: WaitUntil, baseline: Option<&SessionState>) -> bool {
     let after_baseline = baseline.is_none_or(|baseline| state.event_seq > baseline.event_seq);
     match until {
@@ -408,6 +410,8 @@ enum WorkerRequest {
     },
 }
 
+// Owns both GDB input and reducer state. Callers cross the request channel so
+// only one MI command can be in flight and no other task can mutate state.
 struct SessionWorker {
     backend: GdbBackend,
     journal: Journal,
@@ -914,6 +918,8 @@ fn extract_string_list(record: &MiRecord, name: &str) -> BTreeSet<String> {
         .collect()
 }
 
+// 2026-08-28: Unsupported commands still return ^done; capability detection
+// must inspect command.exists instead of treating probe success as support.
 fn mi_command_exists(record: &MiRecord) -> bool {
     MiResult::find(record.results(), "command")
         .and_then(MiValue::results)

@@ -1,6 +1,26 @@
 Do not overengineer, anticipate nonexistent extreme scenarios, or add
 excessive fallback handling.
 
+# Code Comments and Bug-Fix Notes
+
+Comment non-obvious invariants, state transitions, concurrency ordering,
+trust boundaries, and security decisions. Explain why the code exists, not
+what each line does. Keep obvious code uncommented and update comments when
+the code changes.
+
+Every bug fix must include a concise adjacent source comment with its ISO
+date (`YYYY-MM-DD`). State the previous failure or root cause and the
+invariant preserved, for example:
+
+```rust
+// 2026-08-28: Keep interrupts outside the mutation lock so a pending wait
+// cannot block cancellation.
+```
+
+Put the comment at the shared root-cause fix, not at every caller. The dated
+comment supplements, but does not replace, regression tests and the commit
+message.
+
 # Mandatory Commit & Pull Request Style
 
 Use a subsystem prefix and imperative summary, for example

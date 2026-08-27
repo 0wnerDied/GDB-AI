@@ -238,6 +238,8 @@ impl Parser<'_> {
             return Ok(MiValue::ValueList(Vec::new()));
         }
 
+        // MI uses the first element's grammar to distinguish result lists
+        // from value lists. Preserving it keeps the AST lossless.
         if self.looks_like_result() {
             let mut results = Vec::new();
             loop {

@@ -184,6 +184,8 @@ async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
     let mut output = tokio::io::stdout();
 
     loop {
+        // 2026-08-28: EOF ends input, not pending work. Drain completed RPC
+        // responses so a final one-shot MCP request is not silently dropped.
         if !input_open && pending.is_empty() {
             break;
         }
@@ -247,6 +249,8 @@ async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
                 let sequence = sequence.clone();
                 let method = method.to_owned();
                 let task_key = key.clone();
+                // Requests may wait for a target stop; separate tasks let
+                // cancellation and inferior I/O reach the gateway meanwhile.
                 let handle = tokio::spawn(async move {
                     let response = dispatch_rpc(&gateway, &caller, &sequence, &method, params)
                         .await

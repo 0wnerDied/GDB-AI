@@ -66,6 +66,8 @@ pub struct ApiError {
 
 impl ApiResponse {
     pub fn success(request: &ApiRequest, state: Option<SessionState>, result: Value) -> Self {
+        // 2026-08-28: session.create has no request session ID, so derive it
+        // from returned state to keep the creation response routable.
         let session_id = request
             .session_id
             .clone()

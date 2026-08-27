@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+// 2026-08-28: Adjacent tagging supports newtype stream variants; internally
+// tagged serialization panicked before those records reached the journal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "record", content = "data", rename_all = "snake_case")]
 pub enum MiRecord {

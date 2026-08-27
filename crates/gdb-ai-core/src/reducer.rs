@@ -7,6 +7,8 @@ use crate::{
     },
 };
 
+/// The sole transition point for session state. Events arrive in journal
+/// order so replay applies the same revisions as a live session.
 #[derive(Debug)]
 pub struct StateReducer {
     state: SessionState,

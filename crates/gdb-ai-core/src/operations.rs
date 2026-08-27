@@ -645,6 +645,8 @@ impl Gateway {
         let on = |setting: &str| -> Result<MiCommand> {
             MiCommand::new("-gdb-set")?.bare(setting)?.bare("on")
         };
+        // Keep policy changes and evaluation in one worker transaction so no
+        // unrelated command can observe or weaken the temporary restrictions.
         let reply = entry
             .handle
             .transaction(
