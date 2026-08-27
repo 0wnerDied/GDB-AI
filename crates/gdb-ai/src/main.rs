@@ -44,6 +44,8 @@ enum Command {
     Serve {
         #[arg(long)]
         stdio: bool,
+        #[arg(long)]
+        raw_admin: bool,
     },
     Doctor,
     Replay {
@@ -75,8 +77,11 @@ async fn run() -> Result<(), AnyError> {
     let cli = Cli::parse();
     let config = Config::load(cli.config)?;
     match cli.command {
-        Command::Serve { stdio: true } => serve_stdio(config).await,
-        Command::Serve { stdio: false } => {
+        Command::Serve {
+            stdio: true,
+            raw_admin,
+        } => serve_stdio(config, raw_admin).await,
+        Command::Serve { stdio: false, .. } => {
             Err(io::Error::other("the vertical slice supports only `gdb-ai serve --stdio`").into())
         }
         Command::Doctor => doctor(config).await,
@@ -104,7 +109,7 @@ async fn run() -> Result<(), AnyError> {
                     "api_version": API_VERSION,
                     "mcp_protocol_version": MCP_VERSION,
                     "transports": ["stdio"],
-                    "tools": tool_names(),
+                    "tools": tool_names(false),
                 }))?
             );
             Ok(())
@@ -164,9 +169,12 @@ async fn doctor(config: Config) -> Result<(), AnyError> {
     Ok(())
 }
 
-async fn serve_stdio(config: Config) -> Result<(), AnyError> {
+async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
     let gateway = Arc::new(Gateway::new(config)?);
-    let mut caller = Caller::local("mcp-stdio");
+    let mut caller = Caller {
+        identity: "mcp-stdio".into(),
+        admin: raw_admin,
+    };
     let sequence = Arc::new(AtomicU64::new(1));
     let mut phase = Phase::New;
     let mut pending: HashMap<String, JoinHandle<()>> = HashMap::new();
@@ -354,7 +362,7 @@ async fn dispatch_rpc(
 ) -> Result<Value, RpcFault> {
     match method {
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": tools()})),
+        "tools/list" => Ok(json!({"tools": tools(caller.admin)})),
         "tools/call" => call_tool(gateway, caller, sequence, params).await,
         "resources/list" => list_resources(gateway, caller, sequence).await,
         "resources/templates/list" => Ok(resource_templates()),
@@ -462,6 +470,14 @@ fn map_tool(name: &str, arguments: Value, sequence: u64) -> Result<ApiRequest, R
             action => {
                 return Err(RpcFault::invalid(format!(
                     "unsupported I/O action {action}"
+                )));
+            }
+        },
+        "gdb_raw" => match take_required_string(&mut parameters, "action")?.as_str() {
+            "console" => "raw.console",
+            action => {
+                return Err(RpcFault::invalid(format!(
+                    "unsupported raw action {action}"
                 )));
             }
         },
@@ -630,8 +646,8 @@ fn canonical_request(
     }
 }
 
-fn tools() -> Vec<Value> {
-    vec![
+fn tools(include_raw: bool) -> Vec<Value> {
+    let mut tools = vec![
         tool(
             "gdb_session",
             "Create, launch, inspect, or close a local GDB session.",
@@ -650,6 +666,16 @@ fn tools() -> Vec<Value> {
                         ]),
                     ),
                     ("program", json!({"type": "string"})),
+                    (
+                        "profile",
+                        enum_schema(&[
+                            "offline_core",
+                            "live_observer",
+                            "debug_control",
+                            "lab_mutation",
+                            "raw_admin",
+                        ]),
+                    ),
                     (
                         "argv",
                         json!({"type": "array", "items": {"type": "string"}}),
@@ -843,7 +869,25 @@ fn tools() -> Vec<Value> {
             ),
             false,
         ),
-    ]
+    ];
+    if include_raw {
+        let mut raw = tool(
+            "gdb_raw",
+            "Run an audited console command and taint unmanaged GDB state.",
+            schema(
+                &["action", "session_id", "command"],
+                [
+                    ("action", enum_schema(&["console"])),
+                    ("command", json!({"type": "string"})),
+                    ("timeout_ms", json!({"type": "integer", "minimum": 1})),
+                ],
+            ),
+            false,
+        );
+        raw["annotations"]["destructiveHint"] = Value::Bool(true);
+        tools.push(raw);
+    }
+    tools
 }
 
 fn tool(name: &str, description: &str, input_schema: Value, read_only: bool) -> Value {
@@ -897,8 +941,8 @@ fn wait_schema() -> Value {
     })
 }
 
-fn tool_names() -> Vec<&'static str> {
-    vec![
+fn tool_names(include_raw: bool) -> Vec<&'static str> {
+    let mut names = vec![
         "gdb_session",
         "gdb_run",
         "gdb_breakpoints",
@@ -907,7 +951,11 @@ fn tool_names() -> Vec<&'static str> {
         "gdb_memory",
         "gdb_disassemble",
         "gdb_io",
-    ]
+    ];
+    if include_raw {
+        names.push("gdb_raw");
+    }
+    names
 }
 
 fn take_required_string(object: &mut Map<String, Value>, name: &str) -> Result<String, RpcFault> {
@@ -1047,6 +1095,8 @@ mod tests {
         assert_eq!(request.expected_revision, Some(7));
         assert_eq!(request.parameters["action"], "continue");
         assert!(request.parameters.get("session_id").is_none());
+        assert!(!tool_names(false).contains(&"gdb_raw"));
+        assert!(tool_names(true).contains(&"gdb_raw"));
     }
 
     #[tokio::test]
@@ -1065,7 +1115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_tool_creates_and_closes_real_session() {
+    async fn mcp_tool_gates_and_audits_raw_session() {
         if std::process::Command::new("gdb")
             .arg("--version")
             .output()
@@ -1085,13 +1135,19 @@ mod tests {
             ..Config::default()
         };
         let gateway = Gateway::new(config).unwrap();
-        let caller = Caller::local("mcp-test");
+        let caller = Caller {
+            identity: "mcp-test".into(),
+            admin: true,
+        };
         let sequence = AtomicU64::new(1);
         let created = call_tool(
             &gateway,
             &caller,
             &sequence,
-            json!({"name": "gdb_session", "arguments": {"action": "create"}}),
+            json!({
+                "name": "gdb_session",
+                "arguments": {"action": "create", "profile": "raw_admin"}
+            }),
         )
         .await
         .unwrap();
@@ -1099,6 +1155,25 @@ mod tests {
         let response = &created["structuredContent"];
         let session_id = response["session_id"].as_str().unwrap();
         let revision = response["revision"].as_u64().unwrap();
+        let raw = call_tool(
+            &gateway,
+            &caller,
+            &sequence,
+            json!({
+                "name": "gdb_raw",
+                "arguments": {
+                    "action": "console",
+                    "session_id": session_id,
+                    "expected_revision": revision,
+                    "command": "show language"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(raw["isError"], false);
+        assert_eq!(raw["structuredContent"]["state"]["consistency"], "TAINTED");
+        let revision = raw["structuredContent"]["revision"].as_u64().unwrap();
         let closed = call_tool(
             &gateway,
             &caller,

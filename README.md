@@ -81,6 +81,13 @@ The stdio server supports MCP protocol versions `2025-11-25`,
 | `gdb_disassemble` | Read bounded disassembly |
 | `gdb_io` | Read and write the separate inferior PTY |
 
+Raw commands are absent by default. A local operator must start the process
+with `serve --stdio --raw-admin`, and the caller must create a session with
+`profile: "raw_admin"`, before the additional `gdb_raw` tool is registered.
+Dangerous CLI classes such as shell, Python, source, maintenance, and monitor
+remain denied; accepted raw commands taint consistency instead of claiming a
+complete reconciliation.
+
 Large results contain a `gdbai://artifact/sha256:...` URI. MCP clients can
 retrieve it through `resources/read`. Session status is available at
 `gdbai://session/<session-id>/status`.
