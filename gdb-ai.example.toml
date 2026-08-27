@@ -1,0 +1,35 @@
+[server]
+max_sessions = 8
+command_timeout_ms = 5000
+wait_timeout_ms = 5000
+
+[gdb]
+path = "/usr/bin/gdb"
+preferred_mi = "mi4"
+fallback_mi = "mi3"
+
+[limits]
+mi_record_bytes = 8388608
+mi_depth = 128
+tool_response_bytes = 262144
+inline_memory_bytes = 4096
+memory_read_bytes = 16777216
+inferior_output_ring_bytes = 8388608
+console_output_ring_bytes = 2097152
+stack_frames = 64
+value_children = 1000
+value_depth = 8
+session_artifact_bytes = 536870912
+
+[artifacts]
+path = ".gdb-ai/artifacts"
+
+[persistence]
+sqlite = ".gdb-ai/gdb-ai.sqlite"
+sessions = ".gdb-ai/sessions"
+
+[security]
+default_profile = "debug_control"
+workspace_roots = ["."]
+remote_allowlist = []
+attach_allowlist = []
