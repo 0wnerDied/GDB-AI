@@ -47,7 +47,8 @@ The product must ensure that:
 7. resuming a target invalidates old frames, values, and current snapshots;
 8. raw GDB commands remain a controlled escape hatch, not the primary API;
 9. every state-changing action is authorized and audited; and
-10. replaying the same MI transcript reconstructs the same controller state.
+10. replaying the same complete event journal reconstructs the same controller
+    state; MI output alone is only one journal input.
 
 Non-goals:
 
@@ -62,7 +63,7 @@ Non-goals:
 
 ## 2. Supported scope
 
-The committed support matrix is:
+The North-star support matrix is:
 
 | Dimension | Version 1 support |
 | --- | --- |
@@ -280,8 +281,14 @@ CORE, UNKNOWN
 Consistency:
 
 ```text
-CLEAN, DIRTY, RECONCILING, LOST
+CLEAN, MANAGED_DIRTY, RECONCILING, TAINTED, LOST
 ```
+
+`MANAGED_DIRTY` means a known operation changed controller-managed GDB state
+and a targeted reconciliation is possible. `TAINTED` means an unknown raw
+operation may have changed state outside the managed surface; finite queries
+cannot prove complete GDB equivalence. A tainted session exposes the bounded
+state that was re-observed but never claims full reconciliation.
 
 Every session exposes `event_seq`, `revision`, `execution_epoch`, and an
 optional `stop_id`. The event sequence counts received/generated events.
@@ -440,6 +447,12 @@ Capabilities are probed, not guessed from the version string, with
 capabilities, and safe read-only probes. Target capabilities are refreshed
 after attach, connect, target change, and reconnect. Results state backend,
 MI/GDB versions, supported features, and explicit limitations.
+
+Capabilities are not booleans. Every target-scoped capability reports one of
+`supported`, `unsupported`, `conditional`, `limited`, `unknown`, or
+`temporarily_unavailable`, plus scope, constraints, source, and the revision
+at which it was checked. In particular, target observation may be volatile or
+target-defined rather than side-effect-free.
 
 ## 11. Scheduler and operations
 
@@ -660,7 +673,7 @@ Profiles:
 | --- | --- |
 | `minimal` | reason, thread, PC, function, source |
 | `brief` | minimal + 3 frames + PC/SP/FP + 8 nearby instructions |
-| `standard` | brief + 16 frames + frame args/locals + mapping summary |
+| `standard` | brief + 8 frames + current-frame simple args/locals |
 | `deep` | explicitly bounded registers, variables, stack, and memory |
 
 Snapshots include snapshot/stop/revision/profile, normalized reason and
@@ -787,10 +800,11 @@ maintenance, monitor
 
 `monitor` is available only through target-specific allowlisted providers.
 
-Before any raw command, set consistency to `DIRTY`. On completion, reconcile
-and return both bounded output and state/revision changes. The consistency path
-is `DIRTY -> RECONCILING -> CLEAN|LOST`; a raw result is never merely an
-unstructured text blob.
+Before a known managed raw command, set consistency to `MANAGED_DIRTY`; an
+unknown raw command sets `TAINTED`. On completion, reconcile the declared
+managed surface and return bounded output plus state/revision changes. A
+managed path may reach `CLEAN`; a tainted path stays `TAINTED` unless the
+session is recreated. A raw result is never merely an unstructured text blob.
 
 ## 26. Reconciliation
 
@@ -811,9 +825,10 @@ running/stopped/exited status, selected context, all breakpoints, shared
 libraries, and target features, then verifies whether the current stop ID
 remains valid.
 
-Outcomes are `CLEAN`, `CLEAN_WITH_WARNINGS`, or `LOST`. In `LOST`, only status,
-transcript/artifact reads, explicit recovery, and close are allowed. Ordinary
-mutations are rejected.
+Managed outcomes are `CLEAN`, `CLEAN_WITH_WARNINGS`, or `LOST`. Unknown raw
+effects remain `TAINTED` even when core thread/breakpoint/target facts were
+re-observed. In `LOST`, only status, transcript/artifact reads, explicit
+recovery, and close are allowed. Ordinary mutations are rejected.
 
 ## 27. Stable errors
 
@@ -935,7 +950,12 @@ gdb-ai replay session.jsonl
 must validate parsing, rebuild deterministic reducer state, compare reducer
 versions, rebuild snapshots, reproduce mismatches, and support protocol
 migration tests. Replay never executes an inferior and never claims to restore
-a process.
+a process. A complete deterministic replay journal includes MI input/output,
+PTY events, provider results, API requests, policy decisions,
+deadlines/cancellation, ID allocation (or a deterministic seed), and state
+transitions. An MI-only transcript can validate parsing and MI-derived
+reduction, but cannot recreate external `/proc`, provider, time,
+cancellation, or policy inputs.
 
 On worker/GDB death, backend becomes `DEAD`, session becomes `FAILED`, and the
 service retains configuration, transcript, last known state, snapshots,
@@ -1267,7 +1287,8 @@ and scope.
 7. Every mutation requires a write lease, revision, and policy decision.
 8. Every response has a size bound.
 9. Every large payload is returned through an artifact.
-10. Every raw command marks consistency `DIRTY` before execution.
+10. Every raw command marks consistency `MANAGED_DIRTY` or `TAINTED` before
+    execution.
 11. Every raw command is followed by reconciliation.
 12. Timeout never silently means the target terminated.
 13. Every partial result is explicitly labelled.
@@ -1277,7 +1298,8 @@ and scope.
 17. Every filesystem path is canonicalized and workspace-policy checked.
 18. GDB and inferior output are never merged into one stream.
 19. Unsupported backend capability fails explicitly; it never fakes success.
-20. The same transcript deterministically produces the same reducer state.
+20. The same complete event journal deterministically produces the same
+    reducer state; an MI-only transcript makes no claim about external inputs.
 
 ## 45. Acceptance criteria
 
@@ -1369,3 +1391,234 @@ Implementation order is dependency-driven:
 
 No phase may weaken the invariants in section 44. Capability reporting must
 remain truthful while later phases are incomplete.
+
+## 48. Language ownership
+
+Rust is the primary product language, not the only repository language. The
+ownership boundary is fixed:
+
+| Component | Language | Authority |
+| --- | --- | --- |
+| Core service | Rust | Production control plane |
+| GDB/MI parser | Rust | Streaming trust boundary |
+| Session worker and state machine | Rust | Sole debugging-state owner |
+| MCP, JSON-RPC, and HTTP | Rust | External protocol boundary |
+| Policy, audit, artifacts, persistence | Rust | Security and durable evidence |
+| Optional GDB extension | Python 3 | Small trusted MI/API bridge only |
+| Python SDK | Python | Agent/research integration |
+| TypeScript SDK | TypeScript | Node.js integration |
+| Benchmarks and experiment analysis | Python | Evaluation and reports |
+| Debug targets | C, C++, Rust | Reproducible debugging scenarios |
+| Build/deployment helpers | Shell or Python | Non-authoritative automation |
+
+Expected mature code distribution is approximately 75-85% Rust, 10-15%
+Python, 3-5% TypeScript, and 3-5% C/C++ target fixtures. Percentages are a
+forecast, not a quota.
+
+The non-replaceable rule is:
+
+> MI parsing, session ownership, the reducer/state machine, scheduler, policy
+> engine, and server are implemented in Rust.
+
+The core is an external controller over GDB/MI pipes and an inferior PTY. It
+does not link private GDB libraries or require C++ merely to be close to GDB.
+Rust owns subprocess lifecycle, asynchronous streams, timeouts/cancellation,
+protocol parsing, state transitions, serialization, isolation controls, and
+long-running memory bounds.
+
+The preferred Rust stack remains Tokio, serde/serde_json, bytes, thiserror,
+tracing, axum/tower, schemars plus JSON Schema validation, ULID, SHA-256,
+base64, SQLite, and Unix PTY/process primitives. Property tests, snapshots,
+temporary isolated filesystems, and cargo-fuzz/libFuzzer cover parser and
+reducer boundaries. The MI parser is handwritten and streaming; a parser
+generator is not required for this grammar.
+
+The optional Python extension may query narrow GDB Python APIs, aggregate data
+that native MI cannot express, return dictionaries/lists as MI results, and
+emit private notifications. It cannot own MCP, authoritative session state,
+persistence, authentication, large asynchronous work, or background access to
+GDB objects. All GDB API calls execute on GDB's main/event thread; cross-thread
+work returns through mechanisms such as `gdb.post_event`.
+
+Python SDKs never bypass the canonical API to send arbitrary MI. Providers
+never bypass the scheduler. MCP adapters contain no GDB-specific logic. The
+Python extension is deferred until a measured native-MI gap blocks Agent
+outcomes.
+
+## 49. Document roles and implementation layering
+
+Sections 1-47 are the North-star architecture. They describe final boundaries,
+invariants, security posture, and extension direction. They are not one flat
+version-1 backlog.
+
+Delivery is split into four specifications:
+
+1. **North-star Architecture** (this document): final boundaries and
+   invariants.
+2. **Core Vertical Slice** (section 50): the first independently useful
+   implementation.
+3. **Agent Semantics** (section 51): hypothesis, experiment, evidence, probe,
+   tracking, and observation-budget abstractions.
+4. **Evaluation Protocol** (section 52): measures whether structured dynamic
+   debugging improves Agent outcomes.
+
+Complexity categories:
+
+```text
+Core correctness       required before any useful release
+Production extension   implemented only for a concrete deployment need
+Future provider        retained as a boundary, not prebuilt as scaffolding
+```
+
+Core correctness includes formal MI framing/parsing, token correlation,
+result/async separation, PTY separation, stop IDs, stale-handle invalidation,
+timeouts/interrupts, bounded output, and controlled raw access. These are not
+removed in the name of an MVP.
+
+Production extensions include physical gateway/supervisor/worker process
+separation, multi-user leases, persistent operation routing, namespace/cgroup
+orchestration, HTTP, and broad observability. Future providers include kernel,
+LLDB, vendor JTAG, and a public plugin SDK.
+
+The first implementation is one Rust process with one stdio adapter and one
+session actor per GDB child. Logical module boundaries remain, but internal RPC
+and extra processes are deferred until isolation or scaling data requires
+them. Empty crates and interfaces with one speculative implementation are not
+created.
+
+## 50. Core vertical slice
+
+The first shippable slice supports Linux x86-64, local executable launch,
+all-stop operation, one process, one transport, and one GDB process per
+session. It contains exactly:
+
+```text
+session create / launch / status / close
+software breakpoint create / delete / list
+continue / interrupt / wait
+minimal stopped event
+bounded stack / locals / registers / evaluate
+bounded memory read and disassembly
+inferior PTY read / write
+stop_id and stale-context enforcement
+bounded structured responses and evidence references
+controlled raw console escape hatch
+complete local event journal and deterministic reducer replay
+```
+
+Required implementation internals:
+
+- MI4 preferred with a fresh-process MI3 fallback;
+- a bounded lossless byte parser and arbitrary chunk framing;
+- one command in flight, controller-owned tokens, and async-driven target
+  transitions;
+- a Tokio session actor as the only state and GDB-command owner;
+- GDB control pipes separated from the inferior PTY;
+- finite command/wait deadlines and explicit interrupt;
+- an immediate minimal stop record; and
+- on-demand, budgeted enrichment.
+
+The vertical slice intentionally excludes AArch64, attach/core/remote,
+multiple-inferior semantics beyond tolerant modelling, non-stop, HTTP,
+TypeScript SDK implementation, production SQLite routing, multi-user leases,
+physical supervisor workers, namespace/cgroup orchestration, kernel providers,
+public plugin APIs, and a mandatory Python extension. North-star schemas retain
+room for these without claiming support.
+
+Snapshot policy is two-stage:
+
+```text
+*stopped
+  -> immediate minimal event: reason, inferior/thread, PC, frame 0,
+     source location, stop_id, enrichment availability
+  -> explicit or policy-driven enrichment under an observation budget
+```
+
+`standard` enrichment defaults to eight frames, simple current-frame locals,
+semantic PC/SP/FP registers, and a small PC disassembly window. Crash triage
+adds signal, fault address/instruction, relevant mapping, and a bounded stack.
+Probe capture reads only declared fields. Deep inspection is always explicit.
+
+## 51. Agent-oriented debugging semantics
+
+The control plane alone can become a good debugger daemon without improving
+Agent reasoning. The `/ai` layer therefore adds typed experiment semantics
+after the vertical slice is stable:
+
+- **Probe:** location/condition plus an explicit bounded capture plan, hit
+  limit, and stop/continue policy.
+- **Hypothesis check:** a falsifiable runtime claim, required observations,
+  success/failure predicate, and linked evidence.
+- **Experiment:** setup, controlled execution, observation budget, result, and
+  cleanup as one auditable operation.
+- **Tracked state:** only values/memory/register roles relevant to the current
+  question, with bounded history and diffs.
+- **Observation budget:** maximum calls, bytes, frames, values, instructions,
+  wall time, and Agent-context bytes.
+- **Evidence link:** every conclusion references concrete stop, expression,
+  memory, transcript, or artifact data.
+
+A probe can express, without a long sequence of low-level calls:
+
+```json
+{
+  "location": {"function": "parse_packet"},
+  "condition": "length > 4096",
+  "capture": [
+    {"expression": "length"},
+    {"expression": "request->type"},
+    {"stack": {"limit": 4}}
+  ],
+  "max_hits": 20,
+  "stop_policy": "on_condition"
+}
+```
+
+Semantic operations compile to ordinary scheduler commands and reducer events;
+they never introduce a second source of state truth.
+
+## 52. Agent-effect evaluation
+
+Correctness and security gates prove that the service works, not that it helps
+an Agent. Evaluation compares:
+
+```text
+A. shell plus CLI GDB
+B. persistent raw GDB
+C. structured gdb/ai control plane
+D. structured gdb/ai plus semantic probes/experiments
+```
+
+Tasks are labelled `static-solvable`, `runtime-helpful`, or
+`runtime-required`. Report at least:
+
+- final task resolution rate;
+- root-cause localization rate;
+- turns to first useful breakpoint;
+- turns to first useful runtime evidence;
+- proportion of debugger calls that do not test a relevant hypothesis;
+- rate at which runtime evidence corrects an incorrect hypothesis;
+- tokens consumed before root-cause localization;
+- debugger calls per successful task;
+- raw-command usage rate; and
+- wall-clock time and target resumes per successful task.
+
+Correctness, boundedness, security, replay, and chaos tests remain release
+gates. Agent-effect metrics decide whether a semantic abstraction belongs in
+the product; they are not replaced by architecture completeness.
+
+## 53. Corrected guarantees
+
+The following wording supersedes any broader interpretation elsewhere in this
+document:
+
+- Determinism applies to the complete event journal, not MI output alone.
+- Raw reconciliation covers the declared managed state surface. Unknown raw
+  commands produce `TAINTED`; they cannot prove complete GDB equivalence.
+- Capabilities are scoped status records with constraints, not global booleans.
+- `READ` is split conceptually into control-plane reads, ordinary target
+  observations, volatile target reads, and target-defined effects. Providers
+  classify MMIO and similar ranges conservatively.
+- Snapshot enrichment is minimal-first and budgeted on demand.
+- The North-star matrix is not a claim that the vertical slice already
+  supports every target, transport, architecture, SDK, or isolation feature.
