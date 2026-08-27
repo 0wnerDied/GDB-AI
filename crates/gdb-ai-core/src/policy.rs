@@ -65,6 +65,7 @@ pub fn effect_for_method(method: &str) -> Option<Effect> {
                 || method == "disassembly.read"
                 || method == "inferior_io.read"
                 || method == "tracking.list"
+                || method == "breakpoint.list"
                 || method == "artifact.get"
                 || method == "events.wait" =>
         {

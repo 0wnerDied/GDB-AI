@@ -1,13 +1,18 @@
 pub mod artifact;
+pub mod backend;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod gateway;
 pub mod journal;
 pub mod normalize;
+mod operations;
 pub mod persistence;
 pub mod policy;
 pub mod protocol;
 pub mod reducer;
 pub mod replay;
+pub mod ring;
+pub mod session;
 
 pub use error::{Error, ErrorCode, Result};

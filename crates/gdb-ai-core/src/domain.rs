@@ -185,8 +185,9 @@ pub enum InferiorStatus {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Consistency {
     Clean,
-    Dirty,
+    ManagedDirty,
     Reconciling,
+    Tainted,
     Lost,
 }
 
@@ -320,6 +321,8 @@ impl SessionState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DomainEvent {
+    SessionClosing,
+    SessionClosed,
     BackendStarted,
     BackendExited {
         status: Option<i32>,
@@ -383,6 +386,9 @@ pub enum DomainEvent {
         stop_id: StopId,
     },
     ConsistencyDirty {
+        reason: String,
+    },
+    ConsistencyTainted {
         reason: String,
     },
     ConsistencyRestored {

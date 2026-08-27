@@ -46,6 +46,15 @@ impl StateReducer {
 
     fn reduce(&mut self, event: &DomainEvent) -> bool {
         match event {
+            DomainEvent::SessionClosing => {
+                self.state.lifecycle = SessionLifecycle::Closing;
+                true
+            }
+            DomainEvent::SessionClosed => {
+                self.state.lifecycle = SessionLifecycle::Closed;
+                self.state.backend = BackendHealth::Dead;
+                true
+            }
             DomainEvent::BackendStarted => {
                 self.state.lifecycle = SessionLifecycle::Ready;
                 self.state.backend = BackendHealth::Healthy;
@@ -60,10 +69,12 @@ impl StateReducer {
                 let seq = self.state.event_seq;
                 let inferior = self.ensure_inferior(backend_id, seq);
                 inferior.pid = *pid;
-                if inferior.status == InferiorStatus::Empty {
+                if pid.is_some() && inferior.status == InferiorStatus::Empty {
                     inferior.status = InferiorStatus::Connecting;
                 }
-                self.state.lifecycle = SessionLifecycle::Active;
+                if pid.is_some() {
+                    self.state.lifecycle = SessionLifecycle::Active;
+                }
                 true
             }
             DomainEvent::InferiorRemoved { backend_id } => {
@@ -265,7 +276,12 @@ impl StateReducer {
             }
             DomainEvent::SnapshotReady { .. } | DomainEvent::SnapshotFailed { .. } => false,
             DomainEvent::ConsistencyDirty { reason } => {
-                self.state.consistency = Consistency::Dirty;
+                self.state.consistency = Consistency::ManagedDirty;
+                self.state.limitations.push(reason.clone());
+                true
+            }
+            DomainEvent::ConsistencyTainted { reason } => {
+                self.state.consistency = Consistency::Tainted;
                 self.state.limitations.push(reason.clone());
                 true
             }
@@ -286,7 +302,7 @@ impl StateReducer {
                 true
             }
             DomainEvent::UnknownBackendEvent { class } => {
-                self.state.consistency = Consistency::Dirty;
+                self.state.consistency = Consistency::Tainted;
                 self.state
                     .limitations
                     .push(format!("unknown backend event: {class}"));

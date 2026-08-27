@@ -66,10 +66,14 @@ pub struct ApiError {
 
 impl ApiResponse {
     pub fn success(request: &ApiRequest, state: Option<SessionState>, result: Value) -> Self {
+        let session_id = request
+            .session_id
+            .clone()
+            .or_else(|| state.as_ref().map(|state| state.session_id.0.clone()));
         Self {
             api_version: API_VERSION,
             request_id: request.request_id.clone(),
-            session_id: request.session_id.clone(),
+            session_id,
             revision: state.as_ref().map(|state| state.revision),
             state,
             result: Some(result),

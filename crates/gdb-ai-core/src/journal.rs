@@ -56,6 +56,27 @@ impl Journal {
         )
     }
 
+    pub fn append_gdb_stderr(&mut self, bytes: &[u8]) -> Result<u64> {
+        self.append(
+            "gdb.stderr",
+            serde_json::json!({ "raw_base64": BASE64.encode(bytes) }),
+        )
+    }
+
+    pub fn append_inferior_output(&mut self, bytes: &[u8]) -> Result<u64> {
+        self.append(
+            "inferior.output",
+            serde_json::json!({ "raw_base64": BASE64.encode(bytes) }),
+        )
+    }
+
+    pub fn append_inferior_input(&mut self, bytes: &[u8]) -> Result<u64> {
+        self.append(
+            "inferior.input",
+            serde_json::json!({ "raw_base64": BASE64.encode(bytes) }),
+        )
+    }
+
     pub fn append_domain(&mut self, event: DomainEvent) -> Result<JournaledEvent> {
         let data = serde_json::to_value(&event)?;
         let seq = self.append("normalized.event", data)?;
