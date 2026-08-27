@@ -1,0 +1,27 @@
+[package]
+name = "gdb-ai-core"
+description = "Stateful GDB/MI session control plane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+gdb-ai-mi = { path = "../gdb-ai-mi" }
+libc.workspace = true
+nix.workspace = true
+rusqlite.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

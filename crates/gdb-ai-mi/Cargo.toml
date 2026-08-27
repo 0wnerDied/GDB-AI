@@ -1,0 +1,12 @@
+[package]
+name = "gdb-ai-mi"
+description = "Bounded, lossless GDB/MI parser and encoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes.workspace = true
+serde.workspace = true
+thiserror.workspace = true
