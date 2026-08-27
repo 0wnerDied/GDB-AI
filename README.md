@@ -1,6 +1,6 @@
-# gdb/ai
+# GDB/MI
 
-gdb/ai is a stateful, agent-oriented control plane that runs GDB through its
+GDB/MI is a stateful, agent-oriented control plane that runs GDB through its
 machine interface. It keeps GDB control traffic separate from inferior I/O,
 turns asynchronous MI records into explicit state, and exposes bounded
 semantic operations over MCP and canonical JSON-RPC.
@@ -132,7 +132,7 @@ directory. Rebuild controller state without re-executing the inferior:
 gdb-ai replay /path/to/journal.jsonl --session-id sess_replay
 ```
 
-Replay reconstructs gdb/ai controller state. It does not restore a live
+Replay reconstructs GDB/MI controller state. It does not restore a live
 inferior.
 
 ## Embedding in binutils-gdb
@@ -145,9 +145,9 @@ git submodule add <gdb-ai-repository-url> gdb-ai
 cargo build --manifest-path gdb-ai/Cargo.toml --release
 ```
 
-No binutils-gdb source modification is required; gdb/ai controls the built or
+No binutils-gdb source modification is required; GDB/MI controls the built or
 installed `gdb` executable through MI.
 
 ## License
 
-GPL-3.0-or-later.
+[GPL-3.0-or-later](LICENSE).

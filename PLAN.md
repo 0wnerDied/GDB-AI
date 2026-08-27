@@ -1,8 +1,8 @@
-# gdb/ai Implementation Plan and Normative Specification
+# GDB/MI Implementation Plan and Normative Specification
 
 Status: accepted design, implementation pending
 
-This document records the complete project requested for `gdb/ai`. It is the
+This document records the complete project requested for `GDB/MI`. It is the
 normative implementation checklist: an item may be deferred only when the
 deviation is documented here with its reason, user-visible limitation, and an
 upgrade trigger. A feature must not be reported as supported until its tests
@@ -10,7 +10,7 @@ and capability reporting agree.
 
 ## 1. Product definition
 
-`gdb/ai` is a stateful debugging control plane for autonomous agents, running
+`GDB/MI` is a stateful debugging control plane for autonomous agents, running
 on top of GDB. It does not replace GDB and does not expose GDB/MI as the normal
 agent interface. It turns GDB asynchronous events, implicit context, inferior
 I/O, lifecycle, and safety policy into:
@@ -28,7 +28,7 @@ foundation.
 Canonical names:
 
 ```text
-project:             gdb/ai
+project:             GDB/MI
 repository:          gdb-ai
 executable:          gdb-ai
 protocol namespace:  gdb.ai/v1
@@ -76,7 +76,7 @@ The North-star support matrix is:
 | Binaries | ELF, PIE, and shared libraries |
 | Transports | MCP stdio, MCP Streamable HTTP, JSON-RPC, Python and TypeScript SDKs |
 | GDB/MI | full MI4, compatible MI3 |
-| Session | one independent GDB process per gdb/ai session |
+| Session | one independent GDB process per GDB/MI session |
 | Concurrency | one writer, multiple observers |
 
 Compatibility levels:
@@ -233,7 +233,7 @@ BreakpointLocation, ValueObject, StopSnapshot, TrackedExpression,
 TrackedMemoryRange, Artifact, Operation, Event, PolicyDecision
 ```
 
-Public identifiers are allocated by gdb/ai, generation-safe, and do not expose
+Public identifiers are allocated by GDB/MI, generation-safe, and do not expose
 temporary GDB numbers as stable IDs:
 
 ```text
@@ -499,7 +499,7 @@ Local launches use an independent PTY:
 ```text
 GDB stdin/stdout/stderr       MI pipes
 inferior stdin/out/err        PTY slave
-gdb/ai                        PTY master
+GDB/MI                        PTY master
 ```
 
 The worker binds it with `-inferior-tty-set`. Every output record names its
@@ -1350,7 +1350,7 @@ state or security foundation.
 
 LLDB's MCP session URIs, create/list/close operations, and command
 serialization are useful precedents. Its command-interpreter text model and
-separate inferior output are not sufficient here. gdb/ai keeps persistent
+separate inferior output are not sufficient here. GDB/MI keeps persistent
 sessions/resources while placing typed semantic tools, independent PTY I/O,
 and event reduction in the core.
 
@@ -1585,8 +1585,8 @@ an Agent. Evaluation compares:
 ```text
 A. shell plus CLI GDB
 B. persistent raw GDB
-C. structured gdb/ai control plane
-D. structured gdb/ai plus semantic probes/experiments
+C. structured GDB/MI control plane
+D. structured GDB/MI plus semantic probes/experiments
 ```
 
 Tasks are labelled `static-solvable`, `runtime-helpful`, or
