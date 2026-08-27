@@ -235,6 +235,64 @@ async fn local_debugging_vertical_slice() {
             .await,
     );
 
+    let resume = gateway.dispatch(
+        request(
+            "resume-to-input",
+            Some(&session_id),
+            "execution.control",
+            continued.revision,
+            json!({
+                "action": "continue",
+                "stop_id": second_stop,
+                "wait": {"until": "snapshot", "timeout_ms": 5000}
+            }),
+        ),
+        &caller,
+    );
+    let interrupt = async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        gateway
+            .dispatch(
+                request(
+                    "interrupt",
+                    Some(&session_id),
+                    "execution.control",
+                    None,
+                    json!({
+                        "action": "interrupt",
+                        "accept_latest_revision": true,
+                        "wait": {"until": "snapshot", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await
+    };
+    let (resumed, interrupted) = tokio::join!(resume, interrupt);
+    successful(resumed);
+    let interrupted = successful(interrupted);
+
+    let output = successful(
+        gateway
+            .dispatch(
+                request(
+                    "output",
+                    Some(&session_id),
+                    "inferior_io.read",
+                    None,
+                    json!({"stream": "pty", "after_offset": 0, "max_bytes": 4096}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(
+        output.result.unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("marker reached")
+    );
+
     successful(
         gateway
             .dispatch(
@@ -242,7 +300,7 @@ async fn local_debugging_vertical_slice() {
                     "close",
                     Some(&session_id),
                     "session.close",
-                    continued.state.as_ref().map(|state| state.revision),
+                    interrupted.revision,
                     json!({}),
                 ),
                 &caller,

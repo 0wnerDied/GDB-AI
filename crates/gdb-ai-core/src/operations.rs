@@ -106,6 +106,7 @@ impl Gateway {
         let entry = Arc::new(SessionEntry {
             handle,
             owner: caller.identity.clone(),
+            mutation: tokio::sync::Mutex::new(()),
         });
         self.sessions
             .write()

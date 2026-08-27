@@ -11,5 +11,6 @@ __attribute__((noinline)) static void marker(void)
 int main(void)
 {
   marker();
+  (void) getchar();
   return global_value == 42 ? 0 : 1;
 }

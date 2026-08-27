@@ -30,6 +30,7 @@ impl Caller {
 pub(crate) struct SessionEntry {
     pub handle: SessionHandle,
     pub owner: String,
+    pub mutation: Mutex<()>,
 }
 
 pub struct Gateway {
@@ -118,6 +119,17 @@ impl Gateway {
         }
         profile.authorize(effect)?;
 
+        let out_of_band = request.method.starts_with("inferior_io.")
+            || (request.method == "execution.control"
+                && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"));
+        let _mutation_guard = if effect != Effect::Read && !out_of_band {
+            match &entry {
+                Some(entry) => Some(entry.mutation.lock().await),
+                None => None,
+            }
+        } else {
+            None
+        };
         if let Some(entry) = &entry {
             let state = entry.handle.state();
             if matches!(state.consistency, crate::domain::Consistency::Lost)
@@ -150,7 +162,17 @@ impl Gateway {
         )?;
 
         let result = self.execute_method(request, caller).await;
-        if let Some(entry) = self.entry_for_request(request).await {
+        let completed_entry = match (&entry, result.as_ref()) {
+            (Some(entry), _) => Some(entry.clone()),
+            (None, Ok(result)) if request.method == "session.create" => {
+                match result.get("session_id").and_then(Value::as_str) {
+                    Some(id) => self.sessions.read().await.get(id).cloned(),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(entry) = &completed_entry {
             let outcome = if result.is_ok() {
                 "completed"
             } else {
@@ -168,15 +190,7 @@ impl Gateway {
             )?;
         }
         let result = result?;
-        let entry = if request.method == "session.create" {
-            match result.get("session_id").and_then(Value::as_str) {
-                Some(id) => self.sessions.read().await.get(id).cloned(),
-                None => None,
-            }
-        } else {
-            self.entry_for_request(request).await
-        };
-        let state = entry.map(|entry| entry.handle.state());
+        let state = completed_entry.map(|entry| entry.handle.state());
         Ok((state, result))
     }
 
@@ -238,6 +252,13 @@ impl Gateway {
             .get(session_id)
             .cloned()
             .ok_or_else(|| Error::new(ErrorCode::NotFound, "session not found"))
+    }
+
+    pub async fn shutdown(&self) {
+        let sessions = std::mem::take(&mut *self.sessions.write().await);
+        for entry in sessions.into_values() {
+            let _ = entry.handle.close().await;
+        }
     }
 
     async fn entry_for_request(&self, request: &ApiRequest) -> Option<Arc<SessionEntry>> {
