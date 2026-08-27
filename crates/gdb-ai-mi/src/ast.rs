@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "record", rename_all = "snake_case")]
+#[serde(tag = "record", content = "data", rename_all = "snake_case")]
 pub enum MiRecord {
     Result {
         token: Option<u64>,
@@ -112,5 +112,44 @@ impl MiResult {
 
     pub fn find_str<'a>(results: &'a [Self], name: &str) -> Option<&'a str> {
         Self::find(results, name)?.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_record_kind_round_trips_through_json() {
+        let records = [
+            MiRecord::Result {
+                token: Some(1),
+                class: "done".into(),
+                results: vec![],
+            },
+            MiRecord::ExecAsync {
+                token: None,
+                class: "stopped".into(),
+                results: vec![],
+            },
+            MiRecord::StatusAsync {
+                token: None,
+                class: "download".into(),
+                results: vec![],
+            },
+            MiRecord::NotifyAsync {
+                token: None,
+                class: "thread-created".into(),
+                results: vec![],
+            },
+            MiRecord::ConsoleStream(b"console".to_vec()),
+            MiRecord::TargetStream(vec![0xff, 0]),
+            MiRecord::LogStream(b"log".to_vec()),
+            MiRecord::Prompt,
+        ];
+        for record in records {
+            let value = serde_json::to_value(&record).unwrap();
+            assert_eq!(serde_json::from_value::<MiRecord>(value).unwrap(), record);
+        }
     }
 }
