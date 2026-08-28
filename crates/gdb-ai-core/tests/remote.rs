@@ -8,8 +8,13 @@ use gdb_ai_core::{
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
+use tokio::sync::Mutex;
 
 mod support;
+
+// 2026-08-29: The tests release their ephemeral port before gdbserver binds
+// it, so parallel fixtures could select the same port and strand one client.
+static GDBSERVER_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn request(
     id: &str,
@@ -34,6 +39,7 @@ async fn connects_to_allowlisted_gdbserver() {
     if !support::require_commands(&["gdbserver", "gdb", "cc"]) {
         return;
     }
+    let _server_guard = GDBSERVER_TEST_LOCK.lock().await;
     let directory = tempdir().unwrap();
     let executable = directory.path().join("remote");
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
@@ -132,6 +138,7 @@ async fn remote_disconnect_invalidates_live_target_state() {
     if !support::require_commands(&["gdb", "gdbserver", "cc"]) {
         return;
     }
+    let _server_guard = GDBSERVER_TEST_LOCK.lock().await;
     let directory = tempdir().unwrap();
     let executable = directory.path().join("remote-disconnect");
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
