@@ -556,7 +556,19 @@ impl Gateway {
         ];
         let mut arguments = MiCommand::new("-exec-arguments")?;
         for argument in parameters.argv {
-            arguments = arguments.string(argument);
+            // 2026-08-28: GDB 15 retains MI C-string quotes in argv when
+            // startup-with-shell is disabled. Keep simple arguments bare;
+            // newer GDB accepts that encoding and older GDB gets the exact
+            // path instead of a quoted, nonexistent one.
+            arguments = if !argument.is_empty()
+                && !argument
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'\'' | b'"'))
+            {
+                arguments.bare(argument)?
+            } else {
+                arguments.string(argument)
+            };
         }
         setup.push(arguments);
         for (name, value) in parameters.environment {
