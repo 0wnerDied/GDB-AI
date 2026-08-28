@@ -123,9 +123,43 @@ pub struct SandboxOptions {
 pub struct GdbBackend {
     child: Child,
     stdin: ChildStdin,
-    input: mpsc::Receiver<BackendInput>,
+    input: BackendInputs,
     pty_writer: tokio::fs::File,
     descriptor: BackendDescriptor,
+}
+
+struct BackendInputs {
+    control: mpsc::Receiver<BackendInput>,
+    stderr: mpsc::Receiver<BackendInput>,
+    pty: mpsc::Receiver<BackendInput>,
+    control_closed: bool,
+    stderr_closed: bool,
+    pty_closed: bool,
+}
+
+impl BackendInputs {
+    async fn recv(&mut self) -> Option<BackendInput> {
+        loop {
+            if self.control_closed && self.stderr_closed && self.pty_closed {
+                return None;
+            }
+            tokio::select! {
+                biased;
+                input = self.control.recv(), if !self.control_closed => match input {
+                    Some(input) => return Some(input),
+                    None => self.control_closed = true,
+                },
+                input = self.stderr.recv(), if !self.stderr_closed => match input {
+                    Some(input) => return Some(input),
+                    None => self.stderr_closed = true,
+                },
+                input = self.pty.recv(), if !self.pty_closed => match input {
+                    Some(input) => return Some(input),
+                    None => self.pty_closed = true,
+                },
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -275,19 +309,31 @@ impl GdbBackend {
             .take()
             .ok_or_else(|| Error::new(ErrorCode::Internal, "GDB stderr pipe missing"))?;
 
-        let (sender, input) = mpsc::channel(256);
-        tokio::spawn(read_mi(stdout, sender.clone(), mi_limits));
-        tokio::spawn(read_chunks(stderr, sender.clone(), StreamKind::Stderr));
+        // 2026-08-28: PTY bulk output previously filled the shared backend
+        // queue and delayed MI results and stop events. Keep each source under
+        // independent backpressure and always poll control records first.
+        let (control_sender, control) = mpsc::channel(256);
+        let (stderr_sender, stderr_input) = mpsc::channel(32);
+        let (pty_sender, pty_input) = mpsc::channel(32);
+        tokio::spawn(read_mi(stdout, control_sender, mi_limits));
+        tokio::spawn(read_chunks(stderr, stderr_sender, StreamKind::Stderr));
         tokio::spawn(read_chunks(
             tokio::fs::File::from_std(master),
-            sender,
+            pty_sender,
             StreamKind::Pty,
         ));
 
         Ok(Self {
             child,
             stdin,
-            input,
+            input: BackendInputs {
+                control,
+                stderr: stderr_input,
+                pty: pty_input,
+                control_closed: false,
+                stderr_closed: false,
+                pty_closed: false,
+            },
             pty_writer: tokio::fs::File::from_std(writer),
             descriptor: BackendDescriptor {
                 name: "gdb",
@@ -607,5 +653,37 @@ mod tests {
 
         let error = master.read(&mut [0]).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EIO));
+    }
+
+    #[tokio::test]
+    async fn pty_backpressure_does_not_block_mi_control() {
+        let (control_sender, control) = mpsc::channel(1);
+        let (_stderr_sender, stderr) = mpsc::channel(1);
+        let (pty_sender, pty) = mpsc::channel(1);
+        let mut inputs = BackendInputs {
+            control,
+            stderr,
+            pty,
+            control_closed: false,
+            stderr_closed: false,
+            pty_closed: false,
+        };
+        pty_sender
+            .try_send(BackendInput::InferiorPty(vec![0; 64 * 1024]))
+            .unwrap();
+        control_sender
+            .try_send(BackendInput::Mi {
+                raw: b"(gdb)\n".to_vec(),
+                record: MiRecord::Prompt,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            inputs.recv().await,
+            Some(BackendInput::Mi {
+                record: MiRecord::Prompt,
+                ..
+            })
+        ));
     }
 }
