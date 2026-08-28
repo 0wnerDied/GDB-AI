@@ -329,7 +329,8 @@ BackendStarted, BackendExited, CommandAccepted, CommandCompleted,
 TargetRunning, TargetStopped, InferiorAdded, InferiorRemoved,
 InferiorExited, ThreadCreated, ThreadExited, LibraryLoaded,
 LibraryUnloaded, BreakpointCreated, BreakpointModified,
-BreakpointDeleted, MemoryChanged, InferiorOutput, ConsoleOutput,
+BreakpointDeleted, BreakpointRebound, MemoryChanged, InferiorOutput,
+ConsoleOutput,
 LogOutput, TargetDisconnected, SnapshotStarted, SnapshotReady,
 SnapshotFailed, ConsistencyDirty, ConsistencyRestored, PolicyDenied
 ```
@@ -1717,12 +1718,12 @@ raw/structured/probe arms from section 52 remain required.
 
 Two actionable issues emerged. Relative `program` paths were resolved before
 the requested `cwd`; `b08bce7` fixes that shared launch path. A stripped-PIE
-module-offset breakpoint created at the explicit loader entry truthfully
-remained pending because the executable was not mapped and the semantic
-specification is not rebound after exec. `4f95c4a` clarifies the required
-mapping check; persistent delayed module-offset rebinding remains an open
-design item. Attach allowlist rejection was intentional policy, and a 73 KiB
-tools/list response was transport-complete despite the shell display limit.
+module-offset breakpoint created at the explicit loader entry initially
+remained pending because the executable was not mapped. The SessionWorker now
+retains that semantic location and rebinds it to the live address when a local
+mapping event arrives, while preserving the public breakpoint ID. Attach
+allowlist rejection was intentional policy, and a 73 KiB tools/list response
+was transport-complete despite the shell display limit.
 
 ## 53. Corrected guarantees
 

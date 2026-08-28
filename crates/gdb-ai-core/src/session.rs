@@ -23,12 +23,13 @@ use crate::{
     },
     config::Config,
     domain::{
-        DomainEvent, InferiorStatus, JournaledEvent, OutputSource, SessionId, SessionState,
-        SnapshotStatus, StopId, TrackingDefinition, ValueBinding, WaitBaseline,
+        BreakpointId, DomainEvent, InferiorStatus, JournaledEvent, OutputSource, SessionId,
+        SessionState, SnapshotStatus, StopId, TrackingDefinition, ValueBinding, WaitBaseline,
     },
     journal::Journal,
     metrics::Metrics,
     normalize::normalize,
+    operations::{breakpoint_number_from_record, live_module_offset},
     persistence::Store,
     policy::Profile,
     reducer::StateReducer,
@@ -91,6 +92,16 @@ pub struct CommandReply {
     pub stream_records: Vec<MiRecord>,
     pub stream_truncated: bool,
     pub evidence_seq: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingModuleBreakpoint {
+    pub id: BreakpointId,
+    pub backend_number: String,
+    pub module: String,
+    pub offset: u64,
+    pub enabled: bool,
+    pub command: MiCommand,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -382,6 +393,23 @@ impl SessionHandle {
         self.requests
             .send(WorkerRequest::RecordEvent {
                 event,
+                response: sender,
+            })
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+        receiver
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+    }
+
+    pub(crate) async fn register_pending_module_breakpoint(
+        &self,
+        breakpoint: PendingModuleBreakpoint,
+    ) -> Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        self.requests
+            .send(WorkerRequest::RegisterPendingModuleBreakpoint {
+                breakpoint,
                 response: sender,
             })
             .await
@@ -841,6 +869,10 @@ enum WorkerRequest {
         event: DomainEvent,
         response: oneshot::Sender<Result<()>>,
     },
+    RegisterPendingModuleBreakpoint {
+        breakpoint: PendingModuleBreakpoint,
+        response: oneshot::Sender<Result<()>>,
+    },
     RecordApi {
         request: Value,
         response: oneshot::Sender<Result<()>>,
@@ -956,6 +988,8 @@ struct SessionWorker {
     snapshots: BTreeMap<String, Value>,
     stale_backend_values: Vec<String>,
     deferred_restoration: Vec<MiCommand>,
+    pending_module_breakpoints: BTreeMap<String, PendingModuleBreakpoint>,
+    module_rebind_needed: bool,
     tracking_memory_limit: usize,
     fatal: bool,
     metric_active: bool,
@@ -1085,6 +1119,8 @@ impl SessionWorker {
             snapshots: BTreeMap::new(),
             stale_backend_values: Vec::new(),
             deferred_restoration: Vec::new(),
+            pending_module_breakpoints: BTreeMap::new(),
+            module_rebind_needed: false,
             tracking_memory_limit: config.limits.memory_read_bytes,
             fatal: false,
             metric_active: false,
@@ -1314,6 +1350,12 @@ impl SessionWorker {
         let mut journal_flush = tokio::time::interval(Duration::from_millis(250));
         journal_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            if self.module_rebind_needed {
+                self.module_rebind_needed = false;
+                if let Err(error) = self.rebind_pending_module_breakpoints().await {
+                    tracing::warn!(%error, "failed to rebind a pending module breakpoint");
+                }
+            }
             tokio::select! {
                 _ = journal_flush.tick() => {
                     if let Err(error) = self.journal.flush() {
@@ -1458,6 +1500,15 @@ impl SessionWorker {
             }
             WorkerRequest::RecordEvent { event, response } => {
                 let _ = response.send(self.apply_event(event));
+            }
+            WorkerRequest::RegisterPendingModuleBreakpoint {
+                breakpoint,
+                response,
+            } => {
+                self.pending_module_breakpoints
+                    .insert(breakpoint.backend_number.clone(), breakpoint);
+                self.module_rebind_needed = true;
+                let _ = response.send(Ok(()));
             }
             WorkerRequest::RecordApi { request, response } => {
                 let appended = self.journal.append_api(&request).map(|_| ());
@@ -1798,6 +1849,57 @@ impl SessionWorker {
                 )
             })?;
         self.deferred_restoration.clear();
+        Ok(())
+    }
+
+    async fn rebind_pending_module_breakpoints(&mut self) -> Result<()> {
+        let pending = self
+            .pending_module_breakpoints
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for breakpoint in pending {
+            let Some(address) =
+                live_module_offset(self.reducer.state(), &breakpoint.module, breakpoint.offset)?
+            else {
+                continue;
+            };
+            // 2026-08-28: A module-offset breakpoint created at an explicit
+            // loader entry stayed pending after exec because GDB interpreted
+            // the module name as a symbol. Materialize it once /proc exposes
+            // the load bias while preserving the public breakpoint handle.
+            let reply = self
+                .execute(
+                    breakpoint.command.clone().string(format!("*{address}")),
+                    Duration::from_secs(5),
+                )
+                .await?;
+            let new_backend_number = breakpoint_number_from_record(&reply.record)?;
+            self.apply_event(DomainEvent::BreakpointRebound {
+                id: breakpoint.id.clone(),
+                old_backend_number: breakpoint.backend_number.clone(),
+                new_backend_number: new_backend_number.clone(),
+                enabled: breakpoint.enabled,
+                address,
+            })?;
+            self.pending_module_breakpoints
+                .remove(&breakpoint.backend_number);
+            if let Err(error) = self
+                .execute(
+                    MiCommand::new("-break-delete")?.bare(breakpoint.backend_number.clone())?,
+                    Duration::from_secs(5),
+                )
+                .await
+            {
+                self.apply_event(DomainEvent::ConsistencyDirty {
+                    reason: format!(
+                        "module breakpoint rebound to {new_backend_number}, but old breakpoint {} could not be deleted: {error}",
+                        breakpoint.backend_number
+                    ),
+                })?;
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
@@ -2220,6 +2322,17 @@ impl SessionWorker {
 
     fn apply_event(&mut self, event: DomainEvent) -> Result<()> {
         let stopped = matches!(&event, DomainEvent::TargetStopped { .. });
+        if let DomainEvent::BreakpointDeleted { backend_number } = &event {
+            self.pending_module_breakpoints.remove(backend_number);
+        }
+        if !self.pending_module_breakpoints.is_empty()
+            && matches!(
+                &event,
+                DomainEvent::LibraryLoaded { .. } | DomainEvent::TargetStopped { .. }
+            )
+        {
+            self.module_rebind_needed = true;
+        }
         if matches!(&event, DomainEvent::TargetRunning { .. }) {
             self.inferior_output.reset();
         }

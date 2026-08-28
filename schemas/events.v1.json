@@ -13,6 +13,7 @@
         "inferior_added", "inferior_removed", "inferior_exited",
         "thread_created", "thread_exited", "breakpoint_created",
         "breakpoint_modified", "breakpoint_deleted", "breakpoint_locations",
+        "breakpoint_rebound",
         "library_loaded",
         "library_unloaded", "memory_changed", "register_changed",
         "controller_changed", "signal_policy_changed", "snapshot_started",

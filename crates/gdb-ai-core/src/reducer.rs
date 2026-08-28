@@ -1,9 +1,10 @@
 use crate::{
     Error, ErrorCode, Result,
     domain::{
-        BackendHealth, BreakpointId, BreakpointState, Consistency, DomainEvent, InferiorId,
-        InferiorState, InferiorStatus, JournaledEvent, ModuleState, SessionLifecycle, SessionState,
-        SnapshotRef, SnapshotStatus, StopId, StopReason, TargetOrigin, ThreadId, ThreadState,
+        BackendHealth, BreakpointId, BreakpointLocationState, BreakpointState, Consistency,
+        DomainEvent, InferiorId, InferiorState, InferiorStatus, JournaledEvent, ModuleState,
+        SessionLifecycle, SessionState, SnapshotRef, SnapshotStatus, StopId, StopReason,
+        TargetOrigin, ThreadId, ThreadState,
     },
 };
 
@@ -320,6 +321,32 @@ impl StateReducer {
                 } else {
                     false
                 }
+            }
+            DomainEvent::BreakpointRebound {
+                id,
+                old_backend_number,
+                new_backend_number,
+                enabled,
+                address,
+            } => {
+                self.state.breakpoints.remove(old_backend_number);
+                self.state.breakpoints.remove(new_backend_number);
+                self.state.breakpoints.insert(
+                    new_backend_number.clone(),
+                    BreakpointState {
+                        id: id.clone(),
+                        backend_number: new_backend_number.clone(),
+                        enabled: *enabled,
+                        pending: false,
+                        locations: vec![BreakpointLocationState {
+                            id: format!("bpl_{}_{}_1", id.0, self.state.event_seq),
+                            backend_number: new_backend_number.clone(),
+                            address: Some(address.clone()),
+                            function: None,
+                        }],
+                    },
+                );
+                true
             }
             DomainEvent::LibraryLoaded {
                 id,

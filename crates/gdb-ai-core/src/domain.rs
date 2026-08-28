@@ -615,6 +615,13 @@ pub enum DomainEvent {
         backend_number: String,
         locations: Vec<BreakpointLocationState>,
     },
+    BreakpointRebound {
+        id: BreakpointId,
+        old_backend_number: String,
+        new_backend_number: String,
+        enabled: bool,
+        address: String,
+    },
     LibraryLoaded {
         id: String,
         target_name: Option<String>,

@@ -1,9 +1,12 @@
 use std::{path::PathBuf, process::Command};
 
 use gdb_ai_core::{
+    ErrorCode,
     config::{ArtifactConfig, Config, PersistenceConfig},
+    domain::SessionId,
     gateway::{Caller, Gateway},
     protocol::{API_VERSION, ApiRequest},
+    replay::replay,
 };
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -29,8 +32,8 @@ fn request(
 }
 
 #[tokio::test]
-async fn stops_at_the_first_instruction_without_symbols() {
-    if !support::require_commands(&["gdb", "cc"]) {
+async fn rebinds_module_offset_after_explicit_loader_exec() {
+    if !support::require_commands(&["gdb", "cc", "nm", "readelf", "strip"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -38,9 +41,43 @@ async fn stops_at_the_first_instruction_without_symbols() {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
     assert!(
         Command::new("cc")
-            .args(["-s", "-O2"])
+            .args(["-fPIE", "-pie", "-O2"])
             .arg(source)
             .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let symbols = Command::new("nm").arg(&executable).output().unwrap();
+    assert!(symbols.status.success());
+    let marker_offset = String::from_utf8(symbols.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            (fields.get(1) == Some(&"t") && fields.get(2) == Some(&"marker"))
+                .then(|| u64::from_str_radix(fields[0], 16).unwrap())
+        })
+        .unwrap();
+    let headers = Command::new("readelf")
+        .args(["-l"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(headers.status.success());
+    let loader = String::from_utf8(headers.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            line.split_once("Requesting program interpreter:")
+                .map(|(_, path)| path.trim().trim_end_matches(']').to_owned())
+        })
+        .map(std::fs::canonicalize)
+        .unwrap()
+        .unwrap();
+    assert!(
+        Command::new("strip")
             .arg(&executable)
             .status()
             .unwrap()
@@ -56,7 +93,10 @@ async fn stops_at_the_first_instruction_without_symbols() {
         },
         ..Config::default()
     };
-    config.security.workspace_roots = vec![directory.path().to_owned()];
+    config.security.workspace_roots = vec![
+        directory.path().to_owned(),
+        loader.parent().unwrap().to_owned(),
+    ];
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller::local("stripped-test");
     let created = gateway
@@ -79,7 +119,9 @@ async fn stops_at_the_first_instruction_without_symbols() {
                 created.revision,
                 json!({
                     "lease_id": lease_id,
-                    "program": executable,
+                    "program": loader,
+                    "argv": [executable],
+                    "cwd": directory.path(),
                     "stop": "first_instruction",
                     "wait": {"until": "snapshot", "timeout_ms": 5000}
                 }),
@@ -89,46 +131,30 @@ async fn stops_at_the_first_instruction_without_symbols() {
         .await;
     assert!(launched.error.is_none(), "{:?}", launched.error);
     let state = launched.state.as_ref().unwrap();
-    let stop_id = state.stop_id.as_ref().unwrap();
-    let pc = state
-        .inferiors
-        .values()
-        .flat_map(|inferior| inferior.threads.values())
-        .find_map(|thread| thread.frame.as_ref()?.address.as_deref())
-        .map(|address| u64::from_str_radix(address.trim_start_matches("0x"), 16).unwrap())
-        .unwrap();
-    let mappings = gateway
+    let stop_id = state.stop_id.as_ref().unwrap().clone();
+    let unresolved_probe = gateway
         .dispatch(
             request(
-                "mappings",
+                "unresolved-probe",
                 Some(&session_id),
-                "inspection.get",
-                None,
-                json!({"view": "mappings", "stop_id": stop_id}),
+                "agent.probe",
+                launched.revision,
+                json!({
+                    "lease_id": lease_id,
+                    "stop_id": stop_id,
+                    "module_offset": {
+                        "module": "stripped",
+                        "offset": format!("0x{marker_offset:x}")
+                    }
+                }),
             ),
             &caller,
         )
         .await;
-    assert!(mappings.error.is_none(), "{:?}", mappings.error);
-    let base = mappings.result.as_ref().unwrap()["mappings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|mapping| mapping["path"] == executable.to_string_lossy().as_ref())
-        .map(|mapping| {
-            let start = u64::from_str_radix(
-                mapping["start"].as_str().unwrap().trim_start_matches("0x"),
-                16,
-            )
-            .unwrap();
-            let offset = u64::from_str_radix(
-                mapping["offset"].as_str().unwrap().trim_start_matches("0x"),
-                16,
-            )
-            .unwrap();
-            start - offset
-        })
-        .unwrap();
+    assert_eq!(
+        unresolved_probe.error.unwrap().code,
+        ErrorCode::InvalidState
+    );
     let breakpoint = gateway
         .dispatch(
             request(
@@ -140,7 +166,7 @@ async fn stops_at_the_first_instruction_without_symbols() {
                     "lease_id": lease_id,
                     "module_offset": {
                         "module": "stripped",
-                        "offset": format!("0x{:x}", pc - base)
+                        "offset": format!("0x{marker_offset:x}")
                     }
                 }),
             ),
@@ -148,19 +174,60 @@ async fn stops_at_the_first_instruction_without_symbols() {
         )
         .await;
     assert!(breakpoint.error.is_none(), "{:?}", breakpoint.error);
-    assert!(
-        breakpoint.result.as_ref().unwrap()["breakpoints"]
-            .as_object()
-            .unwrap()
-            .values()
-            .any(|breakpoint| {
-                !breakpoint["pending"].as_bool().unwrap()
-                    && breakpoint["locations"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|location| location["address"] == format!("0x{pc:016x}"))
-            })
-    );
+    let pending = breakpoint.result.as_ref().unwrap()["breakpoints"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|breakpoint| breakpoint["pending"] == true)
+        .unwrap();
+    let public_id = pending["id"].as_str().unwrap().to_owned();
+    let stopped = gateway
+        .dispatch(
+            request(
+                "continue-to-module-offset",
+                Some(&session_id),
+                "execution.control",
+                breakpoint.revision,
+                json!({
+                    "action": "continue",
+                    "lease_id": lease_id,
+                    "stop_id": stop_id,
+                    "wait": {"until": "snapshot", "timeout_ms": 5000}
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(stopped.error.is_none(), "{:?}", stopped.error);
+    let state = stopped.state.as_ref().unwrap();
+    let rebound = state
+        .breakpoints
+        .values()
+        .find(|breakpoint| breakpoint.id.0 == public_id)
+        .unwrap();
+    assert!(!rebound.pending);
+    let pc = state
+        .inferiors
+        .values()
+        .flat_map(|inferior| inferior.threads.values())
+        .find_map(|thread| thread.frame.as_ref()?.address.as_deref())
+        .unwrap();
+    assert_eq!(rebound.locations[0].address.as_deref(), Some(pc));
     gateway.shutdown().await;
+    let replayed = replay(
+        directory
+            .path()
+            .join("sessions")
+            .join(&session_id)
+            .join("journal.jsonl"),
+        SessionId(session_id),
+    )
+    .unwrap();
+    assert!(
+        replayed
+            .state
+            .breakpoints
+            .values()
+            .any(|breakpoint| breakpoint.id.0 == public_id && !breakpoint.pending)
+    );
 }

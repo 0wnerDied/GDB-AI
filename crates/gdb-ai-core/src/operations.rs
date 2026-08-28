@@ -26,7 +26,7 @@ use crate::{
     policy::{Profile, validate_console_command},
     protocol::{ApiRequest, CanonicalMethod},
     providers::LINUX_KERNEL_PROVIDER_VERSION,
-    session::{CommandReply, OutputRing, SessionHandle, WaitUntil},
+    session::{CommandReply, OutputRing, PendingModuleBreakpoint, SessionHandle, WaitUntil},
 };
 
 struct ProbeBreakpoint {
@@ -1081,14 +1081,39 @@ impl Gateway {
         };
         let state = entry.handle.state();
         command = breakpoint_scope(command, &request.parameters, &state)?;
+        let mut pending_module = None;
+        let mut rebind_command = None;
         if needs_location {
-            command = command.string(self.breakpoint_location(&request.parameters, &state)?);
+            let (location, unresolved_module) =
+                self.breakpoint_location(&request.parameters, &state)?;
+            rebind_command = unresolved_module.as_ref().map(|_| command.clone());
+            pending_module = unresolved_module;
+            command = command.string(location);
         }
         let reply = entry.handle.command(command).await?;
         if let Some(fields) =
             MiResult::find(reply.record.results(), "bkpt").and_then(MiValue::results)
         {
             synchronize_breakpoint(&entry.handle, fields).await?;
+        }
+        if let (Some((module, offset)), Some(command)) = (pending_module, rebind_command) {
+            let backend_number = breakpoint_number_from_record(&reply.record)?;
+            let state = entry.handle.state();
+            if let Some(breakpoint) = state.breakpoints.get(&backend_number)
+                && breakpoint.pending
+            {
+                entry
+                    .handle
+                    .register_pending_module_breakpoint(PendingModuleBreakpoint {
+                        id: breakpoint.id.clone(),
+                        backend_number,
+                        module,
+                        offset,
+                        enabled: breakpoint.enabled,
+                        command,
+                    })
+                    .await?;
+            }
         }
         Ok(json!({ "command": reply, "breakpoints": entry.handle.state().breakpoints }))
     }
@@ -2686,7 +2711,19 @@ impl Gateway {
             validate_expression(condition)?;
             insert = insert.bare("-c")?.string(condition);
         }
-        insert = insert.string(self.breakpoint_location(&request.parameters, &initial)?);
+        let (location, unresolved_module) =
+            self.breakpoint_location(&request.parameters, &initial)?;
+        // 2026-08-28: Probe hit attribution is bound to one backend number,
+        // so an unresolved module breakpoint cannot be transparently rebound.
+        // Require the existing mappings precondition instead of misreporting a
+        // later replacement breakpoint as an unrelated stop.
+        if unresolved_module.is_some() {
+            return Err(Error::new(
+                ErrorCode::InvalidState,
+                "agent.probe module_offset requires the module to be mapped",
+            ));
+        }
+        insert = insert.string(location);
         let inserted = entry.handle.command(insert).await?;
         let backend_number = breakpoint_number_from_record(&inserted.record)?;
         let mut operation = OperationRecord {
@@ -3793,16 +3830,15 @@ impl Gateway {
         &self,
         parameters: &Value,
         state: &crate::domain::SessionState,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<(String, u64)>)> {
         let location = parameters.get("location").unwrap_or(parameters);
         if let Some(source) = location.get("source") {
             // 2026-08-28: Source breakpoints previously bypassed workspace
             // canonicalization even though every other target path was checked.
             let path = self.workspace_path(&string(source, "path")?, false)?;
-            return Ok(format!(
-                "{}:{}",
-                path.to_string_lossy(),
-                unsigned(source, "line")?
+            return Ok((
+                format!("{}:{}", path.to_string_lossy(), unsigned(source, "line")?),
+                None,
             ));
         }
         if let Some(module_offset) = location.get("module_offset") {
@@ -3814,10 +3850,11 @@ impl Gateway {
             // as a shared library, so `module+offset` remained pending. The
             // existing local mapping provider supplies the actual load bias.
             if let Some(address) = live_module_offset(state, &module, offset)? {
-                return Ok(format!("*{address}"));
+                return Ok((format!("*{address}"), None));
             }
+            return Ok((breakpoint_location(parameters)?, Some((module, offset))));
         }
-        breakpoint_location(parameters)
+        Ok((breakpoint_location(parameters)?, None))
     }
 }
 
@@ -4326,7 +4363,7 @@ fn breakpoint_number(entry: &SessionEntry, parameters: &Value) -> Result<String>
         .ok_or_else(|| Error::new(ErrorCode::NotFound, "breakpoint not found"))
 }
 
-fn breakpoint_number_from_record(record: &MiRecord) -> Result<String> {
+pub(crate) fn breakpoint_number_from_record(record: &MiRecord) -> Result<String> {
     MiResult::find(record.results(), "bkpt")
         .and_then(MiValue::results)
         .and_then(|fields| MiResult::find_str(fields, "number"))
@@ -4756,7 +4793,7 @@ fn parse_proc_map(line: &str) -> Option<Value> {
     }))
 }
 
-fn live_module_offset(
+pub(crate) fn live_module_offset(
     state: &crate::domain::SessionState,
     module: &str,
     offset: u64,
