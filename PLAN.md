@@ -959,8 +959,10 @@ every access.
 
 SQLite WAL persists sessions/configuration, capabilities, operations, state
 revisions, breakpoints, tracking definitions, artifacts, policy decisions,
-and the audit index. The append-only journal records API requests, MI input,
-MI results/async/stream metadata, normalized events, revisions, and snapshots.
+and the audit index. Synchronous SQLite operations execute in Tokio blocking
+regions so database locks and WAL I/O do not stall unrelated session actors.
+The append-only journal records API requests, MI input, MI
+results/async/stream metadata, normalized events, revisions, and snapshots.
 Large data is stored in the artifact store, not SQLite.
 
 Transcripts use JSONL with monotonically increasing sequence values. A replay

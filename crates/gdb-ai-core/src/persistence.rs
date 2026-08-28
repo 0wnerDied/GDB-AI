@@ -124,137 +124,153 @@ impl Store {
         })
     }
 
+    fn with_connection<T>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T>,
+    ) -> Result<T> {
+        let run = || {
+            let mut connection = self
+                .connection
+                .lock()
+                .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
+            operation(&mut connection)
+        };
+        // 2026-08-28: Synchronous SQLite work ran directly on Tokio workers,
+        // so a slow WAL write or connection lock stalled unrelated sessions.
+        // Let the multithreaded runtime replace this worker while it blocks.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(run)
+            }
+            _ => run(),
+        }
+    }
+
     pub fn upsert_session(&self, state: &SessionState, profile: Profile) -> Result<()> {
         let now = unix_ms();
         let state_json = serde_json::to_string(state)?;
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "INSERT INTO sessions
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO sessions
                  (id, profile, state_json, created_unix_ms, updated_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, ?4)
                  ON CONFLICT(id) DO UPDATE SET
                    state_json=excluded.state_json,
                    updated_unix_ms=excluded.updated_unix_ms",
-                params![state.session_id.0, format!("{profile:?}"), state_json, now],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+                    params![state.session_id.0, format!("{profile:?}"), state_json, now],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn get_session(&self, id: &SessionId) -> Result<Option<SessionState>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
-        let json: Option<String> = connection
-            .query_row(
-                "SELECT state_json FROM sessions WHERE id=?1",
-                params![id.0],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_error)?;
+        let json: Option<String> = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT state_json FROM sessions WHERE id=?1",
+                    params![id.0],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sql_error)
+        })?;
         json.map(|json| serde_json::from_str(&json).map_err(Into::into))
             .transpose()
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionState>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
-        let mut statement = connection
-            .prepare("SELECT state_json FROM sessions ORDER BY created_unix_ms, id")
-            .map_err(sql_error)?;
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(sql_error)?;
-        rows.map(|row| {
-            let json = row.map_err(sql_error)?;
-            serde_json::from_str(&json).map_err(Into::into)
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare("SELECT state_json FROM sessions ORDER BY created_unix_ms, id")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?;
+            rows.map(|row| {
+                let json = row.map_err(sql_error)?;
+                serde_json::from_str(&json).map_err(Into::into)
+            })
+            .collect()
         })
-        .collect()
     }
 
     pub fn set_session_owner(&self, session_id: &SessionId, owner: &str) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "INSERT INTO session_owners (session_id, owner) VALUES (?1, ?2)
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO session_owners (session_id, owner) VALUES (?1, ?2)
                  ON CONFLICT(session_id) DO NOTHING",
-                params![session_id.0, owner],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+                    params![session_id.0, owner],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn session_owner(&self, session_id: &SessionId) -> Result<Option<String>> {
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .query_row(
-                "SELECT owner FROM session_owners WHERE session_id=?1",
-                params![session_id.0],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_error)
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT owner FROM session_owners WHERE session_id=?1",
+                    params![session_id.0],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sql_error)
+        })
     }
 
     pub fn list_session_owners(&self) -> Result<Vec<(SessionState, Option<String>)>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
-        let mut statement = connection
-            .prepare(
-                "SELECT sessions.state_json, session_owners.owner
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT sessions.state_json, session_owners.owner
                  FROM sessions
                  LEFT JOIN session_owners ON session_owners.session_id=sessions.id
                  ORDER BY sessions.created_unix_ms, sessions.id",
-            )
-            .map_err(sql_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .map_err(sql_error)?;
+            rows.map(|row| {
+                let (json, owner) = row.map_err(sql_error)?;
+                Ok((serde_json::from_str(&json)?, owner))
             })
-            .map_err(sql_error)?;
-        rows.map(|row| {
-            let (json, owner) = row.map_err(sql_error)?;
-            Ok((serde_json::from_str(&json)?, owner))
+            .collect()
         })
-        .collect()
     }
 
     pub fn upsert_lease(&self, lease: &WriteLease) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "INSERT INTO leases (session_id, lease_json, updated_unix_ms)
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO leases (session_id, lease_json, updated_unix_ms)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(session_id) DO UPDATE SET
                    lease_json=excluded.lease_json,
                    updated_unix_ms=excluded.updated_unix_ms",
-                params![lease.session_id.0, serde_json::to_string(lease)?, unix_ms()],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+                    params![lease.session_id.0, serde_json::to_string(lease)?, unix_ms()],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn delete_lease(&self, session_id: &SessionId) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "DELETE FROM leases WHERE session_id=?1",
-                params![session_id.0],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM leases WHERE session_id=?1",
+                    params![session_id.0],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn upsert_tracking(
@@ -262,37 +278,37 @@ impl Store {
         session_id: &SessionId,
         definition: &TrackingDefinition,
     ) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "INSERT INTO tracking
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO tracking
                  (session_id, tracking_id, definition_json, updated_unix_ms)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(session_id, tracking_id) DO UPDATE SET
                    definition_json=excluded.definition_json,
                    updated_unix_ms=excluded.updated_unix_ms",
-                params![
-                    session_id.0,
-                    definition.id().0,
-                    serde_json::to_string(definition)?,
-                    unix_ms()
-                ],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+                    params![
+                        session_id.0,
+                        definition.id().0,
+                        serde_json::to_string(definition)?,
+                        unix_ms()
+                    ],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn delete_tracking(&self, session_id: &SessionId, tracking_id: &str) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "DELETE FROM tracking WHERE session_id=?1 AND tracking_id=?2",
-                params![session_id.0, tracking_id],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "DELETE FROM tracking WHERE session_id=?1 AND tracking_id=?2",
+                    params![session_id.0, tracking_id],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn upsert_snapshot(
@@ -301,79 +317,75 @@ impl Store {
         snapshot_id: &str,
         snapshot: &Value,
     ) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "INSERT INTO snapshots
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO snapshots
                  (session_id, snapshot_id, snapshot_json, created_unix_ms)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(session_id, snapshot_id) DO UPDATE SET
                    snapshot_json=excluded.snapshot_json",
-                params![
-                    session_id.0,
-                    snapshot_id,
-                    serde_json::to_string(snapshot)?,
-                    unix_ms()
-                ],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+                    params![
+                        session_id.0,
+                        snapshot_id,
+                        serde_json::to_string(snapshot)?,
+                        unix_ms()
+                    ],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn get_snapshot(&self, session_id: &SessionId, snapshot_id: &str) -> Result<Option<Value>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
-        let json: Option<String> = connection
-            .query_row(
-                "SELECT snapshot_json FROM snapshots
+        let json: Option<String> = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT snapshot_json FROM snapshots
                  WHERE session_id=?1 AND snapshot_id=?2",
-                params![session_id.0, snapshot_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_error)?;
+                    params![session_id.0, snapshot_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sql_error)
+        })?;
         json.map(|json| serde_json::from_str(&json).map_err(Into::into))
             .transpose()
     }
 
     pub fn upsert_operation(&self, operation: &OperationRecord) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "INSERT INTO operations
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO operations
                  (operation_id, session_id, operation_json, updated_unix_ms)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(operation_id) DO UPDATE SET
                    operation_json=excluded.operation_json,
                    updated_unix_ms=excluded.updated_unix_ms",
-                params![
-                    operation.operation_id.0,
-                    operation.session_id.0,
-                    serde_json::to_string(operation)?,
-                    unix_ms()
-                ],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+                    params![
+                        operation.operation_id.0,
+                        operation.session_id.0,
+                        serde_json::to_string(operation)?,
+                        unix_ms()
+                    ],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn get_operation(&self, operation_id: &str) -> Result<Option<OperationRecord>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
-        let json: Option<String> = connection
-            .query_row(
-                "SELECT operation_json FROM operations WHERE operation_id=?1",
-                params![operation_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(sql_error)?;
+        let json: Option<String> = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT operation_json FROM operations WHERE operation_id=?1",
+                    params![operation_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sql_error)
+        })?;
         json.map(|json| serde_json::from_str(&json).map_err(Into::into))
             .transpose()
     }
@@ -385,89 +397,84 @@ impl Store {
         size: usize,
         sensitivity: &str,
     ) -> Result<()> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
-        let transaction = connection.transaction().map_err(sql_error)?;
-        transaction
-            .execute(
-                "INSERT INTO artifacts
+        self.with_connection(|connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO artifacts
                  (uri, session_id, size, sensitivity, created_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(uri) DO UPDATE SET
                    sensitivity=excluded.sensitivity",
-                params![
-                    uri,
-                    session_id.map(|session_id| session_id.0.as_str()),
-                    size,
-                    sensitivity,
-                    unix_ms()
-                ],
-            )
-            .map_err(sql_error)?;
-        if let Some(session_id) = session_id {
-            transaction
-                .execute(
-                    "INSERT OR IGNORE INTO artifact_owners (uri, session_id)
-                     VALUES (?1, ?2)",
-                    params![uri, session_id.0],
+                    params![
+                        uri,
+                        session_id.map(|session_id| session_id.0.as_str()),
+                        size,
+                        sensitivity,
+                        unix_ms()
+                    ],
                 )
                 .map_err(sql_error)?;
-        }
-        transaction.commit().map_err(sql_error)?;
-        Ok(())
+            if let Some(session_id) = session_id {
+                transaction
+                    .execute(
+                        "INSERT OR IGNORE INTO artifact_owners (uri, session_id)
+                     VALUES (?1, ?2)",
+                        params![uri, session_id.0],
+                    )
+                    .map_err(sql_error)?;
+            }
+            transaction.commit().map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn artifact(&self, uri: &str) -> Result<Option<ArtifactRecord>> {
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .query_row(
-                "SELECT size, sensitivity FROM artifacts WHERE uri=?1",
-                params![uri],
-                |row| {
-                    Ok(ArtifactRecord {
-                        size: row.get::<_, i64>(0)?.max(0) as usize,
-                        sensitivity: row.get(1)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(sql_error)
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT size, sensitivity FROM artifacts WHERE uri=?1",
+                    params![uri],
+                    |row| {
+                        Ok(ArtifactRecord {
+                            size: row.get::<_, i64>(0)?.max(0) as usize,
+                            sensitivity: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(sql_error)
+        })
     }
 
     pub fn artifact_sessions(&self, uri: &str) -> Result<Vec<String>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
-        let mut statement = connection
-            .prepare(
-                "SELECT session_id FROM artifact_owners
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT session_id FROM artifact_owners
                  WHERE uri=?1 ORDER BY session_id",
-            )
-            .map_err(sql_error)?;
-        let rows = statement
-            .query_map(params![uri], |row| row.get(0))
-            .map_err(sql_error)?;
-        rows.map(|row| row.map_err(sql_error)).collect()
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map(params![uri], |row| row.get(0))
+                .map_err(sql_error)?;
+            rows.map(|row| row.map_err(sql_error)).collect()
+        })
     }
 
     pub fn artifact_bytes(&self, session_id: &SessionId) -> Result<usize> {
-        let total = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .query_row(
-                "SELECT COALESCE(SUM(artifacts.size), 0)
+        let total = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT COALESCE(SUM(artifacts.size), 0)
                  FROM artifacts
                  JOIN artifact_owners ON artifact_owners.uri=artifacts.uri
                  WHERE artifact_owners.session_id=?1",
-                params![session_id.0],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(sql_error)?;
+                    params![session_id.0],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(sql_error)
+        })?;
         Ok(total.max(0) as usize)
     }
 
@@ -476,18 +483,16 @@ impl Store {
         key: &str,
         request_hash: &str,
     ) -> Result<Option<ApiResponse>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
-        let row: Option<(String, String)> = connection
-            .query_row(
-                "SELECT request_hash, response_json FROM idempotency WHERE cache_key=?1",
-                params![key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(sql_error)?;
+        let row: Option<(String, String)> = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT request_hash, response_json FROM idempotency WHERE cache_key=?1",
+                    params![key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(sql_error)
+        })?;
         let Some((stored_hash, json)) = row else {
             return Ok(None);
         };
@@ -506,37 +511,35 @@ impl Store {
         request_hash: &str,
         response: &ApiResponse,
     ) -> Result<()> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?;
-        connection
-            .execute(
-                "INSERT INTO idempotency
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO idempotency
                  (cache_key, request_hash, response_json, updated_unix_ms)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(cache_key) DO UPDATE SET
                    request_hash=excluded.request_hash,
                    response_json=excluded.response_json,
                    updated_unix_ms=excluded.updated_unix_ms",
-                params![
-                    key,
-                    request_hash,
-                    serde_json::to_string(response)?,
-                    unix_ms()
-                ],
-            )
-            .map_err(sql_error)?;
-        connection
-            .execute(
-                "DELETE FROM idempotency WHERE cache_key IN (
+                    params![
+                        key,
+                        request_hash,
+                        serde_json::to_string(response)?,
+                        unix_ms()
+                    ],
+                )
+                .map_err(sql_error)?;
+            connection
+                .execute(
+                    "DELETE FROM idempotency WHERE cache_key IN (
                    SELECT cache_key FROM idempotency
                    ORDER BY updated_unix_ms DESC LIMIT -1 OFFSET 4096
                  )",
-                [],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+                    [],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -552,28 +555,28 @@ impl Store {
         outcome: &str,
     ) -> Result<()> {
         let request = redact(request.clone());
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "INSERT INTO audit
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO audit
                  (created_unix_ms, caller, session_id, method, effect, allowed,
                   revision, request_json, outcome)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    unix_ms(),
-                    caller,
-                    session_id.map(|id| id.0.as_str()),
-                    method,
-                    format!("{effect:?}"),
-                    allowed,
-                    revision,
-                    serde_json::to_string(&request)?,
-                    outcome,
-                ],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+                    params![
+                        unix_ms(),
+                        caller,
+                        session_id.map(|id| id.0.as_str()),
+                        method,
+                        format!("{effect:?}"),
+                        allowed,
+                        revision,
+                        serde_json::to_string(&request)?,
+                        outcome,
+                    ],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 
     pub fn audit_result(
@@ -583,22 +586,22 @@ impl Store {
         result: &Value,
     ) -> Result<()> {
         let result = redact(result.clone());
-        self.connection
-            .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "database mutex poisoned"))?
-            .execute(
-                "INSERT INTO audit_results
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO audit_results
                  (created_unix_ms, session_id, method, result_json)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    unix_ms(),
-                    session_id.map(|id| id.0.as_str()),
-                    method,
-                    serde_json::to_string(&result)?
-                ],
-            )
-            .map_err(sql_error)?;
-        Ok(())
+                    params![
+                        unix_ms(),
+                        session_id.map(|id| id.0.as_str()),
+                        method,
+                        serde_json::to_string(&result)?
+                    ],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
     }
 }
 
@@ -651,6 +654,11 @@ fn sql_error(error: rusqlite::Error) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{Arc, atomic::AtomicBool},
+        time::Duration,
+    };
+
     use tempfile::tempdir;
 
     use super::*;
@@ -694,5 +702,29 @@ mod tests {
         );
         assert_eq!(store.artifact_bytes(&first).unwrap(), 7);
         assert_eq!(store.artifact_bytes(&second).unwrap(), 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn sqlite_lock_wait_does_not_stall_the_runtime_worker() {
+        let directory = tempdir().unwrap();
+        let store = Arc::new(Store::open(directory.path().join("state.sqlite")).unwrap());
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let locked_store = store.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = locked_store.connection.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        ready_rx.recv().unwrap();
+
+        let progressed = Arc::new(AtomicBool::new(false));
+        let marker = progressed.clone();
+        tokio::spawn(async move {
+            marker.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        store.list_sessions().unwrap();
+
+        assert!(progressed.load(std::sync::atomic::Ordering::SeqCst));
+        holder.join().unwrap();
     }
 }
