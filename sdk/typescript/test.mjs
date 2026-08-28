@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import assert from "node:assert/strict";
-import { Client } from "./dist/index.js";
+import { Client, Session } from "./dist/index.js";
 
 const requests = [];
 globalThis.fetch = async (url, init) => {
@@ -21,3 +21,23 @@ await client.disconnect();
 
 assert.equal(requests.at(-1).init.method, "DELETE");
 assert.equal(requests.at(-1).init.headers["Mcp-Session-Id"], "mcp_test");
+
+const calls = [];
+const fakeClient = {
+  async call(method, parameters, options) {
+    calls.push({ method, parameters, options });
+    if (method === "session.create") {
+      return {
+        revision: 7,
+        result: {
+          session_id: "sess_test",
+          write_lease: { lease_id: "lease_old" },
+        },
+      };
+    }
+    return { revision: 9, result: { lease_id: "lease_new" } };
+  },
+};
+const session = await Session.create(fakeClient);
+await session.renew();
+assert.equal(calls.at(-1).options.expectedRevision, undefined);

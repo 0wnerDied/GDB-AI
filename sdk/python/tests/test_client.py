@@ -5,7 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from gdb_ai.client import Client
+from gdb_ai.client import Client, Session
 
 
 class Response(io.BytesIO):
@@ -42,6 +42,21 @@ class ClientTest(unittest.TestCase):
 
         self.assertEqual(requests[-1].get_method(), "DELETE")
         self.assertEqual(requests[-1].get_header("Mcp-session-id"), "mcp_test")
+
+    def test_renew_accepts_the_latest_revision(self) -> None:
+        calls = []
+
+        class FakeClient:
+            def call(self, method, parameters, **envelope):
+                calls.append((method, parameters, envelope))
+                return {"revision": 9, "result": {"lease_id": "lease_new"}}
+
+        session = Session(FakeClient(), "sess_test", 7, "lease_old")
+        session.renew()
+
+        self.assertNotIn("expected_revision", calls[0][2])
+        self.assertEqual(session.revision, 9)
+        self.assertEqual(session.lease_id, "lease_new")
 
 
 if __name__ == "__main__":

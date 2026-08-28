@@ -153,10 +153,12 @@ export class Session {
   }
 
   async renew(): Promise<void> {
+    // 2026-08-28: Asynchronous target events can make the cached revision
+    // stale. Supplying it here defeated accept_latest_revision.
     const response = await this.client.call<{ lease_id: string }>(
       "session.acquire_write_lease",
       { accept_latest_revision: true },
-      { sessionId: this.sessionId, expectedRevision: this.revision },
+      { sessionId: this.sessionId },
     );
     this.revision = response.revision!;
     this.leaseId = response.result!.lease_id;

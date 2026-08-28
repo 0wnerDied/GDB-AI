@@ -161,11 +161,12 @@ class Session:
         return response
 
     def renew(self) -> None:
+        # 2026-08-28: Inferior output can advance the revision while an Agent
+        # is reasoning. Sending that stale revision defeated accept_latest.
         response = self.client.call(
             "session.acquire_write_lease",
             {"accept_latest_revision": True},
             session_id=self.session_id,
-            expected_revision=self.revision,
         )
         self.revision = response["revision"]
         self.lease_id = response["result"]["lease_id"]
