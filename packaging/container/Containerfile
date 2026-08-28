@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+FROM rust:1.88-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --release -p gdb-ai
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bubblewrap gdb gdbserver python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/gdb-ai /usr/bin/gdb-ai
+COPY gdb-extension /usr/lib/gdb-ai
+COPY packaging/distro/gdb-ai.toml /etc/gdb-ai/gdb-ai.toml
+RUN useradd --system --home /var/lib/gdb-ai --create-home gdb-ai \
+    && mkdir -p /var/lib/gdb-ai/artifacts /var/lib/gdb-ai/sessions \
+    && chown -R gdb-ai:gdb-ai /var/lib/gdb-ai
+USER gdb-ai
+ENTRYPOINT ["/usr/bin/gdb-ai", "--config", "/etc/gdb-ai/gdb-ai.toml"]
+CMD ["serve", "--http", "127.0.0.1:8080"]
