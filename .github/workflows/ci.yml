@@ -125,8 +125,10 @@ jobs:
       - name: Install AArch64 system-test prerequisites
         run: |
           sudo apt-get update
+          # 2026-08-29: qemu-user-static does not provide update-binfmts on
+          # Ubuntu runners, so container emulation could not be registered.
           sudo apt-get install -y \
-            e2fsprogs gcc-aarch64-linux-gnu qemu-system-arm \
+            binfmt-support e2fsprogs gcc-aarch64-linux-gnu qemu-system-arm \
             qemu-user-static
           sudo update-binfmts --enable qemu-aarch64
       - name: Verify AArch64 container emulation
