@@ -9,6 +9,7 @@ export interface ApiResponse<T = unknown> {
   result?: T;
   warnings: Array<{ code: string; message: string }>;
   truncated: boolean;
+  continuation?: unknown;
   artifacts: string[];
   evidence: Array<{ kind: string; uri: string }>;
   error?: { code: string; message: string; retryable: boolean; details?: unknown };

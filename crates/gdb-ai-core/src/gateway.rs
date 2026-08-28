@@ -667,6 +667,7 @@ impl Gateway {
             response.state = None;
             response.warnings.clear();
             response.evidence.clear();
+            response.continuation = None;
             if was_error {
                 response.result = None;
                 response.error = Some(crate::protocol::ApiError {
@@ -694,6 +695,7 @@ impl Gateway {
             response.state = None;
             response.warnings.clear();
             response.evidence.clear();
+            response.continuation = None;
             response.error = Some(crate::protocol::ApiError {
                 code: ErrorCode::OutputLimit,
                 message: "response exceeded inline limit and artifact creation failed".into(),

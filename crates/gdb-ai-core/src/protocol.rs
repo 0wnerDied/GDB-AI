@@ -224,7 +224,7 @@ pub struct ApiResponse {
     pub warnings: Vec<Warning>,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub continuation: Option<String>,
+    pub continuation: Option<Value>,
     pub artifacts: Vec<String>,
     pub evidence: Vec<Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -264,6 +264,16 @@ impl ApiResponse {
         // envelope often pointed at no raw MI record. Promote bounded journal
         // sequence references without traversing large byte arrays.
         let evidence = response_evidence(session_id.as_deref(), Some(&result));
+        // 2026-08-29: Result-level pagination and artifact metadata never
+        // reached the canonical envelope, so clients saw false completeness.
+        let warnings = result_warnings(&result);
+        let continuation = result
+            .get("continuation")
+            .filter(|value| !value.is_null())
+            .cloned();
+        let mut artifacts = BTreeSet::new();
+        let mut truncated = false;
+        collect_result_metadata(&result, 0, &mut truncated, &mut artifacts);
         Self {
             api_version: API_VERSION.into(),
             request_id: request.request_id.clone(),
@@ -271,10 +281,10 @@ impl ApiResponse {
             revision: state.as_ref().map(|state| state.revision),
             state,
             result: Some(result),
-            warnings: Vec::new(),
-            truncated: false,
-            continuation: None,
-            artifacts: Vec::new(),
+            warnings,
+            truncated,
+            continuation,
+            artifacts: artifacts.into_iter().collect(),
             evidence,
             error: None,
         }
@@ -301,6 +311,58 @@ impl ApiResponse {
                 details: error.details,
             }),
         }
+    }
+}
+
+fn result_warnings(result: &Value) -> Vec<Warning> {
+    result
+        .get("warnings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|warning| match warning {
+            Value::String(message) => Some(Warning {
+                code: "PARTIAL_RESULT".into(),
+                message: message.clone(),
+            }),
+            Value::Object(object) => Some(Warning {
+                code: object.get("code")?.as_str()?.into(),
+                message: object.get("message")?.as_str()?.into(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_result_metadata(
+    value: &Value,
+    depth: usize,
+    truncated: &mut bool,
+    artifacts: &mut BTreeSet<String>,
+) {
+    if depth >= 8 || artifacts.len() >= 64 {
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                if key == "truncated" && child == true {
+                    *truncated = true;
+                } else if matches!(key.as_str(), "artifact" | "raw_artifact") {
+                    if let Some(uri) = child.as_str() {
+                        artifacts.insert(uri.into());
+                    }
+                } else {
+                    collect_result_metadata(child, depth + 1, truncated, artifacts);
+                }
+            }
+        }
+        Value::Array(array) if array.len() <= 128 => {
+            for child in array {
+                collect_result_metadata(child, depth + 1, truncated, artifacts);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -419,5 +481,38 @@ mod tests {
         let response = ApiResponse::success(&request, Some(state), json!({"status": "ready"}));
 
         assert!(response.evidence.is_empty());
+    }
+
+    #[test]
+    fn promotes_result_metadata_to_the_response_envelope() {
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "metadata".into(),
+            session_id: Some("sess_test".into()),
+            method: CanonicalMethod::ArtifactGet,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({}),
+        };
+        let response = ApiResponse::success(
+            &request,
+            None,
+            json!({
+                "warnings": [
+                    {"code": "PARTIAL_READ", "message": "one page was unavailable"},
+                    "current task could not be resolved"
+                ],
+                "continuation": {"offset": 16},
+                "items": [{
+                    "artifact": "gdbai://artifact/sha256:test",
+                    "truncated": true
+                }]
+            }),
+        );
+
+        assert!(response.truncated);
+        assert_eq!(response.continuation, Some(json!({"offset": 16})));
+        assert_eq!(response.artifacts, ["gdbai://artifact/sha256:test"]);
+        assert_eq!(response.warnings.len(), 2);
     }
 }
