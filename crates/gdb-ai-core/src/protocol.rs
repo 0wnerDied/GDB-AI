@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, fmt, ops::Deref};
+use std::{collections::BTreeSet, fmt, ops::Deref, str::FromStr};
 
 use crate::{Error, domain::SessionState};
 
@@ -105,19 +105,38 @@ impl Deref for CanonicalMethod {
     }
 }
 
-impl From<&str> for CanonicalMethod {
-    fn from(value: &str) -> Self {
+impl TryFrom<&str> for CanonicalMethod {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        // 2026-08-28: Infallible conversion panicked on an unknown internal
+        // method string. Keep every routing boundary on the typed error path.
         Self::ALL
             .iter()
             .copied()
             .find(|method| method.as_str() == value)
-            .unwrap_or_else(|| panic!("unknown internal canonical method {value}"))
+            .ok_or_else(|| {
+                Error::new(
+                    crate::ErrorCode::InvalidArgument,
+                    format!("unknown canonical method {value}"),
+                )
+            })
     }
 }
 
-impl From<String> for CanonicalMethod {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
+impl TryFrom<String> for CanonicalMethod {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl FromStr for CanonicalMethod {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value)
     }
 }
 
@@ -362,6 +381,7 @@ mod tests {
         assert!(
             serde_json::from_value::<CanonicalMethod>(Value::String("unknown".into())).is_err()
         );
+        assert!(CanonicalMethod::try_from("unknown").is_err());
     }
 
     #[test]

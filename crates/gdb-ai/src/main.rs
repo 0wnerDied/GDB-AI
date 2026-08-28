@@ -236,7 +236,7 @@ async fn session_cli(config: Config, command: SessionCommand) -> Result<(), AnyE
                     api_version: API_VERSION.into(),
                     request_id: "cli-list".into(),
                     session_id: None,
-                    method: "session.list".into(),
+                    method: CanonicalMethod::SessionList,
                     expected_revision: None,
                     idempotency_key: None,
                     parameters: json!({}),
@@ -249,7 +249,7 @@ async fn session_cli(config: Config, command: SessionCommand) -> Result<(), AnyE
                     api_version: API_VERSION.into(),
                     request_id: "cli-inspect".into(),
                     session_id: Some(session_id),
-                    method: "session.get".into(),
+                    method: CanonicalMethod::SessionGet,
                     expected_revision: None,
                     idempotency_key: None,
                     parameters: json!({}),
@@ -262,7 +262,7 @@ async fn session_cli(config: Config, command: SessionCommand) -> Result<(), AnyE
                     api_version: API_VERSION.into(),
                     request_id: "cli-close-inspect".into(),
                     session_id: Some(session_id.clone()),
-                    method: "session.get".into(),
+                    method: CanonicalMethod::SessionGet,
                     expected_revision: None,
                     idempotency_key: None,
                     parameters: json!({}),
@@ -274,7 +274,7 @@ async fn session_cli(config: Config, command: SessionCommand) -> Result<(), AnyE
                     api_version: API_VERSION.into(),
                     request_id: "cli-close-lease".into(),
                     session_id: Some(session_id.clone()),
-                    method: "session.acquire_write_lease".into(),
+                    method: CanonicalMethod::SessionAcquireWriteLease,
                     expected_revision: inspected.revision,
                     idempotency_key: None,
                     parameters: json!({"force": true}),
@@ -292,7 +292,7 @@ async fn session_cli(config: Config, command: SessionCommand) -> Result<(), AnyE
                     api_version: API_VERSION.into(),
                     request_id: "cli-close".into(),
                     session_id: Some(session_id),
-                    method: "session.close".into(),
+                    method: CanonicalMethod::SessionClose,
                     expected_revision: acquired.revision,
                     idempotency_key: None,
                     parameters: json!({"lease_id": lease_id}),
@@ -467,7 +467,7 @@ async fn doctor(config: Config) -> Result<(), AnyError> {
                 api_version: API_VERSION.into(),
                 request_id: "doctor-create".into(),
                 session_id: None,
-                method: "session.create".into(),
+                method: CanonicalMethod::SessionCreate,
                 expected_revision: None,
                 idempotency_key: None,
                 parameters: json!({}),
@@ -506,7 +506,7 @@ async fn doctor(config: Config) -> Result<(), AnyError> {
                 api_version: API_VERSION.into(),
                 request_id: "doctor-close".into(),
                 session_id: Some(session_id),
-                method: "session.close".into(),
+                method: CanonicalMethod::SessionClose,
                 expected_revision: created.revision,
                 idempotency_key: None,
                 parameters: json!({"lease_id": lease_id}),
@@ -1235,7 +1235,7 @@ fn apply_cancel_mode(
     let (method, parameters) = match cancellation.mode {
         CancelMode::DetachWaiter => return,
         CancelMode::InterruptTarget => (
-            "execution.control",
+            CanonicalMethod::ExecutionControl,
             json!({
                 "action": "interrupt",
                 "lease_id": lease_id,
@@ -1243,7 +1243,7 @@ fn apply_cancel_mode(
             }),
         ),
         CancelMode::CloseSession => (
-            "session.close",
+            CanonicalMethod::SessionClose,
             json!({"lease_id": lease_id, "accept_latest_revision": true}),
         ),
     };
@@ -1254,7 +1254,7 @@ fn apply_cancel_mode(
                     api_version: API_VERSION.into(),
                     request_id: format!("cancel_{}", sequence.fetch_add(1, Ordering::Relaxed)),
                     session_id: Some(session_id),
-                    method: method.into(),
+                    method,
                     expected_revision: None,
                     idempotency_key: None,
                     parameters,
@@ -1432,7 +1432,7 @@ async fn list_resources(
 ) -> Result<Value, RpcFault> {
     let response = gateway
         .dispatch(
-            canonical_request(sequence, None, "session.list", json!({})),
+            canonical_request(sequence, None, CanonicalMethod::SessionList, json!({})),
             caller,
         )
         .await;
@@ -1519,7 +1519,12 @@ async fn read_resource(
     if uri.starts_with("gdbai://artifact/sha256:") {
         let response = gateway
             .dispatch(
-                canonical_request(sequence, None, "artifact.get", json!({"uri": uri})),
+                canonical_request(
+                    sequence,
+                    None,
+                    CanonicalMethod::ArtifactGet,
+                    json!({"uri": uri}),
+                ),
                 caller,
             )
             .await;
@@ -1555,20 +1560,20 @@ async fn read_resource(
             data: Some(json!({"uri": uri})),
         })?;
     let (method, parameters) = match parts.as_slice() {
-        [_, "status"] | [_, "events"] => ("session.get", json!({})),
-        [_, "capabilities"] => ("session.capabilities", json!({})),
-        [_, "transcript"] => ("session.transcript", json!({})),
+        [_, "status"] | [_, "events"] => (CanonicalMethod::SessionGet, json!({})),
+        [_, "capabilities"] => (CanonicalMethod::SessionCapabilities, json!({})),
+        [_, "transcript"] => (CanonicalMethod::SessionTranscript, json!({})),
         [_, "event", event_seq] => (
-            "session.event",
+            CanonicalMethod::SessionEvent,
             json!({"event_seq": event_seq.parse::<u64>().map_err(|_| RpcFault::invalid("invalid event sequence"))?}),
         ),
-        [_, "breakpoints"] => ("breakpoint.list", json!({})),
+        [_, "breakpoints"] => (CanonicalMethod::BreakpointList, json!({})),
         [_, "snapshot", snapshot_id] => (
-            "inspection.snapshot_get",
+            CanonicalMethod::InspectionSnapshotGet,
             json!({"snapshot_id": snapshot_id}),
         ),
         [_, "inferior", _, "output"] => (
-            "inferior_io.read",
+            CanonicalMethod::InferiorIoRead,
             json!({"stream": "pty", "after_offset": 0, "max_bytes": 65536}),
         ),
         _ => {
@@ -1600,14 +1605,14 @@ async fn read_resource(
 fn canonical_request(
     sequence: &AtomicU64,
     session_id: Option<String>,
-    method: &str,
+    method: CanonicalMethod,
     parameters: Value,
 ) -> ApiRequest {
     ApiRequest {
         api_version: API_VERSION.into(),
         request_id: format!("rpc_{}", sequence.fetch_add(1, Ordering::Relaxed)),
         session_id,
-        method: method.into(),
+        method,
         expected_revision: None,
         idempotency_key: None,
         parameters,

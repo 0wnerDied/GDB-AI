@@ -20,7 +20,7 @@ fn request(
         api_version: API_VERSION.into(),
         request_id: id.into(),
         session_id: session_id.map(str::to_owned),
-        method: method.into(),
+        method: method.parse().unwrap(),
         expected_revision: revision,
         idempotency_key: None,
         parameters,

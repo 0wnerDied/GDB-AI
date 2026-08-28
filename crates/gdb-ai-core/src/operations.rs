@@ -1521,7 +1521,7 @@ impl Gateway {
                 api_version: request.api_version.clone(),
                 request_id: format!("{}:{name}", request.request_id),
                 session_id: request.session_id.clone(),
-                method: "inspection.get".into(),
+                method: CanonicalMethod::InspectionGet,
                 expected_revision: None,
                 idempotency_key: None,
                 parameters,
