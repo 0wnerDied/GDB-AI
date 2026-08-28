@@ -121,7 +121,10 @@ fn notification(class: &str, results: &[MiResult]) -> Option<DomainEvent> {
         "memory-changed" => Some(DomainEvent::MemoryChanged),
         // These notifications do not alter the canonical all-stop model.
         "thread-selected" | "cmd-param-changed" => None,
-        _ => Some(DomainEvent::UnknownBackendEvent {
+        // 2026-08-28: Future informational notifications permanently tainted
+        // sessions. Preserve them separately so managed reconciliation can
+        // recover without treating every new MI notification as a mutation.
+        _ => Some(DomainEvent::UnknownBackendNotification {
             class: format!("notify:{class}"),
         }),
     }
@@ -218,8 +221,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_async_event_forces_reconciliation() {
+    fn unknown_notification_requests_managed_reconciliation() {
         let record = parse_record(b"=future-event,x=\"1\"", MiLimits::default()).unwrap();
+        assert!(matches!(
+            normalize(&record),
+            Some(DomainEvent::UnknownBackendNotification { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_exec_event_remains_unclassifiable() {
+        let record = parse_record(b"*future-exec,x=\"1\"", MiLimits::default()).unwrap();
         assert!(matches!(
             normalize(&record),
             Some(DomainEvent::UnknownBackendEvent { .. })

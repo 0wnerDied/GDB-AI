@@ -21,7 +21,7 @@
         "consistency_restored", "consistency_lost",
         "target_disconnected", "target_detached", "core_opened",
         "target_configured", "output",
-        "unknown_backend_event"
+        "unknown_backend_event", "unknown_backend_notification"
       ]
     }
   },

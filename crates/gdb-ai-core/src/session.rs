@@ -1889,7 +1889,11 @@ impl SessionWorker {
                             OutputSource::InferiorPty | OutputSource::ServerDiagnostic => {}
                         }
                     }
-                    if matches!(event, DomainEvent::UnknownBackendEvent { .. }) {
+                    if matches!(
+                        event,
+                        DomainEvent::UnknownBackendEvent { .. }
+                            | DomainEvent::UnknownBackendNotification { .. }
+                    ) {
                         self.metrics.mi_unknown_class();
                     }
                     if matches!(event, DomainEvent::TargetStopped { .. }) {

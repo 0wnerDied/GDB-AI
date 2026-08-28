@@ -679,6 +679,9 @@ pub enum DomainEvent {
     UnknownBackendEvent {
         class: String,
     },
+    UnknownBackendNotification {
+        class: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

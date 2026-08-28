@@ -484,9 +484,21 @@ impl StateReducer {
             DomainEvent::UnknownBackendEvent { class } => {
                 self.state.consistency = Consistency::Tainted;
                 self.state.reconciliation_required = true;
-                self.state
-                    .limitations
-                    .push(format!("unknown backend event: {class}"));
+                let limitation = format!("unknown backend event: {class}");
+                if !self.state.limitations.contains(&limitation) {
+                    self.state.limitations.push(limitation);
+                }
+                true
+            }
+            DomainEvent::UnknownBackendNotification { class } => {
+                if self.state.consistency != Consistency::Tainted {
+                    self.state.consistency = Consistency::ManagedDirty;
+                }
+                self.state.reconciliation_required = true;
+                let limitation = format!("unknown backend notification: {class}");
+                if !self.state.limitations.contains(&limitation) {
+                    self.state.limitations.push(limitation);
+                }
                 true
             }
             DomainEvent::Output { .. } => false,
@@ -688,6 +700,29 @@ mod tests {
         );
         let second = reducer.state().inferiors["i1"].threads["1"].id.clone();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn unknown_notification_can_reconcile_without_permanent_taint() {
+        let mut reducer =
+            StateReducer::new(SessionState::creating(SessionId("sess_notify".into())));
+        apply(&mut reducer, 1, DomainEvent::BackendStarted);
+        apply(
+            &mut reducer,
+            2,
+            DomainEvent::UnknownBackendNotification {
+                class: "notify:future-event".into(),
+            },
+        );
+        assert_eq!(reducer.state().consistency, Consistency::ManagedDirty);
+        assert!(reducer.state().reconciliation_required);
+        apply(
+            &mut reducer,
+            3,
+            DomainEvent::ConsistencyRestored { warnings: vec![] },
+        );
+        assert_eq!(reducer.state().consistency, Consistency::Clean);
+        assert!(!reducer.state().reconciliation_required);
     }
 
     #[test]
