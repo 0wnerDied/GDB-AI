@@ -1,7 +1,7 @@
 # GDB/MI
 
 GDB/MI is a stateful, agent-oriented debugging control plane. It runs one
-isolated GDB process per session, separates inferior PTY traffic from MI
+dedicated GDB process per session, separates inferior PTY traffic from MI
 control traffic, reduces asynchronous records into explicit state, and
 exposes bounded semantic operations through MCP and canonical JSON-RPC.
 
@@ -31,7 +31,8 @@ The complete normative design is in [PLAN.md](PLAN.md).
 - MCP stdio, MCP Streamable HTTP, Unix socket, canonical JSON-RPC, Python SDK,
   TypeScript SDK, CLI operations, schema files, and Prometheus text metrics
 - Secure GDB startup, clean inferior environment, workspace path policy,
-  bubblewrap isolation when available, `no_new_privs`, and process rlimits
+  bubblewrap filesystem/network hardening when available, `no_new_privs`, and
+  process rlimits; untrusted targets require an external container or VM
 - Optional SHA-256-pinned GDB Python MI extension and conditional kernel
   provider with an explicit monitor allowlist
 
@@ -44,8 +45,8 @@ inferior restoration after GDB death.
 
 - Linux and Rust 1.88 or newer
 - GDB 13 or newer for MI4, or GDB 9 or newer for MI3 compatibility
-- Bubblewrap for the default mount/network sandbox (`auto` reports absence;
-  `required` fails closed)
+- Bubblewrap for optional mount/network hardening (`auto` reports absence;
+  `required` fails closed); it is not a complete untrusted-code sandbox
 - A C compiler for integration tests
 - Optional: gdbserver, Python-enabled GDB, Node.js 18 or newer
 

@@ -196,6 +196,11 @@ Candidate commands are:
 
 ## 5. Process isolation and leases
 
+The in-process bubblewrap backend implements filesystem/network hardening only.
+The complete isolation model below remains the production architecture and
+requires an external container or VM supervisor; capabilities distinguish the
+two levels.
+
 The intended process tree is one gateway with one worker and one GDB per
 session. Each worker runs, when supported by the host deployment, with a PID,
 mount, and network namespace; cgroup quotas; rlimits; seccomp; a restricted

@@ -116,7 +116,9 @@ pub struct BackendDescriptor {
     pub name: &'static str,
     pub mi_version: String,
     pub pty: String,
-    pub sandboxed: bool,
+    // 2026-08-28: Bubblewrap was reported as a complete sandbox even though
+    // this process only configures filesystem/network hardening and rlimits.
+    pub filesystem_hardened: bool,
     pub network_isolated: bool,
 }
 
@@ -411,7 +413,7 @@ impl GdbBackend {
                 name: "gdb",
                 mi_version: mi_version.to_owned(),
                 pty: pty_path.to_string_lossy().into_owned(),
-                sandboxed,
+                filesystem_hardened: sandboxed,
                 network_isolated: sandboxed && !sandbox.allow_network,
             },
         })
