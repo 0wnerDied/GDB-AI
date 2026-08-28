@@ -165,6 +165,11 @@ impl Gateway {
     }
 
     async fn session_create(&self, request: &ApiRequest, caller: &Caller) -> Result<Value> {
+        // 2026-08-28: Concurrent creates checked the registry before either
+        // inserted its worker, allowing both to exceed max_sessions. Session
+        // startup is rare, so serialize its reservation and insertion.
+        // ponytail: shard reservations only if startup throughput matters.
+        let _creation = self.session_creation.lock().await;
         if self.sessions.read().await.len() >= self.config.server.max_sessions {
             return Err(Error::new(ErrorCode::Conflict, "maximum sessions reached"));
         }

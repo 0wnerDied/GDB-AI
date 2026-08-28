@@ -52,6 +52,7 @@ pub struct Gateway {
     idempotency: Mutex<BTreeMap<String, (String, ApiResponse)>>,
     idempotency_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     rates: Mutex<BTreeMap<String, RateWindow>>,
+    pub(crate) session_creation: Mutex<()>,
 }
 
 struct RateWindow {
@@ -74,6 +75,7 @@ impl Gateway {
             idempotency: Mutex::new(BTreeMap::new()),
             idempotency_locks: Mutex::new(BTreeMap::new()),
             rates: Mutex::new(BTreeMap::new()),
+            session_creation: Mutex::new(()),
         })
     }
 
@@ -912,6 +914,54 @@ mod tests {
             .await;
         assert_eq!(conflicting.error.unwrap().code, ErrorCode::Conflict);
         assert_eq!(gateway.sessions.read().await.len(), 1);
+        gateway.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_creates_respect_the_session_limit() {
+        if std::process::Command::new("gdb")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let mut config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        config.server.max_sessions = 1;
+        let gateway = Gateway::new(config).unwrap();
+        let caller = Caller::local("limit-test");
+        let create = |request_id: &str| ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: request_id.into(),
+            session_id: None,
+            method: crate::protocol::CanonicalMethod::SessionCreate,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({}),
+        };
+        let (first, second) = tokio::join!(
+            gateway.dispatch(create("first"), &caller),
+            gateway.dispatch(create("second"), &caller)
+        );
+        assert_eq!(gateway.sessions.read().await.len(), 1);
+        assert_eq!(
+            [first, second]
+                .into_iter()
+                .filter_map(|response| response.error)
+                .map(|error| error.code)
+                .collect::<Vec<_>>(),
+            vec![ErrorCode::Conflict]
+        );
         gateway.shutdown().await;
     }
 
