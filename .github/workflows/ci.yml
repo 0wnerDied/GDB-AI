@@ -54,8 +54,31 @@ jobs:
           npm --prefix sdk/typescript ci
           npm --prefix sdk/typescript run build
           node sdk/typescript/test.mjs
-      - name: Check fuzz targets
-        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+      - name: Install fuzz toolchain
+        run: |
+          rustup toolchain install nightly-2026-08-01 --profile minimal
+          cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Run fuzz campaigns
+        run: |
+          mkdir -p "$RUNNER_TEMP/mi-corpus" "$RUNNER_TEMP/reducer-corpus"
+          cp tests/mi-fixtures/*.mi "$RUNNER_TEMP/mi-corpus/"
+          cp fuzz/corpus/state_reducer/*.json "$RUNNER_TEMP/reducer-corpus/"
+          for target in mi_parser mi_framer state_reducer; do
+            corpus="$RUNNER_TEMP/mi-corpus"
+            if [ "$target" = state_reducer ]; then
+              corpus="$RUNNER_TEMP/reducer-corpus"
+            fi
+            log="$RUNNER_TEMP/$target.log"
+            if cargo +nightly-2026-08-01 fuzz run "$target" "$corpus" -- \
+              -max_total_time=60 -max_len=65536 -timeout=5 \
+              -rss_limit_mb=1536 -verbosity=0 -print_final_stats=1 \
+              >"$log" 2>&1; then
+              tail -n 8 "$log"
+            else
+              cat "$log"
+              exit 1
+            fi
+          done
 
   kernel:
     runs-on: ubuntu-24.04
