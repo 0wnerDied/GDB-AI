@@ -569,7 +569,8 @@ memory.read, memory.write, memory.search, memory.compare
 register.read, register.write
 disassembly.read
 
-inferior_io.read, inferior_io.write, inferior_io.close_stdin
+inferior_io.read, inferior_io.write, inferior_io.send_eof
+inferior_io.close_stdin (deprecated compatibility alias)
 inferior_io.resize
 
 tracking.add_expression, tracking.add_memory, tracking.remove, tracking.list
@@ -605,7 +606,8 @@ Tools:
 - `gdb_memory`: read, write, search, compare;
 - `gdb_disassemble`: bounded around/range disassembly with optional bytes and
   source;
-- `gdb_io`: read, write, close_stdin, resize;
+- `gdb_io`: read, write, send_eof, resize; `close_stdin` remains a deprecated
+  compatibility alias and never claims an OS-level half-close;
 - `gdb_batch`: multiple reads at the same stop revision; and
 - `gdb_raw`: MI or console, registered only for `raw_admin`.
 

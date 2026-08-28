@@ -101,9 +101,8 @@ pub fn effect_for_method(method: CanonicalMethod) -> Effect {
         | ArtifactGet
         | EventsWait => Effect::Read,
         TargetConnectRemote => Effect::Network,
-        MemoryWrite | RegisterWrite | InferiorIoWrite | InferiorIoCloseStdin | InferiorIoResize => {
-            Effect::TargetMutation
-        }
+        MemoryWrite | RegisterWrite | InferiorIoWrite | InferiorIoCloseStdin
+        | InferiorIoSendEof | InferiorIoResize => Effect::TargetMutation,
         RawMi | RawConsole | KernelMonitor => Effect::Raw,
         TargetLaunch
         | TargetAttach

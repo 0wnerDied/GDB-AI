@@ -116,7 +116,7 @@ MCP protocol versions are `2025-11-25`, `2025-06-18`, `2025-03-26`, and
 | `gdb_memory` | Bounded read, CAS write, compare, and explicit-range search |
 | `gdb_registers` | Semantic register roles and audited writes |
 | `gdb_disassemble` | Normalized bounded instructions with source and bytes |
-| `gdb_io` | Separate PTY, MI target, console, and log I/O plus EOF and resize |
+| `gdb_io` | Separate PTY, MI target, console, and log I/O plus `send_eof` and resize |
 | `gdb_tracking` | Tracked expressions/memory and bounded histories |
 | `gdb_signals` | Structured stop/print/pass signal policy |
 | `gdb_batch` | Multiple reads constrained to one stop |

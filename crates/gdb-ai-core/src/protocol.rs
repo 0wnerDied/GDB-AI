@@ -73,6 +73,7 @@ canonical_methods! {
     InferiorIoRead => "inferior_io.read",
     InferiorIoWrite => "inferior_io.write",
     InferiorIoCloseStdin => "inferior_io.close_stdin",
+    InferiorIoSendEof => "inferior_io.send_eof",
     InferiorIoResize => "inferior_io.resize",
     TrackingAddExpression => "tracking.add_expression",
     TrackingAddMemory => "tracking.add_memory",

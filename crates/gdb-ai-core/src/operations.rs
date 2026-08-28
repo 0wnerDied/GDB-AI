@@ -141,7 +141,9 @@ impl Gateway {
             CanonicalMethod::DisassemblyRead => self.disassembly_read(request).await,
             CanonicalMethod::InferiorIoRead => self.io_read(request).await,
             CanonicalMethod::InferiorIoWrite => self.io_write(request).await,
-            CanonicalMethod::InferiorIoCloseStdin => self.io_close_stdin(request).await,
+            CanonicalMethod::InferiorIoCloseStdin | CanonicalMethod::InferiorIoSendEof => {
+                self.io_send_eof(request).await
+            }
             CanonicalMethod::InferiorIoResize => self.io_resize(request).await,
             CanonicalMethod::TrackingAddExpression => self.tracking_add_expression(request).await,
             CanonicalMethod::TrackingAddMemory => self.tracking_add_memory(request).await,
@@ -2339,18 +2341,22 @@ impl Gateway {
         Ok(json!({ "written": bytes.len() }))
     }
 
-    async fn io_close_stdin(&self, request: &ApiRequest) -> Result<Value> {
+    async fn io_send_eof(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
-        // A PTY is a terminal, not a pipe. VEOF is the portable terminal EOF
-        // signal while retaining the master for output reads.
+        // 2026-08-28: Writing VEOF to a PTY never closes its file descriptor;
+        // the old close_stdin result falsely claimed an OS-level half-close.
         entry.handle.write_inferior(vec![0x04]).await?;
         entry
             .handle
             .record_event(DomainEvent::ControllerChanged {
-                kind: "inferior_stdin_closed".into(),
+                kind: "inferior_veof_sent".into(),
             })
             .await?;
-        Ok(json!({ "closed": true, "mechanism": "pty-veof" }))
+        Ok(json!({
+            "sent": true,
+            "closed": false,
+            "mechanism": "pty_veof"
+        }))
     }
 
     async fn io_resize(&self, request: &ApiRequest) -> Result<Value> {

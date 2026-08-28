@@ -845,11 +845,29 @@ async fn local_debugging_vertical_slice() {
                     Some(&session_id),
                     "inferior_io.write",
                     changed.revision,
-                    json!({"lease_id": lease_id, "text": "\n"}),
+                    json!({"lease_id": lease_id, "text": "x"}),
                 ),
                 &caller,
             )
             .await,
+    );
+    let eof = successful(
+        gateway
+            .dispatch(
+                request(
+                    "eof",
+                    Some(&session_id),
+                    "inferior_io.send_eof",
+                    input.revision,
+                    json!({"lease_id": lease_id}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(
+        eof.result.as_ref().unwrap(),
+        &json!({"sent": true, "closed": false, "mechanism": "pty_veof"})
     );
     let exited = successful(
         gateway
@@ -858,7 +876,7 @@ async fn local_debugging_vertical_slice() {
                     "exit",
                     Some(&session_id),
                     "execution.control",
-                    input.revision,
+                    eof.revision,
                     json!({
                         "action": "continue",
                         "lease_id": lease_id,

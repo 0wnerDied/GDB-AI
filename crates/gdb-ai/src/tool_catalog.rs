@@ -105,6 +105,7 @@ const DISASSEMBLY_ACTIONS: &[ToolAction] = &[action!("", DisassemblyRead)];
 const IO_ACTIONS: &[ToolAction] = &[
     action!("read", InferiorIoRead),
     action!("write", InferiorIoWrite),
+    action!("send_eof", InferiorIoSendEof),
     action!("close_stdin", InferiorIoCloseStdin),
     action!("resize", InferiorIoResize),
 ];
@@ -393,6 +394,14 @@ mod tests {
         assert_eq!(
             method_for_tool("gdb_memory", Some("read")),
             Some(CanonicalMethod::MemoryRead)
+        );
+        assert_eq!(
+            method_for_tool("gdb_io", Some("send_eof")),
+            Some(CanonicalMethod::InferiorIoSendEof)
+        );
+        assert_eq!(
+            method_for_tool("gdb_io", Some("close_stdin")),
+            Some(CanonicalMethod::InferiorIoCloseStdin)
         );
     }
 }

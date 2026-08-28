@@ -420,6 +420,7 @@ impl CanonicalMethod {
             | TargetDetach
             | BreakpointList
             | InferiorIoCloseStdin
+            | InferiorIoSendEof
             | TrackingList
             | SignalGet => MethodContract::plain(vec![]),
             SessionAcquireWriteLease => MethodContract::plain(vec![optional("force", Boolean)]),
