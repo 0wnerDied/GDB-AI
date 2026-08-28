@@ -11,6 +11,8 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      GDB_AI_REQUIRE_INTEGRATION: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -24,6 +26,13 @@ jobs:
           cache-dependency-path: sdk/typescript/package-lock.json
       - name: Install debugger prerequisites
         run: sudo apt-get update && sudo apt-get install -y bubblewrap gdb gdbserver gcc
+      - name: Verify debugger prerequisites
+        run: |
+          gdb --version
+          gdbserver --version
+          gcc --version
+          output=$(printf '1-gdb-exit\n' | gdb -q -nx --interpreter=mi4)
+          grep -q '1\^exit' <<<"$output"
       - name: Install minimum Rust toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check formatting

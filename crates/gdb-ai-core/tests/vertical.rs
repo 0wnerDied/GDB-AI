@@ -9,6 +9,8 @@ use gdb_ai_core::{
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
+mod support;
+
 fn request(
     id: &str,
     session_id: Option<&str>,
@@ -38,9 +40,7 @@ fn successful(response: ApiResponse) -> ApiResponse {
 
 #[tokio::test]
 async fn local_debugging_vertical_slice() {
-    if Command::new("gdb").arg("--version").output().is_err()
-        || Command::new("cc").arg("--version").output().is_err()
-    {
+    if !support::require_commands(&["gdb", "cc"]) {
         return;
     }
 

@@ -8,6 +8,8 @@ use gdb_ai_core::{
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
+mod support;
+
 fn request(
     id: &str,
     session_id: Option<&str>,
@@ -28,9 +30,7 @@ fn request(
 
 #[tokio::test]
 async fn stops_at_the_first_instruction_without_symbols() {
-    if Command::new("gdb").arg("--version").output().is_err()
-        || Command::new("cc").arg("--version").output().is_err()
-    {
+    if !support::require_commands(&["gdb", "cc"]) {
         return;
     }
     let directory = tempdir().unwrap();

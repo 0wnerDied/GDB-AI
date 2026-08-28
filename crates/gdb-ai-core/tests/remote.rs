@@ -9,6 +9,8 @@ use gdb_ai_core::{
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
+mod support;
+
 fn request(
     id: &str,
     session_id: Option<&str>,
@@ -29,10 +31,7 @@ fn request(
 
 #[tokio::test]
 async fn connects_to_allowlisted_gdbserver() {
-    if Command::new("gdbserver").arg("--version").output().is_err()
-        || Command::new("gdb").arg("--version").output().is_err()
-        || Command::new("cc").arg("--version").output().is_err()
-    {
+    if !support::require_commands(&["gdbserver", "gdb", "cc"]) {
         return;
     }
     let directory = tempdir().unwrap();
