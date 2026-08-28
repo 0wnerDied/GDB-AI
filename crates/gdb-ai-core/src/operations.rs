@@ -2078,11 +2078,15 @@ impl Gateway {
         // truncated. Read one sentinel match before setting the flag.
         let truncated = matches.len() > max_results;
         matches.truncate(max_results);
+        // 2026-08-28: Search permits a bounded short read, but callers could
+        // only infer it from two lengths. Mark partial evidence explicitly.
+        let partial = bytes.len() < length;
         Ok(json!({
             "start": start,
             "requested_length": length,
             "searched_length": bytes.len(),
             "matches": matches,
+            "partial": partial,
             "truncated": truncated,
             "evidence_seq": evidence_seq
         }))

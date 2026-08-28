@@ -395,6 +395,32 @@ async fn local_debugging_vertical_slice() {
             )
             .await,
     );
+    let search = successful(
+        gateway
+            .dispatch(
+                request(
+                    "memory-search",
+                    Some(&session_id),
+                    "memory.search",
+                    None,
+                    json!({
+                        "start": address,
+                        "length": 4,
+                        "pattern": {"hex": "07000000"},
+                        "stop_id": second_stop
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(search.result.as_ref().unwrap()["partial"], false);
+    assert_eq!(
+        search.result.as_ref().unwrap()["matches"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
     let memory_artifact = memory.result.as_ref().unwrap()["artifact"]
         .as_str()
         .unwrap()
