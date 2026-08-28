@@ -180,7 +180,7 @@ async fn local_debugging_vertical_slice() {
                     "target.launch",
                     partial_signals.revision,
                     json!({
-                        "program": executable,
+                        "program": "vertical",
                         "lease_id": lease_id,
                         "cwd": directory.path(),
                         "stop": "first_instruction",

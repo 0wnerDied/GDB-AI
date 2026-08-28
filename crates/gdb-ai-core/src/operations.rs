@@ -502,13 +502,31 @@ impl Gateway {
         }
         validate_environment(&parameters.environment)?;
         validate_argv(&parameters.argv)?;
-        let program = self.workspace_path(&parameters.program, false)?;
-        let default_cwd = program
-            .parent()
-            .unwrap_or(Path::new("/"))
-            .to_string_lossy()
-            .into_owned();
-        let cwd = self.workspace_path(parameters.cwd.as_deref().unwrap_or(&default_cwd), true)?;
+        // 2026-08-28: Launch canonicalized program before applying the
+        // requested cwd, so an otherwise valid relative executable failed.
+        let requested_cwd = parameters
+            .cwd
+            .as_deref()
+            .map(|cwd| self.workspace_path(cwd, true))
+            .transpose()?;
+        let requested_program = Path::new(&parameters.program);
+        let program_path = if requested_program.is_relative() {
+            requested_cwd.as_ref().map_or_else(
+                || requested_program.to_owned(),
+                |cwd| cwd.join(requested_program),
+            )
+        } else {
+            requested_program.to_owned()
+        };
+        let program = self.workspace_path(&program_path.to_string_lossy(), false)?;
+        let cwd = if let Some(cwd) = requested_cwd {
+            cwd
+        } else {
+            self.workspace_path(
+                &program.parent().unwrap_or(Path::new("/")).to_string_lossy(),
+                true,
+            )?
+        };
         if !matches!(parameters.follow_fork.as_str(), "parent" | "child") {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
