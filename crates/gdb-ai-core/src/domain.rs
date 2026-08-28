@@ -589,6 +589,8 @@ pub enum DomainEvent {
     InferiorExited {
         backend_id: String,
         exit_code: Option<String>,
+        #[serde(default)]
+        from_stop_record: bool,
     },
     ThreadCreated {
         backend_inferior: String,

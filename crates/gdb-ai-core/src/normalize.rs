@@ -42,6 +42,7 @@ fn stopped(results: &[MiResult]) -> Option<DomainEvent> {
         return Some(DomainEvent::InferiorExited {
             backend_id: backend_inferior.unwrap_or_else(|| "i1".into()),
             exit_code: MiResult::find_str(results, "exit-code").map(str::to_owned),
+            from_stop_record: true,
         });
     }
     Some(DomainEvent::TargetStopped {
@@ -95,6 +96,7 @@ fn notification(class: &str, results: &[MiResult]) -> Option<DomainEvent> {
         "thread-group-exited" => Some(DomainEvent::InferiorExited {
             backend_id: text(results, "id")?,
             exit_code: text(results, "exit-code"),
+            from_stop_record: false,
         }),
         "thread-created" => Some(DomainEvent::ThreadCreated {
             backend_inferior: text(results, "group-id").unwrap_or_else(|| "i1".into()),

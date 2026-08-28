@@ -97,10 +97,27 @@ impl StateReducer {
             DomainEvent::InferiorExited {
                 backend_id,
                 exit_code,
+                from_stop_record,
             } => {
+                // 2026-08-29: A lost RSP connection is reported as a remote
+                // thread-group exit without an exit code. Treat it as a
+                // disconnect unless an earlier stopped record already proved
+                // the inferior exited normally.
+                let disconnected = self.state.target_origin == TargetOrigin::Remote
+                    && !from_stop_record
+                    && exit_code.is_none()
+                    && self
+                        .state
+                        .inferiors
+                        .get(backend_id)
+                        .is_none_or(|inferior| inferior.status != InferiorStatus::Exited);
                 let seq = self.state.event_seq;
                 let inferior = self.ensure_inferior(backend_id, seq);
-                inferior.status = InferiorStatus::Exited;
+                inferior.status = if disconnected {
+                    InferiorStatus::Disconnected
+                } else {
+                    InferiorStatus::Exited
+                };
                 inferior.exit_code.clone_from(exit_code);
                 // 2026-08-28: Inferior exit left the last stop and snapshot
                 // looking current even though no stop-scoped object survived.
@@ -654,6 +671,43 @@ mod tests {
         apply(&mut reducer, 6, DomainEvent::TargetDisconnected);
         assert!(reducer.state().stop_id.is_none());
         assert!(reducer.state().snapshot.is_none());
+    }
+
+    #[test]
+    fn distinguishes_remote_exit_from_connection_loss() {
+        let reduce = |from_stop_record| {
+            let mut reducer =
+                StateReducer::new(SessionState::creating(SessionId("sess_remote_exit".into())));
+            apply(&mut reducer, 1, DomainEvent::BackendStarted);
+            apply(
+                &mut reducer,
+                2,
+                DomainEvent::TargetConfigured {
+                    origin: TargetOrigin::Remote,
+                },
+            );
+            apply(
+                &mut reducer,
+                3,
+                DomainEvent::InferiorAdded {
+                    backend_id: "i1".into(),
+                    pid: Some(42),
+                },
+            );
+            apply(
+                &mut reducer,
+                4,
+                DomainEvent::InferiorExited {
+                    backend_id: "i1".into(),
+                    exit_code: None,
+                    from_stop_record,
+                },
+            );
+            reducer.state().inferiors["i1"].status
+        };
+
+        assert_eq!(reduce(true), InferiorStatus::Exited);
+        assert_eq!(reduce(false), InferiorStatus::Disconnected);
     }
 
     #[test]

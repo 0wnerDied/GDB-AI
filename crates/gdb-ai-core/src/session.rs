@@ -2378,6 +2378,16 @@ impl SessionWorker {
             DomainEvent::TargetDetached | DomainEvent::TargetDisconnected => {
                 self.set_capability("execution", CapabilityStatus::TemporarilyUnavailable);
             }
+            DomainEvent::InferiorExited { .. }
+                if self
+                    .reducer
+                    .state()
+                    .inferiors
+                    .values()
+                    .any(|inferior| inferior.status == InferiorStatus::Disconnected) =>
+            {
+                self.set_capability("execution", CapabilityStatus::TemporarilyUnavailable);
+            }
             _ => {}
         }
         if invalidates_values {
@@ -2856,6 +2866,7 @@ mod tests {
                 DomainEvent::InferiorExited {
                     backend_id: "i1".into(),
                     exit_code: Some("0".into()),
+                    from_stop_record: true,
                 },
             ),
         ] {
@@ -2884,6 +2895,7 @@ mod tests {
                 DomainEvent::InferiorExited {
                     backend_id: "i2".into(),
                     exit_code: Some("0".into()),
+                    from_stop_record: true,
                 },
             ))
             .unwrap();
