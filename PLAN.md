@@ -499,7 +499,10 @@ Every context-sensitive request carries `inferior_id`, `thread_id`,
 `frame_id`, and `stop_id` as applicable. Backend execution prefers native
 `--thread`/`--frame`, then thread-group filtering, then a scheduler critical
 section that changes selection, executes, restores it, and verifies state.
-Temporary selection is never visible to concurrent calls.
+When a caller omits thread/frame, the controller encodes the reducer's stopped
+thread and top frame explicitly; it never falls back to GDB's selected
+context. A frame handle resolves both its owning thread and level. Temporary
+selection is never visible to concurrent calls.
 
 ## 13. Inferior I/O
 

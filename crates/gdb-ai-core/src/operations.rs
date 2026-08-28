@@ -3620,36 +3620,112 @@ fn context_options(
     if let Some(stop) = parameters.get("stop_id").and_then(Value::as_str) {
         state.require_stop(&StopId(stop.to_owned()))?;
     }
-    if let Some(public_thread) = parameters.get("thread_id").and_then(Value::as_str) {
-        let backend_thread = state
-            .inferiors
-            .values()
-            .flat_map(|inferior| inferior.threads.values())
-            .find(|thread| thread.id.0 == public_thread)
-            .map(|thread| thread.backend_id.clone())
-            .ok_or_else(|| Error::new(ErrorCode::StaleContext, "thread handle is not current"))?;
-        command = command.bare("--thread")?.bare(backend_thread)?;
-    }
-    if let Some(frame) = parameters.get("frame_id").and_then(Value::as_str) {
+    let requested_thread = parameters
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(|public_thread| current_backend_thread(state, public_thread))
+        .transpose()?;
+    let mut frame_level = parameters.get("frame_level").and_then(Value::as_u64);
+    let frame_thread = if let Some(frame) = parameters.get("frame_id").and_then(Value::as_str) {
         let stop = state.stop_id.as_ref().ok_or_else(|| {
             Error::new(ErrorCode::TargetRunning, "frame requires a stopped target")
         })?;
-        if !frame.contains(&stop.0) {
-            return Err(Error::new(
-                ErrorCode::StaleContext,
-                "frame belongs to another stop",
-            ));
-        }
-        let level = frame
-            .rsplit('_')
-            .next()
-            .and_then(|level| level.parse::<u32>().ok())
-            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "invalid frame identifier"))?;
-        command = command.bare("--frame")?.bare(level.to_string())?;
-    } else if let Some(level) = parameters.get("frame_level").and_then(Value::as_u64) {
-        command = command.bare("--frame")?.bare(level.to_string())?;
+        let (backend_thread, level) = state
+            .inferiors
+            .values()
+            .flat_map(|inferior| inferior.threads.values())
+            .find_map(|thread| {
+                frame
+                    .strip_prefix(&format!("frm_{}_{}_", thread.id.0, stop.0))
+                    .and_then(|level| level.parse::<u64>().ok())
+                    .map(|level| (thread.backend_id.clone(), level))
+            })
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::StaleContext,
+                    "frame handle is not current for this stop",
+                )
+            })?;
+        frame_level = Some(level);
+        Some(backend_thread)
+    } else {
+        None
+    };
+    if let (Some(requested), Some(frame)) = (&requested_thread, &frame_thread)
+        && requested != frame
+    {
+        return Err(Error::new(
+            ErrorCode::StaleContext,
+            "thread and frame handles refer to different threads",
+        ));
     }
-    Ok(command)
+    // 2026-08-28: Frame handles supplied only a frame level to GDB, leaving
+    // their owning thread implicit. On a multi-thread stop this could inspect
+    // a different selected thread. Encode the frame's thread and stop focus.
+    let backend_thread = requested_thread.or(frame_thread).or_else(|| {
+        command_uses_stop_focus(&command.name)
+            .then_some(state.stopped_thread_id.as_ref())
+            .flatten()
+            .and_then(|thread| current_backend_thread(state, &thread.0).ok())
+    });
+    let mut contextual = MiCommand::new(command.name.clone())?;
+    if let Some(backend_thread) = backend_thread {
+        contextual = contextual.bare("--thread")?.bare(backend_thread)?;
+    }
+    if frame_level.is_none() && command_uses_top_frame(&command.name) {
+        frame_level = Some(0);
+    }
+    if let Some(level) = frame_level {
+        contextual = contextual.bare("--frame")?.bare(level.to_string())?;
+    }
+    // 2026-08-28: Context options belong before positional MI arguments.
+    // Several callers build expressions first, so appending options made
+    // explicit context syntactically ineffective or invalid.
+    contextual.arguments.append(&mut command.arguments);
+    Ok(contextual)
+}
+
+fn current_backend_thread(
+    state: &crate::domain::SessionState,
+    public_thread: &str,
+) -> Result<String> {
+    state
+        .inferiors
+        .values()
+        .flat_map(|inferior| inferior.threads.values())
+        .find(|thread| thread.id.0 == public_thread)
+        .map(|thread| thread.backend_id.clone())
+        .ok_or_else(|| Error::new(ErrorCode::StaleContext, "thread handle is not current"))
+}
+
+fn command_uses_stop_focus(command: &str) -> bool {
+    matches!(
+        command,
+        "-exec-step"
+            | "-exec-next"
+            | "-exec-finish"
+            | "-exec-step-instruction"
+            | "-exec-next-instruction"
+            | "-exec-until"
+            | "-stack-info-frame"
+            | "-stack-list-frames"
+            | "-stack-list-variables"
+            | "-stack-list-arguments"
+            | "-data-evaluate-expression"
+            | "-data-list-register-values"
+            | "-var-create"
+    )
+}
+
+fn command_uses_top_frame(command: &str) -> bool {
+    matches!(
+        command,
+        "-stack-info-frame"
+            | "-stack-list-variables"
+            | "-data-evaluate-expression"
+            | "-data-list-register-values"
+            | "-var-create"
+    )
 }
 
 fn require_stopped_context(parameters: &Value, state: &crate::domain::SessionState) -> Result<()> {
@@ -4173,6 +4249,8 @@ fn normalized_frames(
     let Some(stack) = MiResult::find(record.results(), "stack") else {
         return Vec::new();
     };
+    // 2026-08-28: Assigning frames to the first non-running thread could
+    // mint handles for a different thread than the explicit MI stop focus.
     let thread = parameters
         .get("thread_id")
         .and_then(Value::as_str)
@@ -4184,11 +4262,12 @@ fn normalized_frames(
                 .find(|thread| thread.id.0 == thread_id)
         })
         .or_else(|| {
+            let stopped = state.stopped_thread_id.as_ref()?;
             state
                 .inferiors
                 .values()
                 .flat_map(|inferior| inferior.threads.values())
-                .find(|thread| !thread.running)
+                .find(|thread| &thread.id == stopped)
         });
     aggregate_items(stack, "frame")
         .into_iter()
@@ -4959,7 +5038,10 @@ fn raw_mi_is_denied(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{InferiorId, SessionState, StopId, ThreadId};
+    use crate::{
+        domain::{FrameId, InferiorId, JournaledEvent, SessionState, StopId, ThreadId},
+        reducer::StateReducer,
+    };
 
     #[test]
     fn probe_accepts_only_its_breakpoint_and_scope() {
@@ -5044,6 +5126,93 @@ mod tests {
         assert_eq!(
             StartPolicy::None.command().unwrap().encoded(3),
             b"3-exec-run\n"
+        );
+    }
+
+    #[test]
+    fn frame_context_encodes_its_thread_before_positional_arguments() {
+        let mut reducer = StateReducer::new(SessionState::creating(SessionId("sess_ctx".into())));
+        for (seq, event) in [
+            (
+                1,
+                DomainEvent::InferiorAdded {
+                    backend_id: "i1".into(),
+                    pid: Some(7),
+                },
+            ),
+            (
+                2,
+                DomainEvent::ThreadCreated {
+                    backend_inferior: "i1".into(),
+                    backend_thread: "1".into(),
+                },
+            ),
+            (
+                3,
+                DomainEvent::ThreadCreated {
+                    backend_inferior: "i1".into(),
+                    backend_thread: "2".into(),
+                },
+            ),
+            (
+                4,
+                DomainEvent::TargetStopped {
+                    backend_inferior: Some("i1".into()),
+                    backend_thread: Some("2".into()),
+                    reason: "breakpoint-hit".into(),
+                    reason_detail: Some(StopReason::Breakpoint {
+                        backend_number: Some("1".into()),
+                        disposition: Some("keep".into()),
+                    }),
+                    frame: None,
+                },
+            ),
+        ] {
+            reducer
+                .apply(&JournaledEvent::for_replay(seq, event))
+                .unwrap();
+        }
+        let state = reducer.state();
+        let stop = state.stop_id.as_ref().unwrap();
+        let stopped_thread = state.stopped_thread_id.as_ref().unwrap();
+        let frame = FrameId::new(stopped_thread, stop, 3);
+        let command = context_options(
+            MiCommand::new("-data-evaluate-expression")
+                .unwrap()
+                .string("$pc"),
+            &json!({"stop_id": stop, "frame_id": frame}),
+            state,
+        )
+        .unwrap();
+        assert_eq!(
+            command.encoded(1),
+            b"1-data-evaluate-expression --thread 2 --frame 3 \"$pc\"\n"
+        );
+
+        let other_thread = &state.inferiors["i1"].threads["1"].id;
+        let error = context_options(
+            MiCommand::new("-stack-info-frame").unwrap(),
+            &json!({
+                "stop_id": stop,
+                "thread_id": other_thread,
+                "frame_id": frame
+            }),
+            state,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleContext);
+
+        let focused = context_options(
+            MiCommand::new("-data-evaluate-expression")
+                .unwrap()
+                .string("$pc"),
+            &json!({"stop_id": stop}),
+            state,
+        )
+        .unwrap();
+        assert_eq!(
+            focused.encoded(2),
+            b"2-data-evaluate-expression --thread 2 --frame 0 \"$pc\"\n"
         );
     }
 }
