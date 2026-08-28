@@ -77,10 +77,9 @@ impl SessionCapabilities {
     }
 
     pub fn supports(&self, name: &str) -> bool {
-        matches!(
-            self.status(name),
-            Some(CapabilityStatus::Supported | CapabilityStatus::Conditional)
-        )
+        // 2026-08-28: Treating conditional capabilities as unconditionally
+        // supported discarded target constraints at every boolean call site.
+        self.status(name) == Some(CapabilityStatus::Supported)
     }
 }
 
@@ -2532,6 +2531,35 @@ mod tests {
         let mut timed_out = HashSet::from([7]);
         assert_eq!(take_delayed_token(&mut timed_out, &delayed), Some(7));
         assert!(timed_out.is_empty());
+    }
+
+    #[test]
+    fn conditional_capability_is_not_unconditionally_supported() {
+        let capabilities = SessionCapabilities {
+            backend: BackendDescriptor {
+                name: "gdb",
+                mi_version: "mi4".into(),
+                pty: "/dev/pts/test".into(),
+                filesystem_hardened: false,
+                network_isolated: false,
+            },
+            features: BTreeSet::new(),
+            target_features: BTreeSet::new(),
+            commands: BTreeSet::new(),
+            capabilities: BTreeMap::from([(
+                "conditional".into(),
+                Capability {
+                    status: CapabilityStatus::Conditional,
+                    scope: "current_target",
+                    constraints: vec!["target must be stopped".into()],
+                    source: "probe",
+                    last_checked_revision: 1,
+                },
+            )]),
+            limitations: Vec::new(),
+        };
+
+        assert!(!capabilities.supports("conditional"));
     }
 
     #[test]
