@@ -1139,6 +1139,17 @@ impl RpcFault {
     }
 }
 
+const AGENT_INSTRUCTIONS: &str = "Use tools/list schemas as authoritative. Start with \
+gdb_session create, retain session_id, lease_id, and the latest revision, then launch; \
+argv contains arguments only, not the program path. debug_control permits reads and \
+run control; inferior PTY input and exploit experiments require a server configured \
+for lab_mutation or an administrative caller selecting it. Renew an expired lease \
+with acquire_write_lease and accept_latest_revision=true, omitting expected_revision. \
+Read inferior output from stream=pty. Use each returned stop_id for stop-scoped \
+inspection; resuming invalidates old frames and values. For stripped PIEs, set \
+module-offset breakpoints after launch maps the executable. Read large evidence \
+through gdbai:// resources and close the session when finished.";
+
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {
         return Err(RpcFault::invalid("initialize may only be called once"));
@@ -1172,7 +1183,7 @@ fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<
             "resources": {"subscribe": false, "listChanged": false}
         },
         "serverInfo": {"name": "gdb-ai", "version": env!("CARGO_PKG_VERSION")},
-        "instructions": "Create a session, launch a local target, and pass revision and stop_id on state-sensitive calls. Observations are bounded; large data is returned as a gdbai:// artifact."
+        "instructions": AGENT_INSTRUCTIONS
     }))
 }
 
@@ -1736,6 +1747,32 @@ mod tests {
     use super::*;
     use gdb_ai_core::config::{ArtifactConfig, PersistenceConfig};
     use tempfile::tempdir;
+
+    #[test]
+    fn initialize_teaches_agents_the_stateful_workflow() {
+        let mut phase = Phase::New;
+        let mut caller = Caller::local("test");
+        let result = initialize(
+            &json!({
+                "protocolVersion": MCP_VERSION,
+                "clientInfo": {"name": "test-agent"}
+            }),
+            &mut phase,
+            &mut caller,
+        )
+        .unwrap();
+        let instructions = result["instructions"].as_str().unwrap();
+        for required in [
+            "tools/list",
+            "argv",
+            "lab_mutation",
+            "accept_latest_revision",
+            "stream=pty",
+            "stop_id",
+        ] {
+            assert!(instructions.contains(required), "missing {required}");
+        }
+    }
 
     #[test]
     fn maps_tool_metadata_outside_canonical_parameters() {
