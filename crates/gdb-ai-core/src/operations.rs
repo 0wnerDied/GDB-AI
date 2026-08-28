@@ -2203,13 +2203,7 @@ impl Gateway {
                 role_numbers.insert(role, number);
             }
         }
-        let architecture = if names.iter().any(|name| name == "rip") {
-            "i386:x86-64"
-        } else if names.iter().any(|name| name == "x29") {
-            "aarch64"
-        } else {
-            "unknown"
-        };
+        let architecture = target_architecture(&names);
         // 2026-08-28: GDB interprets an empty register-number list as all
         // registers. Return an explicit empty role map instead of expanding a
         // missing semantic role into an unbounded backend observation.
@@ -2381,10 +2375,11 @@ impl Gateway {
             .await?;
         let architecture = entry
             .handle
-            .command(MiCommand::new("-gdb-show")?.bare("architecture")?)
+            .command(MiCommand::new("-data-list-register-names")?)
             .await
             .ok()
-            .and_then(|reply| result_text(&reply.record, "value"));
+            .map(|reply| target_architecture(&result_string_list(&reply.record, "register-names")))
+            .unwrap_or("unknown");
         let instructions = disassembly_instructions(&reply.record, current);
         Ok(json!({
             "architecture": architecture,
@@ -5346,6 +5341,18 @@ fn register_role_candidates(role: &str) -> Option<&'static [&'static str]> {
         "argument_7" => &["x7"],
         _ => return None,
     })
+}
+
+fn target_architecture(register_names: &[String]) -> &'static str {
+    // 2026-08-29: `-gdb-show architecture` reports the configured selector
+    // `auto`, not the architecture selected from a live remote target.
+    if register_names.iter().any(|name| name == "rip") {
+        "i386:x86-64"
+    } else if register_names.iter().any(|name| name == "x29") {
+        "aarch64"
+    } else {
+        "unknown"
+    }
 }
 
 fn resolve_register_name(requested: &str, names: &[String]) -> Result<String> {

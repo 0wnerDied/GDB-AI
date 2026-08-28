@@ -25,7 +25,11 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
       - name: Install debugger prerequisites
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap gdb gdbserver gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bubblewrap gcc gcc-aarch64-linux-gnu gdb gdb-multiarch \
+            gdbserver qemu-user
       - name: Verify debugger prerequisites
         run: |
           gdb --version
