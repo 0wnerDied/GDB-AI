@@ -126,7 +126,11 @@ async fn frame_handles_select_their_owning_thread() {
                     Some(&session),
                     "breakpoint.create",
                     launched.revision,
-                    json!({"lease_id": lease, "location": {"function": "worker"}}),
+                    json!({
+                        "lease_id": lease,
+                        "location": {"function": "worker"},
+                        "temporary": true
+                    }),
                 ),
                 &caller,
             )
@@ -205,6 +209,65 @@ async fn frame_handles_select_their_owning_thread() {
         gdb_ai_core::ErrorCode::StaleContext
     );
 
+    let restarted = successful(
+        gateway
+            .dispatch(
+                request(
+                    "restart",
+                    Some(&session),
+                    "target.restart",
+                    mismatch.revision,
+                    json!({
+                        "lease_id": lease,
+                        "stop": "main",
+                        "wait": {"until": "snapshot", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let restart_stop = restarted
+        .state
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    let probe = successful(
+        gateway
+            .dispatch(
+                request(
+                    "probe",
+                    Some(&session),
+                    "agent.probe",
+                    restarted.revision,
+                    json!({
+                        "lease_id": lease,
+                        "stop_id": restart_stop,
+                        "location": {"function": "worker"},
+                        "capture": [{"stack": {"limit": 2}}],
+                        "budget": {"wall_time_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let probe_state = probe.state.as_ref().unwrap();
+    let probe_thread = &probe_state.stopped_thread_id.as_ref().unwrap().0;
+    let probe_frame = &probe.result.as_ref().unwrap()["captures"][0]["observation"]["observations"]
+        [0]["stack"][0];
+    assert_eq!(probe_frame["function"], "worker");
+    assert!(
+        probe_frame["frame_id"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("frm_{probe_thread}_"))
+    );
+
     successful(
         gateway
             .dispatch(
@@ -212,7 +275,7 @@ async fn frame_handles_select_their_owning_thread() {
                     "close",
                     Some(&session),
                     "session.close",
-                    mismatch.revision,
+                    probe.revision,
                     json!({"lease_id": lease}),
                 ),
                 &caller,

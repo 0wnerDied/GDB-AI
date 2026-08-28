@@ -2783,16 +2783,20 @@ impl Gateway {
                     .and_then(Value::as_u64)
                     .unwrap_or(4)
                     .clamp(1, budget.max_frames as u64) as usize;
-                let reply = entry
-                    .handle
-                    .command(
-                        MiCommand::new("-stack-list-frames")?
-                            .bare("0")?
-                            .bare((limit - 1).to_string())?,
-                    )
-                    .await?;
+                let context = json!({"stop_id": state.stop_id});
+                // 2026-08-28: Probe stack capture bypassed explicit context
+                // and returned the raw MI reply, so a multi-thread hit could
+                // inspect GDB's selected thread instead of the stopped thread.
+                let command =
+                    context_options(MiCommand::new("-stack-list-frames")?, &context, state)?
+                        .bare("0")?
+                        .bare((limit - 1).to_string())?;
+                let reply = entry.handle.command(command).await?;
                 *calls += 1;
-                observations.push(json!({ "stack": reply }));
+                observations.push(json!({
+                    "stack": normalized_frames(&reply.record, state, &context),
+                    "evidence_seq": reply.evidence_seq
+                }));
             } else {
                 return Err(Error::new(
                     ErrorCode::InvalidArgument,
