@@ -1547,6 +1547,131 @@
                 "type": "string"
               },
               "requests": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "after_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "around": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "after_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "before_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "expression": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "before_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "frame_id": {
+                      "type": "string"
+                    },
+                    "frame_level": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_source": {
+                      "type": "boolean"
+                    },
+                    "inferior_id": {
+                      "type": "string"
+                    },
+                    "limit": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "line": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "offset": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "profile": {
+                      "enum": [
+                        "minimal",
+                        "brief",
+                        "standard",
+                        "deep"
+                      ],
+                      "type": "string"
+                    },
+                    "range": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "end": {
+                          "type": "string"
+                        },
+                        "start": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    },
+                    "roles": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "thread_id": {
+                      "type": "string"
+                    },
+                    "view": {
+                      "enum": [
+                        "stop_context",
+                        "target",
+                        "capabilities",
+                        "providers",
+                        "crash",
+                        "threads",
+                        "stack",
+                        "frame",
+                        "locals",
+                        "arguments",
+                        "registers",
+                        "modules",
+                        "breakpoints",
+                        "source",
+                        "mappings",
+                        "signals"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "view"
+                  ],
+                  "type": "object"
+                },
                 "type": "array"
               },
               "stop_id": {
@@ -2800,6 +2925,26 @@
                 "type": "string"
               },
               "signals": {
+                "additionalProperties": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "pass": {
+                      "type": "boolean"
+                    },
+                    "print": {
+                      "type": "boolean"
+                    },
+                    "stop": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "stop",
+                    "print",
+                    "pass"
+                  ],
+                  "type": "object"
+                },
                 "type": "object"
               }
             },
@@ -3588,6 +3733,32 @@
                 "type": "boolean"
               },
               "arguments": {
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "bare",
+                            "string"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "value"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
                 "type": "array"
               },
               "command": {

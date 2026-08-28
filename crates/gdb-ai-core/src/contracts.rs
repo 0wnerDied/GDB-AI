@@ -8,8 +8,6 @@ enum ParameterKind {
     Boolean,
     Unsigned,
     Positive,
-    Object,
-    Array,
     StringArray,
     Shape(&'static ObjectContract),
     ArrayOf(&'static ParameterKind),
@@ -26,8 +24,6 @@ impl ParameterKind {
             Self::Boolean => value.is_boolean(),
             Self::Unsigned => value.as_u64().is_some(),
             Self::Positive => value.as_u64().is_some_and(|value| value > 0),
-            Self::Object => value.is_object(),
-            Self::Array => value.is_array(),
             Self::StringArray => value
                 .as_array()
                 .is_some_and(|items| items.iter().all(Value::is_string)),
@@ -52,8 +48,6 @@ impl ParameterKind {
             Self::Boolean => "a boolean".into(),
             Self::Unsigned => "an unsigned integer".into(),
             Self::Positive => "a positive integer".into(),
-            Self::Object => "an object".into(),
-            Self::Array => "an array".into(),
             Self::StringArray => "an array of strings".into(),
             Self::Shape(_) => "a supported object".into(),
             Self::ArrayOf(_) => "an array of supported values".into(),
@@ -74,8 +68,6 @@ impl ParameterKind {
             Self::Boolean => json!({"type": "boolean"}),
             Self::Unsigned => json!({"type": "integer", "minimum": 0}),
             Self::Positive => json!({"type": "integer", "minimum": 1}),
-            Self::Object => json!({"type": "object"}),
-            Self::Array => json!({"type": "array"}),
             Self::StringArray => json!({"type": "array", "items": {"type": "string"}}),
             Self::Shape(contract) => contract.schema(),
             Self::ArrayOf(kind) => json!({"type": "array", "items": kind.schema()}),
@@ -307,6 +299,77 @@ const CAPTURE_KIND: ParameterKind = ParameterKind::ArrayOf(&CAPTURE_ITEM_KIND);
 
 const ENVIRONMENT_KIND: ParameterKind = ParameterKind::MapOf(&STRING_KIND);
 
+const INSPECTION_VIEWS: &[&str] = &[
+    "stop_context",
+    "target",
+    "capabilities",
+    "providers",
+    "crash",
+    "threads",
+    "stack",
+    "frame",
+    "locals",
+    "arguments",
+    "registers",
+    "modules",
+    "breakpoints",
+    "source",
+    "mappings",
+    "signals",
+];
+
+// 2026-08-29: The last generic object and array contracts let malformed
+// batch, signal, and raw MI children pass the shared protocol boundary.
+const INSPECTION_BATCH_ITEM_FIELDS: &[ParameterField] = &[
+    required("name", ParameterKind::String),
+    required("view", ParameterKind::Enum(INSPECTION_VIEWS)),
+    optional("inferior_id", ParameterKind::String),
+    optional("thread_id", ParameterKind::String),
+    optional("frame_id", ParameterKind::String),
+    optional("frame_level", ParameterKind::Unsigned),
+    optional("limit", ParameterKind::Unsigned),
+    optional("offset", ParameterKind::Unsigned),
+    optional("roles", ParameterKind::StringArray),
+    optional("path", ParameterKind::String),
+    optional("line", ParameterKind::Unsigned),
+    optional("before_lines", ParameterKind::Unsigned),
+    optional("after_lines", ParameterKind::Unsigned),
+    optional(
+        "profile",
+        ParameterKind::Enum(&["minimal", "brief", "standard", "deep"]),
+    ),
+    optional("around", AROUND_KIND),
+    optional("range", RANGE_KIND),
+    optional("include_bytes", ParameterKind::Boolean),
+    optional("include_source", ParameterKind::Boolean),
+];
+const INSPECTION_BATCH_ITEM_OBJECT: ObjectContract =
+    ObjectContract::new(INSPECTION_BATCH_ITEM_FIELDS, 0, &[]);
+const INSPECTION_BATCH_ITEM_KIND: ParameterKind =
+    ParameterKind::Shape(&INSPECTION_BATCH_ITEM_OBJECT);
+const INSPECTION_BATCH_KIND: ParameterKind = ParameterKind::ArrayOf(&INSPECTION_BATCH_ITEM_KIND);
+
+const SIGNAL_POLICY_FIELDS: &[ParameterField] = &[
+    required("stop", ParameterKind::Boolean),
+    required("print", ParameterKind::Boolean),
+    required("pass", ParameterKind::Boolean),
+];
+const SIGNAL_POLICY_OBJECT: ObjectContract = ObjectContract::new(SIGNAL_POLICY_FIELDS, 0, &[]);
+const SIGNAL_POLICY_KIND: ParameterKind = ParameterKind::Shape(&SIGNAL_POLICY_OBJECT);
+const SIGNALS_KIND: ParameterKind = ParameterKind::MapOf(&SIGNAL_POLICY_KIND);
+
+const RAW_MI_ARGUMENT_FIELDS: &[ParameterField] = &[
+    optional("kind", ParameterKind::Enum(&["bare", "string"])),
+    required("value", ParameterKind::String),
+];
+const RAW_MI_ARGUMENT_OBJECT: ObjectContract = ObjectContract::new(RAW_MI_ARGUMENT_FIELDS, 0, &[]);
+const RAW_MI_ARGUMENT_KINDS: &[ParameterKind] = &[
+    ParameterKind::String,
+    ParameterKind::Shape(&RAW_MI_ARGUMENT_OBJECT),
+];
+const RAW_MI_ARGUMENT_KIND: ParameterKind = ParameterKind::OneOf(RAW_MI_ARGUMENT_KINDS);
+const RAW_MI_ARGUMENTS_KIND: ParameterKind = ParameterKind::ArrayOf(&RAW_MI_ARGUMENT_KIND);
+
 const COMMON_FIELDS: &[ParameterField] = &[
     optional("accept_latest_revision", ParameterKind::Boolean),
     optional("lease_id", ParameterKind::String),
@@ -535,27 +598,7 @@ impl CanonicalMethod {
                 optional("backend_number", String),
             ]),
             InspectionGet => MethodContract::contextual(vec![
-                required(
-                    "view",
-                    Enum(&[
-                        "stop_context",
-                        "target",
-                        "capabilities",
-                        "providers",
-                        "crash",
-                        "threads",
-                        "stack",
-                        "frame",
-                        "locals",
-                        "arguments",
-                        "registers",
-                        "modules",
-                        "breakpoints",
-                        "source",
-                        "mappings",
-                        "signals",
-                    ]),
-                ),
+                required("view", Enum(INSPECTION_VIEWS)),
                 optional("limit", Unsigned),
                 optional("offset", Unsigned),
                 optional("roles", StringArray),
@@ -582,7 +625,9 @@ impl CanonicalMethod {
                 required("before_snapshot_id", String),
                 required("after_snapshot_id", String),
             ]),
-            InspectionBatch => MethodContract::contextual(vec![required("requests", Array)]),
+            InspectionBatch => {
+                MethodContract::contextual(vec![required("requests", INSPECTION_BATCH_KIND)])
+            }
             InspectionSnapshotGet => MethodContract::plain(vec![required("snapshot_id", String)]),
             ValueEvaluate => MethodContract::contextual(vec![
                 required("expression", String),
@@ -657,7 +702,7 @@ impl CanonicalMethod {
                 optional("max_history", Unsigned),
             ]),
             TrackingRemove => MethodContract::plain(vec![required("tracking_id", String)]),
-            SignalUpdate => MethodContract::plain(vec![required("signals", Object)]),
+            SignalUpdate => MethodContract::plain(vec![required("signals", SIGNALS_KIND)]),
             AgentHypothesisCheck => MethodContract::contextual(vec![
                 optional("claim", String),
                 required("expression", String),
@@ -724,7 +769,7 @@ impl CanonicalMethod {
             ]),
             RawMi => MethodContract::plain(vec![
                 required("command", String),
-                optional("arguments", Array),
+                optional("arguments", RAW_MI_ARGUMENTS_KIND),
                 optional("timeout_ms", Unsigned),
             ]),
             RawConsole => MethodContract::plain(vec![
@@ -810,6 +855,22 @@ mod tests {
                 CanonicalMethod::AgentProbe,
                 json!({"budget": {"max_calls": 0}}),
             ),
+            (
+                CanonicalMethod::InspectionBatch,
+                json!({"requests": ["stack"]}),
+            ),
+            (
+                CanonicalMethod::InspectionBatch,
+                json!({"requests": [{"name": "stack", "view": "stack", "extra": true}]}),
+            ),
+            (
+                CanonicalMethod::SignalUpdate,
+                json!({"signals": {"SIGUSR1": {"stop": true, "print": true}}}),
+            ),
+            (
+                CanonicalMethod::RawMi,
+                json!({"command": "-list-features", "arguments": [{"kind": "quoted", "value": "x"}]}),
+            ),
         ] {
             assert!(method.validate_parameters(&parameters).is_err());
         }
@@ -819,6 +880,25 @@ mod tests {
                 "location": {"source": {"path": "/tmp/a.c", "line": 7}},
                 "capture": [{"expression": "length"}, {"stack": {"limit": 4}}],
                 "budget": {"max_calls": 8, "wall_time_ms": 1000}
+            }))
+            .unwrap();
+        CanonicalMethod::InspectionBatch
+            .validate_parameters(&json!({
+                "requests": [
+                    {"name": "stack", "view": "stack", "limit": 4},
+                    {"name": "registers", "view": "registers", "roles": ["pc", "sp"]}
+                ]
+            }))
+            .unwrap();
+        CanonicalMethod::SignalUpdate
+            .validate_parameters(&json!({
+                "signals": {"SIGUSR1": {"stop": true, "print": true, "pass": false}}
+            }))
+            .unwrap();
+        CanonicalMethod::RawMi
+            .validate_parameters(&json!({
+                "command": "-symbol-info-functions",
+                "arguments": ["--name", {"kind": "string", "value": "parse"}]
             }))
             .unwrap();
         assert_eq!(
