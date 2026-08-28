@@ -18,19 +18,19 @@ The repository is independently versioned as `gdb-ai`; the executable is
 
 ## Verification status
 
-The 2026-08-28 implementation baseline `fd823ac` passed
-[required CI](https://github.com/0wnerDied/GDB-AI/actions/runs/33159548523):
-workspace tests, Clippy, Rust 1.88, schema hashes, both SDKs, fuzz-target
-compilation, and QEMU kernel tests using pinned Debian 6.1 and 6.12 builds.
-Local GDB 17.1 also passed the full workspace and both kernel tests; required
-CI used GDB 15.1.
+The 2026-08-29 implementation baseline `bec8b12` passed
+[required CI](https://github.com/0wnerDied/GDB-AI/actions/runs/33188007777):
+workspace tests, Clippy, Rust 1.88, schema hashes, both SDKs, three 60-second
+libFuzzer campaigns, and QEMU kernel tests using pinned Debian 6.1 and 6.12
+builds. Local GDB 17.1 also passed the full workspace and both kernel tests;
+required CI used GDB and gdbserver 15.1.
 
 The North-star code surface is implemented, but release qualification is not
 complete. The real GDB 9-14 and 16 compatibility cases, AArch64 end-to-end
-paths, executed fuzz campaigns, chaos and 10,000-cycle soak gates, repeated
-Agent A/B/C/D evaluation, and release provenance remain open. See
-[compatibility status](docs/compatibility.md) and PLAN section 55. The
-`gdb.ai/v1` namespace does not turn an unexecuted matrix entry into support.
+paths, chaos and 10,000-cycle soak gates, repeated Agent A/B/C/D evaluation,
+and release provenance remain open. See [compatibility
+status](docs/compatibility.md) and PLAN section 55. The `gdb.ai/v1` namespace
+does not turn an unexecuted matrix entry into support.
 
 A matched blind Sol xhigh pilot completed SUCTF 2026 `SU_minivfs` with both
 native GDB and GDB/AI. GDB/AI finished in 20:31 and native GDB in 24:56; one
@@ -40,7 +40,7 @@ section 52.2 for the controls, replay evidence, and observed limitations.
 ## Implemented system
 
 - Bounded byte-stream MI4/MI3 framer, parser, encoder, lossless AST, saved
-  fixtures, property-style chunk tests, and cargo-fuzz targets
+  fixtures, property-style chunk tests, and required cargo-fuzz campaigns
 - One session actor and GDB child per session with token correlation,
   serialized commands, finite deadlines, cancellation, and interrupt support
 - Journal-before-reducer state, revisions, execution epochs, stop IDs,

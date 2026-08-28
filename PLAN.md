@@ -1762,7 +1762,7 @@ MCP stdio, MCP Streamable HTTP, Unix socket, canonical JSON-RPC
 Python and TypeScript SDKs, schema hashes, CLI, metrics, replay
 bubblewrap, no_new_privs, rlimits, workspace/source-map enforcement
 hash-pinned optional GDB Python extension and provider provenance
-parser/reducer fuzz targets, native/core/attach/remote integration fixtures
+parser/framer/reducer fuzz campaigns, native/core/attach/remote fixtures
 ```
 
 The service never converts an absent host feature into success. Runtime
@@ -1780,11 +1780,11 @@ instead of claiming it ran.
 
 ## 55. Current progress and resume point
 
-The 2026-08-28 verified implementation baseline is `fd823ac`. Required CI
-run `33159548523` passed workspace tests, Clippy, Rust 1.88, schema hashes,
-both SDKs, fuzz-target compilation, and two public Debian kernel jobs. Local
-GDB 17.1 passed the full workspace; CI GDB 15.1 provided an independent
-environment.
+The 2026-08-29 verified implementation baseline is `bec8b12`. Required CI
+run `33188007777` passed workspace tests, Clippy, Rust 1.88, schema hashes,
+both SDKs, three bounded libFuzzer campaigns, and two public Debian kernel
+jobs. Local GDB 17.1 passed the full workspace; CI GDB 15.1 provided an
+independent environment.
 
 Completed correctness work includes:
 
@@ -1798,18 +1798,19 @@ Completed correctness work includes:
 - verified native, attach, core, gdbserver, raw, state-service, and lifecycle
   API paths;
 - bounded Linux kernel tasks, modules, stack, panic, and monitor operations
-  on Debian 6.1 and 6.12 under QEMU; and
+  on Debian 6.1 and 6.12 under QEMU;
+- required 60-second MI parser, MI framer, and state reducer fuzz campaigns
+  with no crash or state invariant failure; and
 - two blind native-GDB versus GDB/AI Agent pilots, including one matched pair
   that completed target-side flag reads with replay and isolation evidence.
 
-The implementation is paused after this baseline. Remaining release gates,
-in dependency order, are:
+Release qualification continues from this baseline. Remaining gates, in
+dependency order, are:
 
 1. run real GDB 9-17 compatibility jobs and AArch64 end-to-end targets;
-2. execute parser, framer, and reducer fuzz campaigns;
-3. run targeted chaos cases and the 10,000-cycle lifecycle soak;
-4. repeat the paired Agent A/B/C/D evaluation from section 52; and
-5. produce release-tag provenance and rerun the complete final matrix.
+2. run targeted chaos cases and the 10,000-cycle lifecycle soak;
+3. repeat the paired Agent A/B/C/D evaluation from section 52; and
+4. produce release-tag provenance and rerun the complete final matrix.
 
 Until those gates pass, `gdb.ai/v1` identifies the implemented protocol
 major version; it is not evidence that every North-star release environment
