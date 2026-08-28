@@ -1,12 +1,12 @@
 # GDB/MI Implementation Plan and Normative Specification
 
-Status: accepted design, implementation pending
+Status: implemented version 1; host-dependent qualification remains capability-gated
 
 This document records the complete project requested for `GDB/MI`. It is the
-normative implementation checklist: an item may be deferred only when the
-deviation is documented here with its reason, user-visible limitation, and an
-upgrade trigger. A feature must not be reported as supported until its tests
-and capability reporting agree.
+normative implementation and release checklist. Host-dependent functions are
+reported as supported only when runtime probes and tests agree; unavailable
+kernel, architecture, sandbox, Python, and remote facilities remain explicit
+capability results rather than simulated success.
 
 ## 1. Product definition
 
@@ -290,8 +290,9 @@ operation may have changed state outside the managed surface; finite queries
 cannot prove complete GDB equivalence. A tainted session exposes the bounded
 state that was re-observed but never claims full reconciliation.
 
-Every session exposes `event_seq`, `revision`, `execution_epoch`, and an
-optional `stop_id`. The event sequence counts received/generated events.
+Every session exposes `event_seq`, `revision`, `execution_epoch`,
+`reconciliation_required`, and an optional `stop_id`. The event sequence
+counts received/generated events.
 Revision increments for public state changes. Execution epoch increments on
 every stopped-to-running transition. A stop ID uniquely names one stopped
 context.
@@ -541,7 +542,8 @@ Canonical methods:
 ```text
 session.create, session.get, session.list, session.close
 session.acquire_write_lease, session.release_write_lease
-session.capabilities
+session.attempt_recovery, session.capabilities, session.providers
+session.transcript, session.event
 
 target.launch, target.attach, target.connect_remote, target.open_core
 target.detach, target.restart, target.kill
@@ -550,7 +552,8 @@ execution.control, execution.wait
 
 breakpoint.create, breakpoint.update, breakpoint.delete, breakpoint.list
 
-inspection.get, inspection.snapshot, inspection.diff
+inspection.get, inspection.snapshot, inspection.diff, inspection.batch
+inspection.snapshot_get
 
 value.evaluate, value.create, value.children, value.update, value.release
 
@@ -562,6 +565,10 @@ inferior_io.read, inferior_io.write, inferior_io.close_stdin
 inferior_io.resize
 
 tracking.add_expression, tracking.add_memory, tracking.remove, tracking.list
+signal.get, signal.update
+
+agent.probe, agent.experiment, agent.hypothesis_check
+kernel.inspect, kernel.monitor
 
 artifact.get, events.wait
 raw.mi, raw.console
@@ -789,16 +796,21 @@ backend generates the token; callers cannot inject one. Raw console always
 uses `-interpreter-exec console` because direct CLI text in an MI interpreter
 can produce unpredictable output and non-MI prompts.
 
-Ordinary profiles deny these CLI classes:
+Raw console accepts only an explicit host-safe command set. Shell, Python,
+script, maintenance, monitor, target-selection, file-loading, settings, quit,
+and unknown or abbreviated commands are rejected. The allowlisted verbs are:
 
 ```text
-shell, python, source, define, document, commands, if, while, end,
-interpreter-exec, set auto-load, add-auto-load-safe-path,
-set debuginfod enabled, set startup-with-shell, set exec-wrapper,
-maintenance, monitor
+apropos, backtrace, break, catch, condition, continue, delete, disable,
+disassemble, down, enable, finish, frame, help, ignore, info, list, next,
+nexti, print, ptype, rbreak, run, show, step, stepi, tbreak, thread, until,
+up, watch, whatis, x
 ```
 
 `monitor` is available only through target-specific allowlisted providers.
+Raw MI cannot select/attach a target, transfer files, change GDB safety
+settings, replace executable/symbol paths, redirect the inferior TTY, enter a
+CLI interpreter, or exit GDB; those actions use policy-checked semantic APIs.
 
 Before a known managed raw command, set consistency to `MANAGED_DIRTY`; an
 unknown raw command sets `TAINTED`. On completion, reconcile the declared
@@ -922,6 +934,7 @@ Session resources include:
 gdbai://session/<id>/status
 gdbai://session/<id>/capabilities
 gdbai://session/<id>/events
+gdbai://session/<id>/event/<seq>
 gdbai://session/<id>/transcript
 gdbai://session/<id>/snapshot/<stop-id>
 gdbai://session/<id>/inferior/<id>/output
@@ -1433,7 +1446,8 @@ temporary isolated filesystems, and cargo-fuzz/libFuzzer cover parser and
 reducer boundaries. The MI parser is handwritten and streaming; a parser
 generator is not required for this grammar.
 
-The optional Python extension may query narrow GDB Python APIs, aggregate data
+The implemented optional Python extension may query narrow GDB Python APIs,
+aggregate data
 that native MI cannot express, return dictionaries/lists as MI results, and
 emit private notifications. It cannot own MCP, authoritative session state,
 persistence, authentication, large asynchronous work, or background access to
@@ -1442,8 +1456,9 @@ work returns through mechanisms such as `gdb.post_event`.
 
 Python SDKs never bypass the canonical API to send arbitrary MI. Providers
 never bypass the scheduler. MCP adapters contain no GDB-specific logic. The
-Python extension is deferred until a measured native-MI gap blocks Agent
-outcomes.
+Python extension remains optional and is activated only when a measured
+native-MI gap requires it. Loading requires an absolute path and configured
+SHA-256 digest.
 
 ## 49. Document roles and implementation layering
 
@@ -1480,11 +1495,12 @@ separation, multi-user leases, persistent operation routing, namespace/cgroup
 orchestration, HTTP, and broad observability. Future providers include kernel,
 LLDB, vendor JTAG, and a public plugin SDK.
 
-The first implementation is one Rust process with one stdio adapter and one
-session actor per GDB child. Logical module boundaries remain, but internal RPC
-and extra processes are deferred until isolation or scaling data requires
-them. Empty crates and interfaces with one speculative implementation are not
-created.
+Version 1 uses one Rust gateway process with one session actor and one
+sandboxed GDB child per session. Stdio, Unix, and HTTP adapters share the same
+Gateway. The narrow `DebugBackend` trait and actor ownership preserve the
+process boundary; deployments add a separate service supervisor when their
+fault-domain or scaling policy requires it. Empty crates and speculative
+interfaces are not created.
 
 ## 50. Core vertical slice
 
@@ -1518,12 +1534,12 @@ Required implementation internals:
 - an immediate minimal stop record; and
 - on-demand, budgeted enrichment.
 
-The vertical slice intentionally excludes AArch64, attach/core/remote,
-multiple-inferior semantics beyond tolerant modelling, non-stop, HTTP,
-TypeScript SDK implementation, production SQLite routing, multi-user leases,
-physical supervisor workers, namespace/cgroup orchestration, kernel providers,
-public plugin APIs, and a mandatory Python extension. North-star schemas retain
-room for these without claiming support.
+The original vertical slice excluded attach/core/remote, HTTP, SDKs, leases,
+tracking, providers, and deployment controls. The completed version 1 adds
+those surfaces while retaining capability gates for host AArch64 execution,
+gdbserver, bubblewrap, Python-enabled GDB, KGDB/QEMU, and external cgroup or
+service-supervisor policy. Non-stop and a mandatory Python extension remain
+explicit non-goals.
 
 Snapshot policy is two-stage:
 
@@ -1622,3 +1638,40 @@ document:
 - Snapshot enrichment is minimal-first and budgeted on demand.
 - The North-star matrix is not a claim that the vertical slice already
   supports every target, transport, architecture, SDK, or isolation feature.
+
+## 54. Version 1 implementation conformance
+
+The repository implements every canonical method in section 14 without a
+placeholder or deferred response. MCP exposes the complete semantic surface,
+including values, registers, tracking, batching, Agent experiments, events,
+raw administration, and the conditional kernel provider.
+
+Implemented release surfaces:
+
+```text
+MI4 with fresh-process MI3 fallback
+native launch, allowlisted attach, core, gdbserver/RSP, detach/restart/kill
+write leases, revisions, idempotency, policy, audit, rate limits
+breakpoints/watchpoints/catchpoints and generation-safe locations
+threads/frames/locals/arguments/registers/values/memory/disassembly
+minimal and enriched snapshots, tracked state, changed ranges, diffs
+raw MI/CLI classification, durable taint, managed reconciliation
+MCP stdio, MCP Streamable HTTP, Unix socket, canonical JSON-RPC
+Python and TypeScript SDKs, schema hashes, CLI, metrics, replay
+bubblewrap, no_new_privs, rlimits, workspace/source-map enforcement
+hash-pinned optional GDB Python extension and provider provenance
+parser/reducer fuzz targets, native/core/attach/remote integration fixtures
+```
+
+The service never converts an absent host feature into success. Runtime
+capabilities report bubblewrap, network isolation, Python extension, target
+features, reverse support, memory/watchpoint availability, and provider
+limitations. Remote, attach, and monitor access remain deny-by-default and
+require explicit allowlists. Kernel inspection remains conditional on a
+configured KGDB/QEMU target and symbols.
+
+Release verification commands and deployment assets are maintained in
+`README.md`, `packaging/`, `schemas/`, `fuzz/`, and `tests/`. The 10,000-cycle
+soak and the GDB 13-17/AArch64 matrix are release-environment qualification
+gates; a development host that lacks those binaries reports the missing gate
+instead of claiming it ran.
