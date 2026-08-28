@@ -1,7 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    future::Future,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, RwLock as StdRwLock},
     time::Duration,
 };
@@ -11,7 +13,7 @@ use gdb_ai_mi::{MiLimits, MiRecord, MiResult, MiValue};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
 use crate::{
     Error, ErrorCode, Result,
@@ -22,7 +24,7 @@ use crate::{
     config::Config,
     domain::{
         DomainEvent, InferiorStatus, JournaledEvent, OutputSource, SessionId, SessionState,
-        SnapshotStatus, TrackingDefinition, ValueBinding, WaitBaseline,
+        SnapshotStatus, StopId, TrackingDefinition, ValueBinding, WaitBaseline,
     },
     journal::Journal,
     metrics::Metrics,
@@ -32,6 +34,10 @@ use crate::{
     reducer::StateReducer,
     ring::{ByteRing, RingRead},
 };
+
+tokio::task_local! {
+    static ACTIVE_OBSERVATION_SESSION: String;
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionCapabilities {
@@ -118,6 +124,7 @@ pub struct SessionHandle {
     capabilities: Arc<StdRwLock<SessionCapabilities>>,
     requests: mpsc::Sender<WorkerRequest>,
     controls: mpsc::Sender<ControlRequest>,
+    command_sequence: Arc<Mutex<()>>,
     inferior_output: Arc<PtyOutput>,
     state: watch::Receiver<SessionState>,
     events: broadcast::Sender<PublishedEvent>,
@@ -177,6 +184,7 @@ impl SessionHandle {
             capabilities,
             requests,
             controls,
+            command_sequence: Arc::new(Mutex::new(())),
             inferior_output,
             state,
             events,
@@ -227,11 +235,24 @@ impl SessionHandle {
         command: MiCommand,
         timeout: Duration,
     ) -> Result<CommandReply> {
+        let deadline = command_deadline(timeout);
+        if self.observation_active() {
+            return self.send_command(command, deadline).await;
+        }
+        let _sequence = self.command_sequence.lock().await;
+        self.send_command(command, deadline).await
+    }
+
+    async fn send_command(
+        &self,
+        command: MiCommand,
+        deadline: tokio::time::Instant,
+    ) -> Result<CommandReply> {
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(WorkerRequest::Command {
                 command,
-                deadline: command_deadline(timeout),
+                deadline,
                 response: sender,
             })
             .await
@@ -247,13 +268,31 @@ impl SessionHandle {
         command: MiCommand,
         after: Vec<MiCommand>,
     ) -> Result<CommandReply> {
+        let deadline = command_deadline(self.command_timeout);
+        if self.observation_active() {
+            return self
+                .send_transaction(before, command, after, deadline)
+                .await;
+        }
+        let _sequence = self.command_sequence.lock().await;
+        self.send_transaction(before, command, after, deadline)
+            .await
+    }
+
+    async fn send_transaction(
+        &self,
+        before: Vec<MiCommand>,
+        command: MiCommand,
+        after: Vec<MiCommand>,
+        deadline: tokio::time::Instant,
+    ) -> Result<CommandReply> {
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(WorkerRequest::Transaction {
                 before,
                 command,
                 after,
-                deadline: command_deadline(self.command_timeout),
+                deadline,
                 response: sender,
             })
             .await
@@ -264,11 +303,24 @@ impl SessionHandle {
     }
 
     pub async fn safe_evaluate(&self, command: MiCommand) -> Result<CommandReply> {
+        let deadline = command_deadline(self.command_timeout);
+        if self.observation_active() {
+            return self.send_safe_evaluate(command, deadline).await;
+        }
+        let _sequence = self.command_sequence.lock().await;
+        self.send_safe_evaluate(command, deadline).await
+    }
+
+    async fn send_safe_evaluate(
+        &self,
+        command: MiCommand,
+        deadline: tokio::time::Instant,
+    ) -> Result<CommandReply> {
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(WorkerRequest::SafeEvaluate {
                 command,
-                deadline: command_deadline(self.command_timeout),
+                deadline,
                 response: sender,
             })
             .await
@@ -276,6 +328,54 @@ impl SessionHandle {
         receiver
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+    }
+
+    pub async fn stable_observation<'a, T>(
+        &'a self,
+        expected: &'a SessionState,
+        operation: Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
+    ) -> Result<T> {
+        if self.observation_active() {
+            self.require_observation_context(expected)?;
+            let result = operation.await?;
+            self.require_observation_context(expected)?;
+            return Ok(result);
+        }
+
+        // 2026-08-28: Gateway locks did not protect direct SessionHandle users,
+        // so composite reads could still interleave ordinary MI commands. Hold
+        // the shared command sequence for the complete stop-scoped operation.
+        // ponytail: Keep composite builders in this task; use actor transaction
+        // IDs before allowing them to spawn command-producing subtasks.
+        let _sequence = self.command_sequence.lock().await;
+        self.require_observation_context(expected)?;
+        ACTIVE_OBSERVATION_SESSION
+            .scope(self.id.0.clone(), async {
+                let result = operation.await?;
+                self.require_observation_context(expected)?;
+                Ok(result)
+            })
+            .await
+    }
+
+    fn observation_active(&self) -> bool {
+        ACTIVE_OBSERVATION_SESSION
+            .try_with(|session_id| session_id == &self.id.0)
+            .unwrap_or(false)
+    }
+
+    fn require_observation_context(&self, expected: &SessionState) -> Result<()> {
+        let current = self.state();
+        if current.stop_id == expected.stop_id
+            && current.execution_epoch == expected.execution_epoch
+        {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::StaleContext,
+                "target stop changed during composite operation",
+            ))
+        }
     }
 
     pub async fn record_event(&self, event: DomainEvent) -> Result<()> {
@@ -318,6 +418,14 @@ impl SessionHandle {
     }
 
     pub async fn refresh_target_capabilities(&self) -> Result<SessionCapabilities> {
+        if self.observation_active() {
+            return self.send_refresh_target_capabilities().await;
+        }
+        let _sequence = self.command_sequence.lock().await;
+        self.send_refresh_target_capabilities().await
+    }
+
+    async fn send_refresh_target_capabilities(&self) -> Result<SessionCapabilities> {
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(WorkerRequest::RefreshTargetCapabilities { response: sender })
@@ -426,12 +534,22 @@ impl SessionHandle {
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
     }
 
-    pub async fn store_snapshot(&self, snapshot_id: String, snapshot: Value) -> Result<()> {
+    pub async fn commit_snapshot(
+        &self,
+        snapshot_id: String,
+        snapshot: Value,
+        expected_stop_id: StopId,
+        expected_execution_epoch: u64,
+        partial: bool,
+    ) -> Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.requests
-            .send(WorkerRequest::StoreSnapshot {
+            .send(WorkerRequest::CommitSnapshot {
                 snapshot_id,
                 snapshot,
+                expected_stop_id,
+                expected_execution_epoch,
+                partial,
                 response: sender,
             })
             .await
@@ -734,9 +852,12 @@ enum WorkerRequest {
         observations: BTreeMap<String, Value>,
         response: oneshot::Sender<Result<BTreeMap<String, Value>>>,
     },
-    StoreSnapshot {
+    CommitSnapshot {
         snapshot_id: String,
         snapshot: Value,
+        expected_stop_id: StopId,
+        expected_execution_epoch: u64,
+        partial: bool,
         response: oneshot::Sender<Result<()>>,
     },
     GetSnapshot {
@@ -1437,12 +1558,34 @@ impl SessionWorker {
                 }
                 let _ = response.send(Ok(changes));
             }
-            WorkerRequest::StoreSnapshot {
+            WorkerRequest::CommitSnapshot {
                 snapshot_id,
                 snapshot,
+                expected_stop_id,
+                expected_execution_epoch,
+                partial,
                 response,
             } => {
-                let result = self.store_snapshot_value(snapshot_id, snapshot);
+                // 2026-08-28: Snapshot data was persisted before the Gateway's
+                // final context check. Validate and publish it atomically in
+                // the state-owning worker so stale builds leave no evidence.
+                let state = self.reducer.state();
+                let result = if state.stop_id.as_ref() != Some(&expected_stop_id)
+                    || state.execution_epoch != expected_execution_epoch
+                {
+                    Err(Error::new(
+                        ErrorCode::StaleContext,
+                        "target stop changed before snapshot commit",
+                    ))
+                } else {
+                    self.store_snapshot_value(snapshot_id, snapshot)
+                        .and_then(|()| {
+                            self.apply_event(DomainEvent::SnapshotReady {
+                                stop_id: expected_stop_id,
+                                partial,
+                            })
+                        })
+                };
                 let _ = response.send(result);
             }
             WorkerRequest::GetSnapshot {
@@ -2632,6 +2775,111 @@ mod tests {
             .command(MiCommand::new("-gdb-version").unwrap())
             .await
             .unwrap();
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stable_observation_serializes_ordinary_commands() {
+        let Some(session) = control_test_session().await else {
+            return;
+        };
+        let expected = session.state();
+        let observing_session = session.clone();
+        let (entered_sender, entered) = oneshot::channel();
+        let (release_sender, release) = oneshot::channel();
+        let observation = tokio::spawn(async move {
+            observing_session
+                .stable_observation(
+                    &expected,
+                    Box::pin(async {
+                        observing_session
+                            .command(MiCommand::new("-gdb-version").unwrap())
+                            .await?;
+                        let _ = entered_sender.send(());
+                        let _ = release.await;
+                        Ok(())
+                    }),
+                )
+                .await
+        });
+        entered.await.unwrap();
+
+        let competing_session = session.clone();
+        let competing = tokio::spawn(async move {
+            competing_session
+                .command(MiCommand::new("-gdb-version").unwrap())
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!competing.is_finished());
+
+        release_sender.send(()).unwrap();
+        observation.await.unwrap().unwrap();
+        competing.await.unwrap().unwrap();
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_snapshot_commit_leaves_no_snapshot() {
+        let Some(session) = control_test_session().await else {
+            return;
+        };
+        let error = session
+            .commit_snapshot(
+                "snap_invalid".into(),
+                serde_json::json!({"snapshot_id": "snap_invalid"}),
+                StopId("stop_missing".into()),
+                session.state().execution_epoch,
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleContext);
+        assert_eq!(
+            session
+                .snapshot("snap_invalid".into())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stable_observation_rejects_a_preempting_state_change() {
+        let Some(session) = control_test_session().await else {
+            return;
+        };
+        let expected = session.state();
+        let observing_session = session.clone();
+        let (entered_sender, entered) = oneshot::channel();
+        let (release_sender, release) = oneshot::channel();
+        let observation = tokio::spawn(async move {
+            observing_session
+                .stable_observation(
+                    &expected,
+                    Box::pin(async {
+                        let _ = entered_sender.send(());
+                        let _ = release.await;
+                        Ok(())
+                    }),
+                )
+                .await
+        });
+        entered.await.unwrap();
+        session
+            .record_event(DomainEvent::TargetRunning {
+                backend_inferiors: vec![],
+            })
+            .await
+            .unwrap();
+        release_sender.send(()).unwrap();
+
+        assert_eq!(
+            observation.await.unwrap().unwrap_err().code,
+            ErrorCode::StaleContext
+        );
         session.close().await.unwrap();
     }
 

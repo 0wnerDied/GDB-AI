@@ -1316,13 +1316,39 @@ impl Gateway {
                 stop_id: state.stop_id.clone().unwrap(),
             })
             .await?;
+        let built = entry
+            .handle
+            .stable_observation(
+                &state,
+                Box::pin(self.build_and_commit_snapshot(&entry, request, &state, profile, frames)),
+            )
+            .await;
+        if built.is_err() {
+            entry
+                .handle
+                .record_event(DomainEvent::SnapshotFailed {
+                    stop_id: state.stop_id.clone().unwrap(),
+                })
+                .await?;
+        }
+        built
+    }
+
+    async fn build_and_commit_snapshot(
+        &self,
+        entry: &SessionEntry,
+        request: &ApiRequest,
+        state: &crate::domain::SessionState,
+        profile: &str,
+        frames: usize,
+    ) -> Result<Value> {
         let mut warnings = Vec::new();
         let stack = optional_command(
             &entry.handle,
             context_options(
                 MiCommand::new("-stack-list-frames")?,
                 &request.parameters,
-                &state,
+                state,
             )?
             .bare("0")?
             .bare((frames - 1).to_string())?,
@@ -1330,7 +1356,7 @@ impl Gateway {
             &mut warnings,
         )
         .await
-        .map(|reply| normalized_frames(&reply.record, &state, &request.parameters))
+        .map(|reply| normalized_frames(&reply.record, state, &request.parameters))
         .map(serde_json::to_value)
         .transpose()?
         .unwrap_or(Value::Null);
@@ -1342,7 +1368,7 @@ impl Gateway {
                 context_options(
                     MiCommand::new("-stack-list-variables")?,
                     &request.parameters,
-                    &state,
+                    state,
                 )?
                 .bare("--simple-values")?,
                 "locals",
@@ -1362,7 +1388,7 @@ impl Gateway {
                 context_options(
                     MiCommand::new("-stack-list-arguments")?,
                     &request.parameters,
-                    &state,
+                    state,
                 )?
                 .bare("--simple-values")?
                 .bare("0")?
@@ -1405,7 +1431,7 @@ impl Gateway {
             Value::Null
         };
         let (tracked, changes) = match self
-            .capture_tracking(&entry, request, &state, &mut warnings)
+            .capture_tracking(entry, request, state, &mut warnings)
             .await
         {
             Ok(tracking) => tracking,
@@ -1440,20 +1466,15 @@ impl Gateway {
             "partial": partial,
             "evidence": [{"kind": "mi-event", "uri": format!("gdbai://session/{}/event/{}", entry.handle.id(), current.event_seq)}]
         });
-        if let Err(error) = entry
-            .handle
-            .store_snapshot(snapshot_id, snapshot.clone())
-            .await
-        {
-            entry
-                .handle
-                .record_event(DomainEvent::SnapshotFailed { stop_id })
-                .await?;
-            return Err(error);
-        }
         entry
             .handle
-            .record_event(DomainEvent::SnapshotReady { stop_id, partial })
+            .commit_snapshot(
+                snapshot_id,
+                snapshot.clone(),
+                stop_id,
+                state.execution_epoch,
+                partial,
+            )
             .await?;
         Ok(snapshot)
     }
@@ -1509,40 +1530,42 @@ impl Gateway {
                 "batch accepts 1 to 16 reads",
             ));
         }
-        let mut results = BTreeMap::new();
-        for item in requests {
-            let name = string(item, "name")?;
-            if results.contains_key(&name) {
-                return Err(Error::new(
-                    ErrorCode::Conflict,
-                    "batch request names must be unique",
-                ));
-            }
-            let mut parameters = item.clone();
-            parameters["stop_id"] = Value::String(baseline.stop_id.as_ref().unwrap().0.clone());
-            let subrequest = ApiRequest {
-                api_version: request.api_version.clone(),
-                request_id: format!("{}:{name}", request.request_id),
-                session_id: request.session_id.clone(),
-                method: CanonicalMethod::InspectionGet,
-                expected_revision: None,
-                idempotency_key: None,
-                parameters,
-            };
-            let result = self.inspection_get(&subrequest).await?;
-            if entry.handle.state().stop_id != baseline.stop_id {
-                return Err(Error::new(
-                    ErrorCode::StaleContext,
-                    "target stop changed during same_stop batch",
-                ));
-            }
-            results.insert(name, result);
-        }
-        Ok(json!({
-            "stop_id": baseline.stop_id,
-            "revision": entry.handle.state().revision,
-            "results": results
-        }))
+        entry
+            .handle
+            .stable_observation(
+                &baseline,
+                Box::pin(async {
+                    let mut results = BTreeMap::new();
+                    for item in requests {
+                        let name = string(item, "name")?;
+                        if results.contains_key(&name) {
+                            return Err(Error::new(
+                                ErrorCode::Conflict,
+                                "batch request names must be unique",
+                            ));
+                        }
+                        let mut parameters = item.clone();
+                        parameters["stop_id"] =
+                            Value::String(baseline.stop_id.as_ref().unwrap().0.clone());
+                        let subrequest = ApiRequest {
+                            api_version: request.api_version.clone(),
+                            request_id: format!("{}:{name}", request.request_id),
+                            session_id: request.session_id.clone(),
+                            method: CanonicalMethod::InspectionGet,
+                            expected_revision: None,
+                            idempotency_key: None,
+                            parameters,
+                        };
+                        results.insert(name, self.inspection_get(&subrequest).await?);
+                    }
+                    Ok(json!({
+                        "stop_id": baseline.stop_id,
+                        "revision": entry.handle.state().revision,
+                        "results": results
+                    }))
+                }),
+            )
+            .await
     }
 
     async fn capture_tracking(
@@ -1897,27 +1920,38 @@ impl Gateway {
                 "memory writes must contain 1 to 65536 bytes",
             ));
         }
-        let (before, _) = read_memory_bytes(
-            &entry.handle,
-            &state,
-            parse_address(address.as_str())?,
-            bytes.len(),
-            false,
-        )
-        .await?;
-        require_same_execution_context(&entry.handle, &state)?;
-        require_expected_bytes(&request.parameters, &before)?;
-        let reply = entry
+        // 2026-08-28: Releasing the composite read before compare-and-write
+        // allowed another direct SessionHandle command to invalidate the
+        // precondition. Keep the read, check, write, and state event together.
+        let (before, reply) = entry
             .handle
-            .command(
-                MiCommand::new("-data-write-memory-bytes")?
-                    .bare(address.as_str())?
-                    .bare(hex_encode(&bytes))?,
+            .stable_observation(
+                &state,
+                Box::pin(async {
+                    let (before, _) = read_memory_bytes(
+                        &entry.handle,
+                        &state,
+                        parse_address(address.as_str())?,
+                        bytes.len(),
+                        false,
+                    )
+                    .await?;
+                    require_expected_bytes(&request.parameters, &before)?;
+                    let reply = entry
+                        .handle
+                        .command(
+                            MiCommand::new("-data-write-memory-bytes")?
+                                .bare(address.as_str())?
+                                .bare(hex_encode(&bytes))?,
+                        )
+                        .await?;
+                    entry
+                        .handle
+                        .record_event(DomainEvent::MemoryChanged)
+                        .await?;
+                    Ok((before, reply))
+                }),
             )
-            .await?;
-        entry
-            .handle
-            .record_event(DomainEvent::MemoryChanged)
             .await?;
         Ok(json!({
             "address": address,
@@ -4302,6 +4336,27 @@ fn memory_contents(record: &MiRecord) -> Result<Vec<u8>> {
 // 2026-08-28: A single 16 MiB read expands beyond the MI record limit as
 // hexadecimal text. Keep backend records bounded while preserving one API read.
 async fn read_memory_bytes(
+    handle: &SessionHandle,
+    expected: &crate::domain::SessionState,
+    start: u64,
+    length: usize,
+    allow_partial: bool,
+) -> Result<(Vec<u8>, u64)> {
+    handle
+        .stable_observation(
+            expected,
+            Box::pin(read_memory_bytes_in_observation(
+                handle,
+                expected,
+                start,
+                length,
+                allow_partial,
+            )),
+        )
+        .await
+}
+
+async fn read_memory_bytes_in_observation(
     handle: &SessionHandle,
     expected: &crate::domain::SessionState,
     start: u64,
