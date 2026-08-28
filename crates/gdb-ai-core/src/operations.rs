@@ -2899,10 +2899,27 @@ impl Gateway {
         let view = string(&request.parameters, "view")?;
         match view.as_str() {
             "current_task" | "init_task" => {
+                // 2026-08-28: Linux current is a C macro, while current_task
+                // is an unrelocated per-CPU offset. Resolve the live pointer
+                // from the architecture register and keep task output bounded.
                 let expression = if view == "current_task" {
-                    "current"
+                    let names = entry
+                        .handle
+                        .command(MiCommand::new("-data-list-register-names")?)
+                        .await?;
+                    let names = result_string_list(&names.record, "register-names");
+                    if names.iter().any(|name| name == "gs_base") {
+                        "*(struct task_struct **)((unsigned long)$gs_base+(unsigned long)&current_task)"
+                    } else if names.iter().any(|name| name == "sp_el0") {
+                        "(struct task_struct *)$sp_el0"
+                    } else {
+                        return Err(Error::new(
+                            ErrorCode::CapabilityMissing,
+                            "current task requires x86-64 gs_base or AArch64 sp_el0",
+                        ));
+                    }
                 } else {
-                    "init_task"
+                    "&init_task"
                 };
                 let command = context_options(
                     MiCommand::new("-data-evaluate-expression")?.string(expression),
