@@ -670,14 +670,6 @@ impl Gateway {
                 frame: frame_summary(&frame_reply.record),
             })
             .await?;
-        let stop_id = entry.handle.state().stop_id.clone().unwrap();
-        entry
-            .handle
-            .record_event(DomainEvent::SnapshotReady {
-                stop_id,
-                partial: true,
-            })
-            .await?;
         entry
             .handle
             .record_event(DomainEvent::CoreOpened { backend_id })
@@ -1333,13 +1325,6 @@ impl Gateway {
         };
         let partial = !warnings.is_empty();
         let stop_id = state.stop_id.clone().unwrap();
-        entry
-            .handle
-            .record_event(DomainEvent::SnapshotReady {
-                stop_id: stop_id.clone(),
-                partial,
-            })
-            .await?;
         self.metrics.snapshot(partial);
         let current = entry.handle.state();
         let snapshot_id = format!("snap_{stop_id}");
@@ -1371,6 +1356,10 @@ impl Gateway {
                 .await?;
             return Err(error);
         }
+        entry
+            .handle
+            .record_event(DomainEvent::SnapshotReady { stop_id, partial })
+            .await?;
         Ok(snapshot)
     }
 

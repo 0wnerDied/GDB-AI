@@ -121,6 +121,30 @@ async fn local_debugging_vertical_slice() {
         .unwrap()
         .0
         .clone();
+    let minimal_snapshot_id = launched
+        .state
+        .as_ref()
+        .unwrap()
+        .snapshot
+        .as_ref()
+        .unwrap()
+        .snapshot_id
+        .clone();
+    let minimal_snapshot = successful(
+        gateway
+            .dispatch(
+                request(
+                    "minimal-snapshot",
+                    Some(&session_id),
+                    "inspection.snapshot_get",
+                    None,
+                    json!({"snapshot_id": minimal_snapshot_id}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(minimal_snapshot.result.unwrap()["stop_id"], first_stop);
 
     let breakpoint = successful(
         gateway

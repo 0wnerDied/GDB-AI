@@ -1375,22 +1375,7 @@ impl SessionWorker {
                 snapshot,
                 response,
             } => {
-                let result = self
-                    .journal
-                    .append_snapshot(&snapshot_id, &snapshot)
-                    .and_then(|_| {
-                        self.store.upsert_snapshot(
-                            &self.reducer.state().session_id,
-                            &snapshot_id,
-                            &snapshot,
-                        )
-                    });
-                if result.is_ok() {
-                    if self.snapshots.len() >= 128 {
-                        self.snapshots.pop_first();
-                    }
-                    self.snapshots.insert(snapshot_id, snapshot);
-                }
+                let result = self.store_snapshot_value(snapshot_id, snapshot);
                 let _ = response.send(result);
             }
             WorkerRequest::GetSnapshot {
@@ -1832,23 +1817,13 @@ impl SessionWorker {
                             OutputSource::InferiorPty | OutputSource::ServerDiagnostic => {}
                         }
                     }
-                    let stopped = matches!(event, DomainEvent::TargetStopped { .. });
                     if matches!(event, DomainEvent::UnknownBackendEvent { .. }) {
                         self.metrics.mi_unknown_class();
                     }
-                    if stopped {
+                    if matches!(event, DomainEvent::TargetStopped { .. }) {
                         self.metrics.target_stop();
                     }
                     self.apply_event(event)?;
-                    if stopped {
-                        // ponytail: publish the bounded stop record immediately;
-                        // inspection.snapshot enriches it when callers need more.
-                        let stop_id = self.reducer.state().stop_id.clone().unwrap();
-                        self.apply_event(DomainEvent::SnapshotReady {
-                            stop_id,
-                            partial: true,
-                        })?;
-                    }
                 }
                 Ok(Some((record, evidence_seq)))
             }
@@ -1897,6 +1872,7 @@ impl SessionWorker {
     }
 
     fn apply_event(&mut self, event: DomainEvent) -> Result<()> {
+        let stopped = matches!(&event, DomainEvent::TargetStopped { .. });
         if matches!(&event, DomainEvent::TargetRunning { .. }) {
             self.inferior_output.reset();
         }
@@ -1960,6 +1936,65 @@ impl SessionWorker {
             revision: self.reducer.state().revision,
             event,
         });
+        if stopped {
+            // 2026-08-28: SnapshotReady was published without a stored object.
+            // Persist the bounded stop context before advertising readiness.
+            let stop_id = self.reducer.state().stop_id.clone().unwrap();
+            let snapshot_id = format!("snap_{stop_id}");
+            let frame = self
+                .reducer
+                .state()
+                .inferiors
+                .values()
+                .flat_map(|inferior| inferior.threads.values())
+                .find_map(|thread| thread.frame.clone());
+            let snapshot = serde_json::json!({
+                "snapshot_id": snapshot_id,
+                "stop_id": stop_id,
+                "revision": self.reducer.state().revision,
+                "profile": "minimal",
+                "reason": self.reducer.state().stop_reason,
+                "frame": frame,
+                "partial": frame.is_none(),
+                "warnings": if frame.is_none() {
+                    vec![serde_json::json!({
+                        "code": "FRAME_UNAVAILABLE",
+                        "message": "GDB stop event did not include a frame"
+                    })]
+                } else {
+                    Vec::new()
+                },
+                "evidence": [{
+                    "kind": "mi-event",
+                    "uri": format!(
+                        "gdbai://session/{}/event/{}",
+                        self.reducer.state().session_id,
+                        journaled.seq()
+                    )
+                }]
+            });
+            if let Err(error) = self.store_snapshot_value(snapshot_id, snapshot) {
+                self.apply_event(DomainEvent::SnapshotFailed {
+                    stop_id: stop_id.clone(),
+                })?;
+                return Err(error);
+            }
+            self.apply_event(DomainEvent::SnapshotReady {
+                stop_id,
+                partial: frame.is_none(),
+            })?;
+        }
+        Ok(())
+    }
+
+    fn store_snapshot_value(&mut self, snapshot_id: String, snapshot: Value) -> Result<()> {
+        self.journal.append_snapshot(&snapshot_id, &snapshot)?;
+        self.store
+            .upsert_snapshot(&self.reducer.state().session_id, &snapshot_id, &snapshot)?;
+        if self.snapshots.len() >= 128 {
+            self.snapshots.pop_first();
+        }
+        self.snapshots.insert(snapshot_id, snapshot);
         Ok(())
     }
 
