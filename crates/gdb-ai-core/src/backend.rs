@@ -6,16 +6,22 @@ use std::{
     os::fd::AsRawFd,
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdin, Command},
-    sync::mpsc,
+    sync::{Notify, mpsc},
 };
 
 use crate::{
     Error, ErrorCode, Result,
     config::{GdbConfig, Limits, SandboxMode},
+    ring::{ByteRing, RingRead},
 };
 
 #[derive(Clone, Debug)]
@@ -120,11 +126,73 @@ pub struct SandboxOptions {
     pub allow_network: bool,
 }
 
+pub struct PtyOutput {
+    ring: Mutex<ByteRing>,
+    closed: AtomicBool,
+    closed_notify: Notify,
+}
+
+impl PtyOutput {
+    fn new(capacity: usize) -> Self {
+        Self {
+            ring: Mutex::new(ByteRing::new(capacity)),
+            closed: AtomicBool::new(false),
+            closed_notify: Notify::new(),
+        }
+    }
+
+    fn append(&self, bytes: &[u8]) {
+        self.closed.store(false, Ordering::Release);
+        self.ring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .append(bytes);
+    }
+
+    fn mark_closed(&self) -> bool {
+        let changed = !self.closed.swap(true, Ordering::AcqRel);
+        if changed {
+            self.closed_notify.notify_waiters();
+        }
+        changed
+    }
+
+    pub fn reset(&self) {
+        self.closed.store(false, Ordering::Release);
+    }
+
+    pub fn read(&self, after_offset: u64, max_bytes: usize) -> RingRead {
+        self.ring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .read(after_offset, max_bytes)
+    }
+
+    pub fn dropped_bytes(&self) -> u64 {
+        self.ring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .dropped_bytes()
+    }
+
+    pub async fn wait_closed(&self, timeout: Duration) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let notified = self.closed_notify.notified();
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = tokio::time::timeout(timeout, notified).await;
+    }
+}
+
 pub struct GdbBackend {
     child: Child,
     stdin: ChildStdin,
     input: BackendInputs,
     pty_writer: tokio::fs::File,
+    pty_output: Arc<PtyOutput>,
     descriptor: BackendDescriptor,
 }
 
@@ -170,6 +238,7 @@ pub trait DebugBackend: Send {
     async fn next_input(&mut self) -> Option<BackendInput>;
     async fn write_inferior(&mut self, bytes: &[u8]) -> Result<()>;
     async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()>;
+    fn inferior_output(&self) -> Arc<PtyOutput>;
     fn signal_interrupt(&mut self) -> Result<()>;
     fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>>;
     async fn shutdown(&mut self) -> Result<()>;
@@ -316,12 +385,13 @@ impl GdbBackend {
         let (control_sender, control) = mpsc::channel(256);
         let (stderr_sender, stderr_input) = mpsc::channel(32);
         let (pty_sender, pty_input) = mpsc::channel(32);
+        let pty_output = Arc::new(PtyOutput::new(resource_limits.inferior_output_ring_bytes));
         tokio::spawn(read_mi(stdout, control_sender, mi_limits));
-        tokio::spawn(read_chunks(stderr, stderr_sender, StreamKind::Stderr));
-        tokio::spawn(read_chunks(
+        tokio::spawn(read_stderr(stderr, stderr_sender));
+        tokio::spawn(read_pty(
             tokio::fs::File::from_std(master),
             pty_sender,
-            StreamKind::Pty,
+            pty_output.clone(),
         ));
 
         Ok(Self {
@@ -336,6 +406,7 @@ impl GdbBackend {
                 pty_closed: false,
             },
             pty_writer: tokio::fs::File::from_std(writer),
+            pty_output,
             descriptor: BackendDescriptor {
                 name: "gdb",
                 mi_version: mi_version.to_owned(),
@@ -401,6 +472,10 @@ impl GdbBackend {
             return Err(std::io::Error::last_os_error().into());
         }
         Ok(())
+    }
+
+    pub fn inferior_output(&self) -> Arc<PtyOutput> {
+        self.pty_output.clone()
     }
 
     pub fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
@@ -492,6 +567,10 @@ impl DebugBackend for GdbBackend {
         self.resize_inferior(rows, columns).await
     }
 
+    fn inferior_output(&self) -> Arc<PtyOutput> {
+        self.inferior_output()
+    }
+
     fn signal_interrupt(&mut self) -> Result<()> {
         self.signal_interrupt()
     }
@@ -566,32 +645,61 @@ fn sandbox_available(mode: SandboxMode) -> Result<bool> {
     Ok(available)
 }
 
-enum StreamKind {
-    Stderr,
-    Pty,
-}
-
-async fn read_chunks<R>(mut reader: R, sender: mpsc::Sender<BackendInput>, kind: StreamKind)
+async fn read_stderr<R>(mut reader: R, sender: mpsc::Sender<BackendInput>)
 where
     R: AsyncRead + Unpin,
 {
     let mut buffer = vec![0; 64 * 1024];
     loop {
+        if sender.is_closed() {
+            break;
+        }
         match reader.read(&mut buffer).await {
-            Ok(0) => {
-                if matches!(kind, StreamKind::Pty) {
-                    let _ = sender.send(BackendInput::PtyEof).await;
-                }
-                break;
-            }
+            Ok(0) => break,
             Ok(length) => {
-                let input = match kind {
-                    StreamKind::Stderr => BackendInput::GdbStderr(buffer[..length].to_vec()),
-                    StreamKind::Pty => BackendInput::InferiorPty(buffer[..length].to_vec()),
-                };
-                if sender.send(input).await.is_err() {
+                if sender
+                    .send(BackendInput::GdbStderr(buffer[..length].to_vec()))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+async fn read_pty<R>(mut reader: R, sender: mpsc::Sender<BackendInput>, output: Arc<PtyOutput>)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        if sender.is_closed() {
+            break;
+        }
+        match reader.read(&mut buffer).await {
+            Ok(0) => {
+                if output.mark_closed() && sender.send(BackendInput::PtyEof).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok(length) => {
+                let bytes = buffer[..length].to_vec();
+                // 2026-08-28: Exit state could overtake the actor notification
+                // and hide trailing output. Publish bytes before queueing metadata.
+                output.append(&bytes);
+                if sender.send(BackendInput::InferiorPty(bytes)).await.is_err() {
+                    break;
+                }
+            }
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => {
+                if output.mark_closed() && sender.send(BackendInput::PtyEof).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
             Err(_) => break,
         }
@@ -742,5 +850,28 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn pty_bytes_reach_ring_before_actor_notification() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let (sender, _receiver) = mpsc::channel(1);
+        sender.try_send(BackendInput::PtyEof).unwrap();
+        let output = Arc::new(PtyOutput::new(64));
+        let task = tokio::spawn(read_pty(reader, sender, output.clone()));
+
+        writer.write_all(b"marker reached\n").await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if !output.read(0, 64).bytes.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(output.read(0, 64).bytes, b"marker reached\n");
+        task.abort();
     }
 }

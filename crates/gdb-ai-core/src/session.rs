@@ -16,8 +16,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::{
     Error, ErrorCode, Result,
     backend::{
-        BackendDescriptor, BackendInput, DebugBackend, GdbBackend, MiCommand, SandboxOptions,
-        session_directory,
+        BackendDescriptor, BackendInput, DebugBackend, GdbBackend, MiCommand, PtyOutput,
+        SandboxOptions, session_directory,
     },
     config::Config,
     domain::{
@@ -118,6 +118,7 @@ pub struct SessionHandle {
     capabilities: Arc<StdRwLock<SessionCapabilities>>,
     requests: mpsc::Sender<WorkerRequest>,
     controls: mpsc::Sender<ControlRequest>,
+    inferior_output: Arc<PtyOutput>,
     state: watch::Receiver<SessionState>,
     events: broadcast::Sender<PublishedEvent>,
     command_timeout: Duration,
@@ -165,6 +166,7 @@ impl SessionHandle {
         )
         .await?;
         let capabilities = worker.capabilities.clone();
+        let inferior_output = worker.inferior_output.clone();
         metrics.session_started();
         worker.metric_active = true;
         tokio::spawn(worker.run());
@@ -175,6 +177,7 @@ impl SessionHandle {
             capabilities,
             requests,
             controls,
+            inferior_output,
             state,
             events,
             command_timeout: config.server.command_timeout(),
@@ -484,6 +487,23 @@ impl SessionHandle {
         after_offset: u64,
         max_bytes: usize,
     ) -> Result<RingRead> {
+        if matches!(ring, OutputRing::Inferior) {
+            // 2026-08-28: GDB can publish inferior exit before the PTY reader
+            // observes hangup. Drain that bounded tail before returning exit output.
+            if self
+                .state()
+                .inferiors
+                .values()
+                .any(|inferior| inferior.status == InferiorStatus::Exited)
+            {
+                self.inferior_output
+                    .wait_closed(Duration::from_secs(1))
+                    .await;
+            }
+            return Ok(self
+                .inferior_output
+                .read(after_offset, max_bytes.min(64 * 1024)));
+        }
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(WorkerRequest::ReadOutput {
@@ -726,7 +746,8 @@ struct SessionWorker {
     requests: mpsc::Receiver<WorkerRequest>,
     controls: mpsc::Receiver<ControlRequest>,
     controls_open: bool,
-    inferior_output: ByteRing,
+    inferior_output: Arc<PtyOutput>,
+    inferior_output_dropped: u64,
     target_output: ByteRing,
     console_output: ByteRing,
     log_output: ByteRing,
@@ -767,7 +788,6 @@ impl SessionWorker {
         let mut selected = None;
         let mut journal = journal;
         let mut reducer = StateReducer::new(initial_state);
-        let mut inferior_output = ByteRing::new(config.limits.inferior_output_ring_bytes);
         let mut target_output = ByteRing::new(config.limits.inferior_output_ring_bytes);
         let mut console_output = ByteRing::new(config.limits.console_output_ring_bytes);
         let mut log_output = ByteRing::new(config.limits.console_output_ring_bytes);
@@ -796,7 +816,6 @@ impl SessionWorker {
                 backend.as_mut(),
                 &mut journal,
                 &mut reducer,
-                &mut inferior_output,
                 &mut target_output,
                 &mut console_output,
                 &mut log_output,
@@ -817,6 +836,7 @@ impl SessionWorker {
         let backend = selected.ok_or_else(|| {
             last_error.unwrap_or_else(|| Error::new(ErrorCode::GdbExited, "GDB startup failed"))
         })?;
+        let inferior_output = backend.inferior_output();
         let mut worker = Self {
             capabilities: Arc::new(StdRwLock::new(SessionCapabilities {
                 backend: backend.descriptor().clone(),
@@ -855,6 +875,7 @@ impl SessionWorker {
             controls,
             controls_open: true,
             inferior_output,
+            inferior_output_dropped: 0,
             target_output,
             console_output,
             log_output,
@@ -1389,13 +1410,13 @@ impl SessionWorker {
                 max_bytes,
                 response,
             } => {
-                let ring = match ring {
-                    OutputRing::Inferior => &self.inferior_output,
-                    OutputRing::Target => &self.target_output,
-                    OutputRing::Console => &self.console_output,
-                    OutputRing::Log => &self.log_output,
+                let read = match ring {
+                    OutputRing::Inferior => self.inferior_output.read(after_offset, max_bytes),
+                    OutputRing::Target => self.target_output.read(after_offset, max_bytes),
+                    OutputRing::Console => self.console_output.read(after_offset, max_bytes),
+                    OutputRing::Log => self.log_output.read(after_offset, max_bytes),
                 };
-                let _ = response.send(ring.read(after_offset, max_bytes));
+                let _ = response.send(read);
             }
             WorkerRequest::WriteInferior { bytes, response } => {
                 let result = match self.journal.append_inferior_input(&bytes) {
@@ -1839,10 +1860,9 @@ impl SessionWorker {
             BackendInput::InferiorPty(bytes) => {
                 self.journal.append_inferior_output(&bytes)?;
                 let dropped = self.inferior_output.dropped_bytes();
-                self.inferior_output.append(&bytes);
-                self.metrics.inferior_output_dropped(
-                    self.inferior_output.dropped_bytes().saturating_sub(dropped),
-                );
+                self.metrics
+                    .inferior_output_dropped(dropped.saturating_sub(self.inferior_output_dropped));
+                self.inferior_output_dropped = dropped;
                 self.apply_event(DomainEvent::Output {
                     source: OutputSource::InferiorPty,
                     bytes,
@@ -1877,6 +1897,9 @@ impl SessionWorker {
     }
 
     fn apply_event(&mut self, event: DomainEvent) -> Result<()> {
+        if matches!(&event, DomainEvent::TargetRunning { .. }) {
+            self.inferior_output.reset();
+        }
         let invalidates_values = matches!(
             &event,
             DomainEvent::TargetRunning { .. }
@@ -1958,7 +1981,6 @@ async fn wait_for_prompt(
     backend: &mut dyn DebugBackend,
     journal: &mut Journal,
     reducer: &mut StateReducer,
-    inferior_output: &mut ByteRing,
     target_output: &mut ByteRing,
     console_output: &mut ByteRing,
     log_output: &mut ByteRing,
@@ -2002,7 +2024,6 @@ async fn wait_for_prompt(
             BackendInput::GdbEof => return Err(Error::new(ErrorCode::GdbExited, "GDB exited")),
             BackendInput::InferiorPty(bytes) => {
                 journal.append_inferior_output(&bytes)?;
-                inferior_output.append(&bytes);
             }
             BackendInput::PtyEof => {}
         }
