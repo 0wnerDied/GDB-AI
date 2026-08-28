@@ -56,3 +56,31 @@ jobs:
           node sdk/typescript/test.mjs
       - name: Check fuzz targets
         run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        series: ["6.1", "6.12"]
+    env:
+      GDB_AI_REQUIRE_INTEGRATION: "1"
+      GDB_AI_REQUIRE_KERNEL_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install kernel debugger prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y busybox-static cpio curl gdb qemu-system-x86 xz-utils
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gdb-ai-kernel/downloads
+          key: debian-kernel-${{ matrix.series }}-2026-08-28
+      - name: Fetch pinned Debian kernel artifacts
+        run: tests/kernel/fetch-debian-kernel.sh "${{ runner.temp }}/gdb-ai-kernel" "${{ matrix.series }}" >> "$GITHUB_ENV"
+      - name: Verify Linux kernel provider
+        run: cargo test --locked -p gdb-ai-core --test kernel -- --nocapture

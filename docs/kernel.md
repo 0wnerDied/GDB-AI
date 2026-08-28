@@ -61,6 +61,10 @@ The image, debug symbols, and module must come from the same distribution
 build. The test also requires `busybox`, `cpio`, `gdb`, and
 `qemu-system-x86_64`.
 
+Required CI uses `tests/kernel/fetch-debian-kernel.sh` to verify pinned,
+checksum-validated Debian 6.1 and 6.12 builds. These exercise the legacy
+`core_layout` and current `module_memory` representations respectively.
+
 Kernel debugging exposes complete guest memory and register state. Bind remote
 stubs only on an authorized network boundary and treat transcripts, monitor
 output, snapshots, and memory artifacts as sensitive.
