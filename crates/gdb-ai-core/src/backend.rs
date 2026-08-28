@@ -3,7 +3,7 @@ use gdb_ai_mi::{MiFramer, MiLimits, MiRecord, encode_command, parse_record, quot
 use nix::{pty::openpty, unistd::ttyname};
 use serde::Serialize;
 use std::{
-    os::fd::OwnedFd,
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
 };
@@ -125,7 +125,6 @@ pub struct GdbBackend {
     stdin: ChildStdin,
     input: mpsc::Receiver<BackendInput>,
     pty_writer: tokio::fs::File,
-    _pty_slave: OwnedFd,
     descriptor: BackendDescriptor,
 }
 
@@ -162,6 +161,9 @@ impl GdbBackend {
         })?;
         let master = std::fs::File::from(pty.master);
         let writer = master.try_clone()?;
+        // 2026-08-28: Retaining the parent slave prevented the master reader
+        // from observing inferior shutdown. The resolved path is all GDB needs.
+        drop(pty.slave);
         let inferior_tmp = session_dir.join("tmp");
         std::fs::create_dir_all(&inferior_tmp)?;
 
@@ -287,7 +289,6 @@ impl GdbBackend {
             stdin,
             input,
             pty_writer: tokio::fs::File::from_std(writer),
-            _pty_slave: pty.slave,
             descriptor: BackendDescriptor {
                 name: "gdb",
                 mi_version: mi_version.to_owned(),
@@ -340,12 +341,11 @@ impl GdbBackend {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        use std::os::fd::AsRawFd;
         // SAFETY: TIOCSWINSZ reads the supplied winsize during the call; the
         // fd is owned by self and the pointer remains valid for the call.
         let result = unsafe {
             libc::ioctl(
-                self._pty_slave.as_raw_fd(),
+                self.pty_writer.as_raw_fd(),
                 libc::TIOCSWINSZ,
                 &winsize as *const libc::winsize,
             )
@@ -583,6 +583,7 @@ pub fn session_directory(root: &Path, session_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn command_encoder_prevents_token_and_newline_injection() {
@@ -596,5 +597,15 @@ mod tests {
             command.encoded(7),
             b"7-file-exec-and-symbols \"/tmp/a b\"\n"
         );
+    }
+
+    #[test]
+    fn dropping_parent_slave_exposes_master_hangup() {
+        let pty = openpty(None, None).unwrap();
+        let mut master = std::fs::File::from(pty.master);
+        drop(pty.slave);
+
+        let error = master.read(&mut [0]).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
     }
 }
