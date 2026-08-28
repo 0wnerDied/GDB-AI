@@ -70,6 +70,9 @@ async fn local_debugging_vertical_slice() {
     config.security.workspace_roots = vec![directory.path().to_owned()];
     config.security.default_profile = Profile::LabMutation;
     config.limits.inline_memory_bytes = 1;
+    // 2026-08-29: The full vertical path exceeds the production lease default
+    // under TCG. Keep this qualification focused on debugger semantics.
+    config.server.write_lease_ms = 5 * 60 * 1_000;
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller::local("integration-test");
 
