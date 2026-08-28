@@ -1,0 +1,48 @@
+#!/bin/busybox sh
+
+finish() {
+    status=$?
+    echo "GDB_AI_AARCH64_VM_RESULT=$status"
+    /bin/busybox sync
+    /bin/busybox poweroff -f
+    /bin/busybox sleep 2
+    echo o > /proc/sysrq-trigger
+}
+
+trap finish EXIT
+set -eu
+
+# 2026-08-29: Debian's initramfs can carry these mounts into the real root;
+# accept EBUSY only when the expected mount is already present.
+/bin/busybox mount -t proc proc /proc 2>/dev/null ||
+    /bin/busybox grep -q ' /proc ' /proc/mounts
+/bin/busybox mount -t sysfs sysfs /sys 2>/dev/null ||
+    /bin/busybox grep -q ' /sys ' /proc/mounts
+/bin/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null ||
+    /bin/busybox grep -q ' /dev ' /proc/mounts
+/bin/busybox mkdir -p /dev/pts /tmp
+/bin/busybox mount -t devpts devpts /dev/pts 2>/dev/null ||
+    /bin/busybox grep -q ' /dev/pts ' /proc/mounts
+# 2026-08-29: This minimal PID 1 bypasses distro network initialization;
+# enable loopback before the native gdbserver tests bind to 127.0.0.1.
+/bin/busybox ifconfig lo up
+
+repository=
+for argument in $(/bin/busybox cat /proc/cmdline); do
+    case "$argument" in
+        gdb_ai_repo=*) repository=${argument#gdb_ai_repo=} ;;
+    esac
+done
+[ -n "$repository" ]
+[ -d "$repository" ]
+
+export GDB_AI_REQUIRE_INTEGRATION=1
+export GDB_AI_EXPECTED_MI=mi4
+export TMPDIR=/tmp
+
+echo "architecture=$(/bin/busybox uname -m)"
+gdb --version | /bin/busybox sed -n '1p'
+
+for test_name in vertical core remote; do
+    "$repository/target/aarch64-system-tests/$test_name" --nocapture
+done

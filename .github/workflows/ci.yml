@@ -112,6 +112,30 @@ jobs:
       - name: Verify Linux kernel provider
         run: cargo test --locked -p gdb-ai-core --test kernel -- --nocapture
 
+  aarch64-system:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Install AArch64 system-test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            e2fsprogs gcc-aarch64-linux-gnu qemu-system-arm \
+            qemu-user-static
+          sudo update-binfmts --enable qemu-aarch64
+      - name: Verify AArch64 container emulation
+        run: |
+          architecture=$(docker run --rm --platform linux/arm64 \
+            debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 \
+            uname -m)
+          test "$architecture" = aarch64
+      - name: Verify native AArch64 launch, core, and gdbserver
+        run: tests/aarch64/run-system.sh "$RUNNER_TEMP/aarch64-system"
+
   compatibility:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
