@@ -101,6 +101,14 @@ impl StateReducer {
                 true
             }
             DomainEvent::TargetRunning { backend_inferiors } => {
+                let was_running = self
+                    .state
+                    .inferiors
+                    .values()
+                    .any(|inferior| inferior.status == InferiorStatus::Running);
+                let previous_lifecycle = self.state.lifecycle;
+                let had_stop = self.state.stop_id.is_some();
+                let mut status_changed = false;
                 let seq = self.state.event_seq;
                 if self.state.inferiors.is_empty() {
                     self.ensure_inferior(
@@ -110,6 +118,7 @@ impl StateReducer {
                 }
                 for (backend_id, inferior) in &mut self.state.inferiors {
                     if backend_inferiors.is_empty() || backend_inferiors.contains(backend_id) {
+                        status_changed |= inferior.status != InferiorStatus::Running;
                         inferior.status = InferiorStatus::Running;
                         for thread in inferior.threads.values_mut() {
                             thread.running = true;
@@ -118,14 +127,28 @@ impl StateReducer {
                     }
                 }
                 self.state.lifecycle = SessionLifecycle::Active;
-                self.state.execution_epoch += 1;
+                let is_running = self
+                    .state
+                    .inferiors
+                    .values()
+                    .any(|inferior| inferior.status == InferiorStatus::Running);
+                // 2026-08-28: Repeated or per-inferior *running records for one
+                // resume incremented the global epoch more than once. Advance
+                // only on the aggregate not-running to running edge.
+                let running_edge = !was_running && is_running;
+                if running_edge {
+                    self.state.execution_epoch += 1;
+                }
                 self.state.stop_id = None;
                 self.state.stop_reason = None;
                 self.state.stop_reason_detail = None;
                 self.state.stopped_inferior_id = None;
                 self.state.stopped_thread_id = None;
                 self.state.snapshot = None;
-                true
+                running_edge
+                    || status_changed
+                    || had_stop
+                    || previous_lifecycle != SessionLifecycle::Active
             }
             DomainEvent::TargetStopped {
                 backend_inferior,
@@ -580,6 +603,37 @@ mod tests {
             reducer.into_state()
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn duplicate_running_records_share_one_execution_epoch() {
+        let mut reducer = StateReducer::new(SessionState::creating(SessionId("sess_run".into())));
+        apply(&mut reducer, 1, DomainEvent::BackendStarted);
+        apply(
+            &mut reducer,
+            2,
+            DomainEvent::InferiorAdded {
+                backend_id: "i1".into(),
+                pid: Some(42),
+            },
+        );
+        apply(
+            &mut reducer,
+            3,
+            DomainEvent::TargetRunning {
+                backend_inferiors: vec!["i1".into()],
+            },
+        );
+        let revision = reducer.state().revision;
+        apply(
+            &mut reducer,
+            4,
+            DomainEvent::TargetRunning {
+                backend_inferiors: vec!["i1".into()],
+            },
+        );
+        assert_eq!(reducer.state().execution_epoch, 1);
+        assert_eq!(reducer.state().revision, revision);
     }
 
     #[test]
