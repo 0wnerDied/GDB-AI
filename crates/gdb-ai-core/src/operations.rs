@@ -1059,53 +1059,75 @@ impl Gateway {
     async fn breakpoint_update(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
         let number = breakpoint_number(&entry, &request.parameters)?;
-        let reply = if let Some(enabled) =
-            request.parameters.get("enabled").and_then(Value::as_bool)
+        if !["enabled", "condition", "ignore_count"]
+            .iter()
+            .any(|field| request.parameters.get(*field).is_some())
         {
-            entry
-                .handle
-                .command(
-                    MiCommand::new(if enabled {
-                        "-break-enable"
-                    } else {
-                        "-break-disable"
-                    })?
-                    .bare(number)?,
-                )
-                .await?
-        } else if let Some(condition) = request.parameters.get("condition").and_then(Value::as_str)
-        {
-            entry
-                .handle
-                .command(
-                    MiCommand::new("-break-condition")?
-                        .bare(number)?
-                        .string(condition),
-                )
-                .await?
-        } else if let Some(ignore) = request
-            .parameters
-            .get("ignore_count")
-            .and_then(Value::as_u64)
-        {
-            entry
-                .handle
-                .command(
-                    MiCommand::new("-break-after")?
-                        .bare(number)?
-                        .bare(ignore.to_string())?,
-                )
-                .await?
-        } else {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
                 "breakpoint.update requires enabled, condition, or ignore_count",
             ));
-        };
-        let list = entry.handle.command(MiCommand::new("-break-list")?).await?;
-        reconcile_breakpoints(&entry.handle, &list.record).await?;
+        }
+        // 2026-08-28: An else-if chain silently ignored every update field
+        // after the first. Apply the complete validated patch and refresh the
+        // managed registry even when GDB rejects a later command.
+        let update: Result<Vec<CommandReply>> = async {
+            let mut replies = Vec::new();
+            if let Some(enabled) = request.parameters.get("enabled").and_then(Value::as_bool) {
+                replies.push(
+                    entry
+                        .handle
+                        .command(
+                            MiCommand::new(if enabled {
+                                "-break-enable"
+                            } else {
+                                "-break-disable"
+                            })?
+                            .bare(number.clone())?,
+                        )
+                        .await?,
+                );
+            }
+            if let Some(condition) = request.parameters.get("condition").and_then(Value::as_str) {
+                replies.push(
+                    entry
+                        .handle
+                        .command(
+                            MiCommand::new("-break-condition")?
+                                .bare(number.clone())?
+                                .string(condition),
+                        )
+                        .await?,
+                );
+            }
+            if let Some(ignore) = request
+                .parameters
+                .get("ignore_count")
+                .and_then(Value::as_u64)
+            {
+                replies.push(
+                    entry
+                        .handle
+                        .command(
+                            MiCommand::new("-break-after")?
+                                .bare(number)?
+                                .bare(ignore.to_string())?,
+                        )
+                        .await?,
+                );
+            }
+            Ok(replies)
+        }
+        .await;
+        let list = entry.handle.command(MiCommand::new("-break-list")?).await;
+        if let Ok(list) = &list {
+            reconcile_breakpoints(&entry.handle, &list.record).await?;
+        }
+        let replies = update?;
+        let list = list?;
         Ok(json!({
-            "command": reply,
+            "command": replies.last(),
+            "commands": replies,
             "breakpoints": entry.handle.state().breakpoints,
             "evidence_seq": list.evidence_seq
         }))

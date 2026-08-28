@@ -160,6 +160,38 @@ async fn local_debugging_vertical_slice() {
             )
             .await,
     );
+    let breakpoint_id = breakpoint.result.as_ref().unwrap()["breakpoints"]
+        .as_object()
+        .and_then(|breakpoints| breakpoints.values().next())
+        .and_then(|breakpoint| breakpoint["id"].as_str())
+        .unwrap()
+        .to_owned();
+    let breakpoint = successful(
+        gateway
+            .dispatch(
+                request(
+                    "breakpoint-update",
+                    Some(&session_id),
+                    "breakpoint.update",
+                    breakpoint.revision,
+                    json!({
+                        "lease_id": lease_id,
+                        "breakpoint_id": breakpoint_id,
+                        "enabled": true,
+                        "condition": "global_value >= 0",
+                        "ignore_count": 0
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(
+        breakpoint.result.as_ref().unwrap()["commands"]
+            .as_array()
+            .map(Vec::len),
+        Some(3)
+    );
     let listed = successful(
         gateway
             .dispatch(
