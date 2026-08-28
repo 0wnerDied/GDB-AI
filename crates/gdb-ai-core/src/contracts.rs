@@ -7,10 +7,14 @@ enum ParameterKind {
     String,
     Boolean,
     Unsigned,
+    Positive,
     Object,
     Array,
     StringArray,
-    StringOrObject,
+    Shape(&'static ObjectContract),
+    ArrayOf(&'static ParameterKind),
+    MapOf(&'static ParameterKind),
+    OneOf(&'static [ParameterKind]),
     BooleanOrEnum(&'static [&'static str]),
     Enum(&'static [&'static str]),
 }
@@ -21,12 +25,20 @@ impl ParameterKind {
             Self::String => value.is_string(),
             Self::Boolean => value.is_boolean(),
             Self::Unsigned => value.as_u64().is_some(),
+            Self::Positive => value.as_u64().is_some_and(|value| value > 0),
             Self::Object => value.is_object(),
             Self::Array => value.is_array(),
             Self::StringArray => value
                 .as_array()
                 .is_some_and(|items| items.iter().all(Value::is_string)),
-            Self::StringOrObject => value.is_string() || value.is_object(),
+            Self::Shape(contract) => contract.accepts(value),
+            Self::ArrayOf(kind) => value
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| kind.accepts(item))),
+            Self::MapOf(kind) => value
+                .as_object()
+                .is_some_and(|object| object.values().all(|value| kind.accepts(value))),
+            Self::OneOf(kinds) => kinds.iter().filter(|kind| kind.accepts(value)).count() == 1,
             Self::BooleanOrEnum(values) => {
                 value.is_boolean() || value.as_str().is_some_and(|value| values.contains(&value))
             }
@@ -39,10 +51,14 @@ impl ParameterKind {
             Self::String => "a string",
             Self::Boolean => "a boolean",
             Self::Unsigned => "an unsigned integer",
+            Self::Positive => "a positive integer",
             Self::Object => "an object",
             Self::Array => "an array",
             Self::StringArray => "an array of strings",
-            Self::StringOrObject => "a string or object",
+            Self::Shape(_) => "a supported object",
+            Self::ArrayOf(_) => "an array of supported values",
+            Self::MapOf(_) => "an object with supported values",
+            Self::OneOf(_) => "one supported shape",
             Self::BooleanOrEnum(_) => "a boolean or supported string",
             Self::Enum(_) => "a supported string",
         }
@@ -53,12 +69,18 @@ impl ParameterKind {
             Self::String => json!({"type": "string"}),
             Self::Boolean => json!({"type": "boolean"}),
             Self::Unsigned => json!({"type": "integer", "minimum": 0}),
+            Self::Positive => json!({"type": "integer", "minimum": 1}),
             Self::Object => json!({"type": "object"}),
             Self::Array => json!({"type": "array"}),
             Self::StringArray => json!({"type": "array", "items": {"type": "string"}}),
-            Self::StringOrObject => json!({
-                "oneOf": [{"type": "string"}, {"type": "object"}]
-            }),
+            Self::Shape(contract) => contract.schema(),
+            Self::ArrayOf(kind) => json!({"type": "array", "items": kind.schema()}),
+            Self::MapOf(kind) => {
+                json!({"type": "object", "additionalProperties": kind.schema()})
+            }
+            Self::OneOf(kinds) => {
+                json!({"oneOf": kinds.iter().map(|kind| kind.schema()).collect::<Vec<_>>()})
+            }
             Self::BooleanOrEnum(values) => json!({
                 "oneOf": [
                     {"type": "boolean"},
@@ -92,6 +114,194 @@ const fn required(name: &'static str, kind: ParameterKind) -> ParameterField {
         required: true,
     }
 }
+
+// 2026-08-28: Object and array contracts checked only their top level, so
+// malformed nested requests reached stateful handlers. One recursive shape
+// now drives both runtime validation and the published JSON Schema.
+struct ObjectContract {
+    fields: &'static [ParameterField],
+    min_properties: usize,
+    any_of: &'static [&'static str],
+}
+
+impl ObjectContract {
+    const fn new(
+        fields: &'static [ParameterField],
+        min_properties: usize,
+        any_of: &'static [&'static str],
+    ) -> Self {
+        Self {
+            fields,
+            min_properties,
+            any_of,
+        }
+    }
+
+    fn accepts(&self, value: &Value) -> bool {
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        if object.len() < self.min_properties
+            || self
+                .fields
+                .iter()
+                .filter(|field| field.required)
+                .any(|field| !object.contains_key(field.name))
+            || (!self.any_of.is_empty()
+                && !self.any_of.iter().any(|field| object.contains_key(*field)))
+        {
+            return false;
+        }
+        object.iter().all(|(name, value)| {
+            self.fields
+                .iter()
+                .find(|field| field.name == name)
+                .is_some_and(|field| field.kind.accepts(value))
+        })
+    }
+
+    fn schema(&self) -> Value {
+        let mut properties = Map::new();
+        let mut required = Vec::new();
+        for field in self.fields {
+            properties.insert(field.name.into(), field.kind.schema());
+            if field.required {
+                required.push(field.name);
+            }
+        }
+        let mut schema = json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false
+        });
+        if self.min_properties > 0 {
+            schema["minProperties"] = Value::from(self.min_properties);
+        }
+        if !self.any_of.is_empty() {
+            schema["anyOf"] = Value::Array(
+                self.any_of
+                    .iter()
+                    .map(|field| json!({"required": [field]}))
+                    .collect(),
+            );
+        }
+        schema
+    }
+}
+
+const STRING_KIND: ParameterKind = ParameterKind::String;
+
+const WAIT_FIELDS: &[ParameterField] = &[
+    required(
+        "until",
+        ParameterKind::Enum(&["accepted", "running", "stopped", "snapshot", "exited"]),
+    ),
+    optional("timeout_ms", ParameterKind::Positive),
+];
+const WAIT_OBJECT: ObjectContract = ObjectContract::new(WAIT_FIELDS, 0, &[]);
+const WAIT_KIND: ParameterKind = ParameterKind::Shape(&WAIT_OBJECT);
+
+const ENDPOINT_FIELDS: &[ParameterField] = &[
+    required("host", ParameterKind::String),
+    required("port", ParameterKind::Positive),
+];
+const ENDPOINT_OBJECT: ObjectContract = ObjectContract::new(ENDPOINT_FIELDS, 0, &[]);
+const ENDPOINT_KINDS: &[ParameterKind] = &[
+    ParameterKind::String,
+    ParameterKind::Shape(&ENDPOINT_OBJECT),
+];
+const ENDPOINT_KIND: ParameterKind = ParameterKind::OneOf(ENDPOINT_KINDS);
+
+const SOURCE_FIELDS: &[ParameterField] = &[
+    required("path", ParameterKind::String),
+    required("line", ParameterKind::Unsigned),
+];
+const SOURCE_OBJECT: ObjectContract = ObjectContract::new(SOURCE_FIELDS, 0, &[]);
+const SOURCE_KIND: ParameterKind = ParameterKind::Shape(&SOURCE_OBJECT);
+
+const MODULE_OFFSET_FIELDS: &[ParameterField] = &[
+    required("module", ParameterKind::String),
+    required("offset", ParameterKind::String),
+];
+const MODULE_OFFSET_OBJECT: ObjectContract = ObjectContract::new(MODULE_OFFSET_FIELDS, 0, &[]);
+const MODULE_OFFSET_KIND: ParameterKind = ParameterKind::Shape(&MODULE_OFFSET_OBJECT);
+
+const LOCATION_FIELDS: &[ParameterField] = &[
+    optional("function", ParameterKind::String),
+    optional("address", ParameterKind::String),
+    optional("expression", ParameterKind::String),
+    optional("source", SOURCE_KIND),
+    optional("module_offset", MODULE_OFFSET_KIND),
+];
+const LOCATION_OBJECT: ObjectContract = ObjectContract::new(LOCATION_FIELDS, 1, &[]);
+const LOCATION_KIND: ParameterKind = ParameterKind::Shape(&LOCATION_OBJECT);
+
+const AROUND_FIELDS: &[ParameterField] = &[
+    optional("expression", ParameterKind::String),
+    optional("before_instructions", ParameterKind::Unsigned),
+    optional("after_instructions", ParameterKind::Unsigned),
+];
+const AROUND_OBJECT: ObjectContract = ObjectContract::new(AROUND_FIELDS, 0, &[]);
+const AROUND_KIND: ParameterKind = ParameterKind::Shape(&AROUND_OBJECT);
+
+const RANGE_FIELDS: &[ParameterField] = &[
+    required("start", ParameterKind::String),
+    required("end", ParameterKind::String),
+];
+const RANGE_OBJECT: ObjectContract = ObjectContract::new(RANGE_FIELDS, 0, &[]);
+const RANGE_KIND: ParameterKind = ParameterKind::Shape(&RANGE_OBJECT);
+
+const EXPECTED_FIELDS: &[ParameterField] = &[
+    optional("bytes_base64", ParameterKind::String),
+    optional("sha256", ParameterKind::String),
+];
+const EXPECTED_OBJECT: ObjectContract =
+    ObjectContract::new(EXPECTED_FIELDS, 1, &["bytes_base64", "sha256"]);
+const EXPECTED_KIND: ParameterKind = ParameterKind::Shape(&EXPECTED_OBJECT);
+
+const PATTERN_FIELDS: &[ParameterField] = &[
+    optional("kind", ParameterKind::Enum(&["bytes", "text"])),
+    optional("hex", ParameterKind::String),
+    optional("data_base64", ParameterKind::String),
+    optional("text", ParameterKind::String),
+];
+const PATTERN_OBJECT: ObjectContract =
+    ObjectContract::new(PATTERN_FIELDS, 1, &["hex", "data_base64", "text"]);
+const PATTERN_KIND: ParameterKind = ParameterKind::Shape(&PATTERN_OBJECT);
+
+const BUDGET_FIELDS: &[ParameterField] = &[
+    optional("max_calls", ParameterKind::Positive),
+    optional("max_frames", ParameterKind::Positive),
+    optional("max_values", ParameterKind::Positive),
+    optional("max_memory_bytes", ParameterKind::Positive),
+    optional("max_instructions", ParameterKind::Positive),
+    optional("max_context_bytes", ParameterKind::Positive),
+    optional("wall_time_ms", ParameterKind::Positive),
+];
+const BUDGET_OBJECT: ObjectContract = ObjectContract::new(BUDGET_FIELDS, 0, &[]);
+const BUDGET_KIND: ParameterKind = ParameterKind::Shape(&BUDGET_OBJECT);
+
+const CAPTURE_STACK_FIELDS: &[ParameterField] = &[optional("limit", ParameterKind::Positive)];
+const CAPTURE_STACK_OBJECT: ObjectContract = ObjectContract::new(CAPTURE_STACK_FIELDS, 0, &[]);
+const CAPTURE_EXPRESSION_FIELDS: &[ParameterField] =
+    &[required("expression", ParameterKind::String)];
+const CAPTURE_EXPRESSION_OBJECT: ObjectContract =
+    ObjectContract::new(CAPTURE_EXPRESSION_FIELDS, 0, &[]);
+const CAPTURE_STACK_ITEM_FIELDS: &[ParameterField] = &[required(
+    "stack",
+    ParameterKind::Shape(&CAPTURE_STACK_OBJECT),
+)];
+const CAPTURE_STACK_ITEM_OBJECT: ObjectContract =
+    ObjectContract::new(CAPTURE_STACK_ITEM_FIELDS, 0, &[]);
+const CAPTURE_ITEM_KINDS: &[ParameterKind] = &[
+    ParameterKind::Shape(&CAPTURE_EXPRESSION_OBJECT),
+    ParameterKind::Shape(&CAPTURE_STACK_ITEM_OBJECT),
+];
+const CAPTURE_ITEM_KIND: ParameterKind = ParameterKind::OneOf(CAPTURE_ITEM_KINDS);
+const CAPTURE_KIND: ParameterKind = ParameterKind::ArrayOf(&CAPTURE_ITEM_KIND);
+
+const ENVIRONMENT_KIND: ParameterKind = ParameterKind::MapOf(&STRING_KIND);
 
 const COMMON_FIELDS: &[ParameterField] = &[
     optional("accept_latest_revision", ParameterKind::Boolean),
@@ -222,7 +432,7 @@ impl CanonicalMethod {
                 required("program", String),
                 optional("argv", StringArray),
                 optional("cwd", String),
-                optional("environment", Object),
+                optional("environment", ENVIRONMENT_KIND),
                 optional("environment_mode", Enum(&["clean"])),
                 optional("aslr", Enum(&["preserve", "disable"])),
                 optional(
@@ -232,18 +442,18 @@ impl CanonicalMethod {
                 optional("follow_fork", Enum(&["parent", "child"])),
                 optional("detach_on_fork", Boolean),
                 optional("follow_exec", Enum(&["same-inferior"])),
-                optional("wait", Object),
+                optional("wait", WAIT_KIND),
             ]),
             TargetAttach => MethodContract::plain(vec![
                 required("pid", Unsigned),
                 optional("executable", String),
-                optional("wait", Object),
+                optional("wait", WAIT_KIND),
             ]),
             TargetConnectRemote => MethodContract::plain(vec![
                 optional("mode", Enum(&["remote", "extended-remote"])),
-                required("endpoint", StringOrObject),
+                required("endpoint", ENDPOINT_KIND),
                 optional("executable", String),
-                optional("wait", Object),
+                optional("wait", WAIT_KIND),
             ]),
             TargetOpenCore => MethodContract::plain(vec![
                 required("executable", String),
@@ -255,9 +465,9 @@ impl CanonicalMethod {
                     Enum(&["first_instruction", "main", "none", "entry"]),
                 ),
                 optional("stop_at_entry", Boolean),
-                optional("wait", Object),
+                optional("wait", WAIT_KIND),
             ]),
-            TargetKill => MethodContract::plain(vec![optional("wait", Object)]),
+            TargetKill => MethodContract::plain(vec![optional("wait", WAIT_KIND)]),
             ExecutionControl => MethodContract::contextual(vec![
                 required(
                     "action",
@@ -273,11 +483,11 @@ impl CanonicalMethod {
                     ]),
                 ),
                 optional("location", String),
-                optional("wait", Object),
+                optional("wait", WAIT_KIND),
             ]),
             ExecutionWait => MethodContract::plain(vec![
                 optional("operation_id", String),
-                required("wait", Object),
+                required("wait", WAIT_KIND),
             ]),
             BreakpointCreate => MethodContract::plain(vec![
                 optional(
@@ -293,12 +503,12 @@ impl CanonicalMethod {
                         "catchpoint",
                     ]),
                 ),
-                optional("location", Object),
+                optional("location", LOCATION_KIND),
                 optional("function", String),
                 optional("address", String),
                 optional("expression", String),
-                optional("source", Object),
-                optional("module_offset", Object),
+                optional("source", SOURCE_KIND),
+                optional("module_offset", MODULE_OFFSET_KIND),
                 optional("catch", String),
                 optional("temporary", Boolean),
                 optional("hardware", BooleanOrEnum(&["auto", "required"])),
@@ -349,8 +559,8 @@ impl CanonicalMethod {
                 optional("before_lines", Unsigned),
                 optional("after_lines", Unsigned),
                 optional("profile", Enum(&["minimal", "brief", "standard", "deep"])),
-                optional("around", Object),
-                optional("range", Object),
+                optional("around", AROUND_KIND),
+                optional("range", RANGE_KIND),
                 optional("include_bytes", Boolean),
                 optional("include_source", Boolean),
             ]),
@@ -358,8 +568,8 @@ impl CanonicalMethod {
                 optional("profile", Enum(&["minimal", "brief", "standard", "deep"])),
                 optional("limit", Unsigned),
                 optional("roles", StringArray),
-                optional("around", Object),
-                optional("range", Object),
+                optional("around", AROUND_KIND),
+                optional("range", RANGE_KIND),
                 optional("include_bytes", Boolean),
                 optional("include_source", Boolean),
             ]),
@@ -392,19 +602,19 @@ impl CanonicalMethod {
                 required("address", String),
                 optional("text", String),
                 optional("data_base64", String),
-                required("expected", Object),
+                required("expected", EXPECTED_KIND),
             ]),
             MemorySearch => MethodContract::contextual(vec![
                 required("start", String),
                 required("length", Unsigned),
-                required("pattern", Object),
+                required("pattern", PATTERN_KIND),
                 optional("max_results", Unsigned),
                 optional("volatile", Boolean),
             ]),
             MemoryCompare => MethodContract::contextual(vec![
                 required("address", String),
                 required("length", Unsigned),
-                required("expected", Object),
+                required("expected", EXPECTED_KIND),
                 optional("volatile", Boolean),
             ]),
             RegisterRead => MethodContract::contextual(vec![optional("roles", StringArray)]),
@@ -414,8 +624,8 @@ impl CanonicalMethod {
                 required("reason", String),
             ]),
             DisassemblyRead => MethodContract::contextual(vec![
-                optional("around", Object),
-                optional("range", Object),
+                optional("around", AROUND_KIND),
+                optional("range", RANGE_KIND),
                 optional("include_bytes", Boolean),
                 optional("include_source", Boolean),
             ]),
@@ -459,20 +669,20 @@ impl CanonicalMethod {
                 required("expected", String),
             ]),
             AgentProbe | AgentExperiment => MethodContract::contextual(vec![
-                optional("location", Object),
+                optional("location", LOCATION_KIND),
                 optional("function", String),
                 optional("address", String),
                 optional("expression", String),
-                optional("source", Object),
-                optional("module_offset", Object),
+                optional("source", SOURCE_KIND),
+                optional("module_offset", MODULE_OFFSET_KIND),
                 optional("condition", String),
-                optional("capture", Array),
+                optional("capture", CAPTURE_KIND),
                 optional("max_hits", Unsigned),
                 optional(
                     "stop_policy",
                     Enum(&["on_condition", "continue_after_capture"]),
                 ),
-                optional("budget", Object),
+                optional("budget", BUDGET_KIND),
             ]),
             KernelInspect => MethodContract::contextual(vec![
                 required(
@@ -482,8 +692,8 @@ impl CanonicalMethod {
                 optional("limit", Unsigned),
                 optional("offset", Unsigned),
                 optional("roles", StringArray),
-                optional("around", Object),
-                optional("range", Object),
+                optional("around", AROUND_KIND),
+                optional("range", RANGE_KIND),
                 optional("include_bytes", Boolean),
                 optional("include_source", Boolean),
             ]),
@@ -551,6 +761,54 @@ mod tests {
                     "unknown": true
                 }))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_nested_parameter_contracts() {
+        for (method, parameters) in [
+            (
+                CanonicalMethod::TargetLaunch,
+                json!({"program": "/tmp/a", "wait": {"until": "stopped", "extra": true}}),
+            ),
+            (
+                CanonicalMethod::TargetConnectRemote,
+                json!({"endpoint": {"host": "127.0.0.1"}}),
+            ),
+            (
+                CanonicalMethod::BreakpointCreate,
+                json!({"source": {"path": "/tmp/a.c"}}),
+            ),
+            (
+                CanonicalMethod::MemoryWrite,
+                json!({"address": "0x1000", "text": "A", "expected": {"unknown": "x"}}),
+            ),
+            (
+                CanonicalMethod::MemorySearch,
+                json!({"start": "0x1000", "length": 16, "pattern": {"kind": "bytes"}}),
+            ),
+            (
+                CanonicalMethod::AgentProbe,
+                json!({"capture": [{"expression": "x", "stack": {}}]}),
+            ),
+            (
+                CanonicalMethod::AgentProbe,
+                json!({"budget": {"max_calls": 0}}),
+            ),
+        ] {
+            assert!(method.validate_parameters(&parameters).is_err());
+        }
+
+        CanonicalMethod::AgentProbe
+            .validate_parameters(&json!({
+                "location": {"source": {"path": "/tmp/a.c", "line": 7}},
+                "capture": [{"expression": "length"}, {"stack": {"limit": 4}}],
+                "budget": {"max_calls": 8, "wall_time_ms": 1000}
+            }))
+            .unwrap();
+        assert_eq!(
+            CanonicalMethod::TargetLaunch.parameter_schema()["properties"]["wait"]["additionalProperties"],
+            false
         );
     }
 }
