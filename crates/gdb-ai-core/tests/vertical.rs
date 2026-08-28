@@ -106,7 +106,7 @@ async fn local_debugging_vertical_slice() {
                         "program": executable,
                         "lease_id": lease_id,
                         "cwd": directory.path(),
-                        "stop": "entry",
+                        "stop": "first_instruction",
                         "wait": {"until": "snapshot", "timeout_ms": 5000}
                     }),
                 ),
@@ -911,7 +911,7 @@ async fn local_debugging_vertical_slice() {
                     json!({
                         "lease_id": close_lease,
                         "program": executable,
-                        "stop": "entry",
+                        "stop": "first_instruction",
                         "wait": {"until": "snapshot", "timeout_ms": 5000}
                     }),
                 ),

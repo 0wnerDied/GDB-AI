@@ -225,7 +225,10 @@ impl CanonicalMethod {
                 optional("environment", Object),
                 optional("environment_mode", Enum(&["clean"])),
                 optional("aslr", Enum(&["preserve", "disable"])),
-                optional("stop", Enum(&["entry", "none"])),
+                optional(
+                    "stop",
+                    Enum(&["first_instruction", "main", "none", "entry"]),
+                ),
                 optional("follow_fork", Enum(&["parent", "child"])),
                 optional("detach_on_fork", Boolean),
                 optional("follow_exec", Enum(&["same-inferior"])),
@@ -247,6 +250,10 @@ impl CanonicalMethod {
                 required("core", String),
             ]),
             TargetRestart => MethodContract::plain(vec![
+                optional(
+                    "stop",
+                    Enum(&["first_instruction", "main", "none", "entry"]),
+                ),
                 optional("stop_at_entry", Boolean),
                 optional("wait", Object),
             ]),

@@ -448,7 +448,7 @@ impl Gateway {
             environment: BTreeMap<String, String>,
             environment_mode: String,
             aslr: String,
-            stop: String,
+            stop: StartPolicy,
             follow_fork: String,
             detach_on_fork: bool,
             follow_exec: String,
@@ -463,7 +463,7 @@ impl Gateway {
                     environment: BTreeMap::new(),
                     environment_mode: "clean".into(),
                     aslr: "preserve".into(),
-                    stop: "entry".into(),
+                    stop: StartPolicy::FirstInstruction,
                     follow_fork: "parent".into(),
                     detach_on_fork: true,
                     follow_exec: "same-inferior".into(),
@@ -563,21 +563,8 @@ impl Gateway {
                 .bare("follow-exec-mode")?
                 .bare("same")?,
         );
-        // 2026-08-28: -exec-run --start asks an interactive question when a
-        // stripped binary has no main symbol. Controlled starti stops at the
-        // executable's first instruction without requiring symbols.
-        let run = match parameters.stop.as_str() {
-            "entry" => MiCommand::new("-interpreter-exec")?
-                .bare("console")?
-                .string("starti"),
-            "none" => MiCommand::new("-exec-run")?,
-            _ => {
-                return Err(Error::new(
-                    ErrorCode::InvalidArgument,
-                    "stop must be entry or none",
-                ));
-            }
-        };
+        let start_policy = parameters.stop;
+        let run = start_policy.command()?;
         let reply = entry.handle.transaction(setup, run, Vec::new()).await?;
         entry
             .handle
@@ -587,7 +574,12 @@ impl Gateway {
             .await?;
         let state = wait_if_requested(&entry.handle, parameters.wait, Some(&baseline)).await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
-        Ok(json!({ "command": reply, "state": state, "capabilities": capabilities }))
+        Ok(json!({
+            "command": reply,
+            "state": state,
+            "capabilities": capabilities,
+            "start_policy": start_policy.as_str()
+        }))
     }
 
     async fn target_attach(&self, request: &ApiRequest) -> Result<Value> {
@@ -772,17 +764,37 @@ impl Gateway {
     }
 
     async fn target_restart(&self, request: &ApiRequest) -> Result<Value> {
-        let wait = wait_spec(&request.parameters)?;
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Parameters {
+            stop: Option<StartPolicy>,
+            stop_at_entry: Option<bool>,
+            wait: Option<WaitSpec>,
+        }
+        let parameters: Parameters = parameters(request)?;
+        if let Some(wait) = &parameters.wait {
+            wait.validate()?;
+        }
+        let start_policy = parameters.stop.unwrap_or_else(|| {
+            parameters.stop_at_entry.map_or(StartPolicy::Main, |stop| {
+                if stop {
+                    StartPolicy::Main
+                } else {
+                    StartPolicy::None
+                }
+            })
+        });
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
-        let mut command = MiCommand::new("-exec-run")?;
-        if bool_value(&request.parameters, "stop_at_entry", true) {
-            command = command.bare("--start")?;
-        }
-        let reply = entry.handle.command(command).await?;
-        let state = wait_if_requested(&entry.handle, wait, Some(&baseline)).await?;
+        let reply = entry.handle.command(start_policy.command()?).await?;
+        let state = wait_if_requested(&entry.handle, parameters.wait, Some(&baseline)).await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
-        Ok(json!({ "command": reply, "state": state, "capabilities": capabilities }))
+        Ok(json!({
+            "command": reply,
+            "state": state,
+            "capabilities": capabilities,
+            "start_policy": start_policy.as_str()
+        }))
     }
 
     async fn target_kill(&self, request: &ApiRequest) -> Result<Value> {
@@ -3321,6 +3333,38 @@ impl Gateway {
     }
 }
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StartPolicy {
+    // 2026-08-28: The old "entry" name mapped to GDB starti, which can stop
+    // in the dynamic loader. Retain it only as an input alias for the precise
+    // first-instruction policy.
+    #[serde(alias = "entry")]
+    FirstInstruction,
+    Main,
+    None,
+}
+
+impl StartPolicy {
+    fn command(self) -> Result<MiCommand> {
+        match self {
+            Self::FirstInstruction => MiCommand::new("-interpreter-exec")?
+                .bare("console")
+                .map(|command| command.string("starti")),
+            Self::Main => MiCommand::new("-exec-run")?.bare("--start"),
+            Self::None => MiCommand::new("-exec-run"),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstInstruction => "first_instruction",
+            Self::Main => "main",
+            Self::None => "none",
+        }
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WaitSpec {
@@ -4976,6 +5020,24 @@ mod tests {
         assert_eq!(
             changed.revalidate(pid).unwrap_err().code,
             ErrorCode::Conflict
+        );
+    }
+
+    #[test]
+    fn start_policies_map_to_explicit_gdb_stops() {
+        let first: StartPolicy = serde_json::from_value(json!("entry")).unwrap();
+        assert_eq!(first.as_str(), "first_instruction");
+        assert_eq!(
+            first.command().unwrap().encoded(1),
+            b"1-interpreter-exec console \"starti\"\n"
+        );
+        assert_eq!(
+            StartPolicy::Main.command().unwrap().encoded(2),
+            b"2-exec-run --start\n"
+        );
+        assert_eq!(
+            StartPolicy::None.command().unwrap().encoded(3),
+            b"3-exec-run\n"
         );
     }
 }

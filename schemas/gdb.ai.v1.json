@@ -417,8 +417,10 @@
               },
               "stop": {
                 "enum": [
-                  "entry",
-                  "none"
+                  "first_instruction",
+                  "main",
+                  "none",
+                  "entry"
                 ],
                 "type": "string"
               },
@@ -616,6 +618,15 @@
                 "type": "boolean"
               },
               "lease_id": {
+                "type": "string"
+              },
+              "stop": {
+                "enum": [
+                  "first_instruction",
+                  "main",
+                  "none",
+                  "entry"
+                ],
                 "type": "string"
               },
               "stop_at_entry": {

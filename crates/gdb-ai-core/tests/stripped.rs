@@ -80,7 +80,7 @@ async fn stops_at_the_first_instruction_without_symbols() {
                 json!({
                     "lease_id": lease_id,
                     "program": executable,
-                    "stop": "entry",
+                    "stop": "first_instruction",
                     "wait": {"until": "snapshot", "timeout_ms": 5000}
                 }),
             ),
