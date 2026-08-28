@@ -1,0 +1,32 @@
+[package]
+name = "gdb-ai-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+gdb-ai-core = { path = "../crates/gdb-ai-core" }
+gdb-ai-mi = { path = "../crates/gdb-ai-mi" }
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[[bin]]
+name = "mi_parser"
+path = "fuzz_targets/mi_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mi_framer"
+path = "fuzz_targets/mi_framer.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "state_reducer"
+path = "fuzz_targets/state_reducer.rs"
+test = false
+doc = false
