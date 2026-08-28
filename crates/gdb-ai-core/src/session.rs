@@ -1063,9 +1063,7 @@ impl SessionWorker {
                     if let Ok(Some((record, _))) = self.process_input(input)
                         && let Some(token) = take_delayed_token(&mut self.timed_out_tokens, &record)
                     {
-                        let _ = self.apply_event(DomainEvent::ConsistencyDirty {
-                            reason: format!("delayed result for timed out MI token {token}"),
-                        });
+                        let _ = self.apply_event(DomainEvent::CommandOutcomeResolved { token });
                     }
                     if self.fatal {
                         let _ = self.backend.shutdown().await;
@@ -1083,6 +1081,10 @@ impl SessionWorker {
                 timeout,
                 response,
             } => {
+                if let Err(error) = self.require_known_outcome(&command) {
+                    let _ = response.send(Err(error));
+                    return false;
+                }
                 self.cleanup_stale_values(timeout).await;
                 let _ = response.send(self.execute(command, timeout).await);
             }
@@ -1093,6 +1095,10 @@ impl SessionWorker {
                 timeout,
                 response,
             } => {
+                if let Err(error) = self.require_known_outcome(&command) {
+                    let _ = response.send(Err(error));
+                    return false;
+                }
                 self.cleanup_stale_values(timeout).await;
                 let mut setup = Ok(());
                 for command in before {
@@ -1129,6 +1135,10 @@ impl SessionWorker {
                 timeout,
                 response,
             } => {
+                if let Err(error) = self.require_known_outcome(&command) {
+                    let _ = response.send(Err(error));
+                    return false;
+                }
                 self.cleanup_stale_values(timeout).await;
                 let _ = response.send(self.execute_safe(command, timeout).await);
             }
@@ -1139,7 +1149,10 @@ impl SessionWorker {
                 let _ = response.send(self.journal.append_api(&request).map(|_| ()));
             }
             WorkerRequest::RefreshTargetCapabilities { response } => {
-                let result = self.refresh_target_capabilities().await;
+                let result = match self.require_known_outcome_name("-list-target-features") {
+                    Ok(()) => self.refresh_target_capabilities().await,
+                    Err(error) => Err(error),
+                };
                 let _ = response.send(result);
             }
             WorkerRequest::RegisterValue { binding, response } => {
@@ -1383,6 +1396,25 @@ impl SessionWorker {
         }
     }
 
+    fn require_known_outcome(&self, command: &MiCommand) -> Result<()> {
+        self.require_known_outcome_name(&command.name)
+    }
+
+    fn require_known_outcome_name(&self, command: &str) -> Result<()> {
+        // 2026-08-28: Starting another ordinary command after a timeout could
+        // overlap a late mutation result. Only interruption may cross this fence.
+        if !self.timed_out_tokens.is_empty() && command != "-exec-interrupt" {
+            return Err(Error::new(
+                ErrorCode::GdbUnresponsive,
+                format!(
+                    "MI command outcome is unknown for token(s) {:?}; interrupt or close the session",
+                    self.timed_out_tokens
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     async fn execute_safe(
         &mut self,
         command: MiCommand,
@@ -1463,30 +1495,30 @@ impl SessionWorker {
         let mut stream_bytes: usize = 0;
         let mut stream_truncated = false;
         loop {
-            let input = tokio::time::timeout_at(deadline, self.backend.next_input())
-                .await
-                .map_err(|_| {
+            let input = match tokio::time::timeout_at(deadline, self.backend.next_input()).await {
+                Ok(input) => input,
+                Err(_) => {
                     self.timed_out_tokens.insert(token);
+                    self.apply_event(DomainEvent::CommandOutcomeUnknown { token })?;
                     self.metrics.command(
                         started.elapsed().as_micros().min(u64::MAX as u128) as u64,
                         true,
                     );
-                    Error::new(
+                    return Err(Error::new(
                         ErrorCode::Timeout,
                         // 2026-08-28: A timeout does not prove that GDB ignored
                         // the command or that target state remained unchanged.
                         format!("MI token {token} timed out; command completion is unknown"),
                     )
-                    .retryable()
-                })?
-                .ok_or_else(|| Error::new(ErrorCode::GdbExited, "GDB input channel closed"))?;
+                    .retryable());
+                }
+            }
+            .ok_or_else(|| Error::new(ErrorCode::GdbExited, "GDB input channel closed"))?;
             let Some((record, evidence_seq)) = self.process_input(input)? else {
                 continue;
             };
             if let Some(delayed) = take_delayed_token(&mut self.timed_out_tokens, &record) {
-                self.apply_event(DomainEvent::ConsistencyDirty {
-                    reason: format!("delayed result for timed out MI token {delayed}"),
-                })?;
+                self.apply_event(DomainEvent::CommandOutcomeResolved { token: delayed })?;
             }
             if let MiRecord::Result {
                 token: Some(result_token),
@@ -2017,6 +2049,64 @@ mod tests {
             session.state().lifecycle,
             crate::domain::SessionLifecycle::Closed
         );
+    }
+
+    #[tokio::test]
+    async fn timeout_fences_late_result() {
+        if std::process::Command::new("gdb")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let session = SessionHandle::start(
+            Arc::new(config),
+            Profile::RawAdmin,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+        let slow = MiCommand::new("-interpreter-exec")
+            .unwrap()
+            .bare("console")
+            .unwrap()
+            .string("shell sleep 0.5");
+        let timeout = session
+            .command_with_timeout(slow, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert_eq!(timeout.code, ErrorCode::Timeout);
+        assert!(!session.state().outcome_unknown_tokens.is_empty());
+
+        let fenced = session
+            .command(MiCommand::new("-gdb-version").unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(fenced.code, ErrorCode::GdbUnresponsive);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !session.state().outcome_unknown_tokens.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(session.state().reconciliation_required);
+        session.close().await.unwrap();
     }
 
     #[tokio::test]

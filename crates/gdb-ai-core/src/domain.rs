@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
@@ -385,6 +388,8 @@ pub struct SessionState {
     pub event_seq: u64,
     pub revision: u64,
     pub execution_epoch: u64,
+    #[serde(default)]
+    pub outcome_unknown_tokens: BTreeSet<u64>,
     pub stop_id: Option<StopId>,
     pub stop_reason: Option<String>,
     #[serde(default)]
@@ -409,6 +414,7 @@ impl SessionState {
             event_seq: 0,
             revision: 0,
             execution_epoch: 0,
+            outcome_unknown_tokens: BTreeSet::new(),
             stop_id: None,
             stop_reason: None,
             target_origin: TargetOrigin::Unknown,
@@ -533,6 +539,12 @@ pub enum DomainEvent {
     },
     SnapshotFailed {
         stop_id: StopId,
+    },
+    CommandOutcomeUnknown {
+        token: u64,
+    },
+    CommandOutcomeResolved {
+        token: u64,
     },
     ConsistencyDirty {
         reason: String,

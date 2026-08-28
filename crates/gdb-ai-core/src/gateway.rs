@@ -335,6 +335,20 @@ impl Gateway {
         };
         if let Some(entry) = &entry {
             let mut state = entry.handle.state();
+            // 2026-08-28: A timed-out MI mutation may still complete later.
+            // Expose the fence before reconciliation and admit only recovery-safe
+            // status, evidence, interrupt, and close requests while it is active.
+            if !state.outcome_unknown_tokens.is_empty()
+                && !request_allowed_during_unknown_outcome(request)
+            {
+                return Err(Error::new(
+                    ErrorCode::GdbUnresponsive,
+                    format!(
+                        "MI command outcome is unknown for token(s) {:?}; interrupt or close the session",
+                        state.outcome_unknown_tokens
+                    ),
+                ));
+            }
             // 2026-08-28: TAINTED describes an unknowable outer state, but its
             // managed registries still require one bounded reconciliation.
             if state.reconciliation_required {
@@ -668,6 +682,14 @@ impl Gateway {
     pub fn metrics(&self) -> String {
         self.metrics.render()
     }
+}
+
+fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
+    matches!(
+        request.method.as_str(),
+        "session.get" | "session.transcript" | "session.event" | "session.close" | "artifact.get"
+    ) || (request.method == "execution.control"
+        && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"))
 }
 
 fn idempotency_key(request: &ApiRequest, caller: &Caller) -> String {

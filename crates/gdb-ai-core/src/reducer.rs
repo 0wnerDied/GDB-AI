@@ -329,6 +329,22 @@ impl StateReducer {
             DomainEvent::SnapshotStarted { .. }
             | DomainEvent::SnapshotReady { .. }
             | DomainEvent::SnapshotFailed { .. } => false,
+            DomainEvent::CommandOutcomeUnknown { token } => {
+                self.state.outcome_unknown_tokens.insert(*token);
+                self.state.backend = BackendHealth::Unresponsive;
+                if self.state.consistency != Consistency::Tainted {
+                    self.state.consistency = Consistency::ManagedDirty;
+                }
+                true
+            }
+            DomainEvent::CommandOutcomeResolved { token } => {
+                let removed = self.state.outcome_unknown_tokens.remove(token);
+                if self.state.outcome_unknown_tokens.is_empty() {
+                    self.state.backend = BackendHealth::Healthy;
+                    self.state.reconciliation_required = true;
+                }
+                removed
+            }
             DomainEvent::ConsistencyDirty { reason } => {
                 // 2026-08-28: A later managed raw command must not erase an
                 // earlier unknown raw effect; TAINTED lasts for the session.
@@ -525,6 +541,29 @@ mod tests {
             reducer.into_state()
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn unknown_command_outcome_fences_state_until_late_result() {
+        let mut reducer = StateReducer::new(SessionState::creating(SessionId("sess_wait".into())));
+        apply(&mut reducer, 1, DomainEvent::BackendStarted);
+        apply(
+            &mut reducer,
+            2,
+            DomainEvent::CommandOutcomeUnknown { token: 7 },
+        );
+        assert_eq!(reducer.state().backend, BackendHealth::Unresponsive);
+        assert!(reducer.state().outcome_unknown_tokens.contains(&7));
+        assert!(!reducer.state().reconciliation_required);
+
+        apply(
+            &mut reducer,
+            3,
+            DomainEvent::CommandOutcomeResolved { token: 7 },
+        );
+        assert_eq!(reducer.state().backend, BackendHealth::Healthy);
+        assert!(reducer.state().outcome_unknown_tokens.is_empty());
+        assert!(reducer.state().reconciliation_required);
     }
 
     #[test]
