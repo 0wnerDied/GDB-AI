@@ -9,6 +9,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -699,6 +700,8 @@ struct HttpState {
     sequence: Arc<AtomicU64>,
     raw_admin: bool,
     auth_token: Option<Arc<str>>,
+    max_sessions: usize,
+    idle_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -706,6 +709,7 @@ struct HttpClient {
     phase: Phase,
     caller: Caller,
     pending: HashMap<String, Option<tokio::task::AbortHandle>>,
+    last_active: Instant,
 }
 
 async fn serve_http(
@@ -747,6 +751,8 @@ async fn serve_http(
             Ok(Arc::from(token))
         })
         .transpose()?;
+    let max_sessions = config.server.max_http_sessions;
+    let idle_timeout = Duration::from_millis(config.server.http_session_idle_ms);
     let gateway = Arc::new(Gateway::new(config)?);
     let state = HttpState {
         gateway: gateway.clone(),
@@ -754,19 +760,29 @@ async fn serve_http(
         sequence: Arc::new(AtomicU64::new(1)),
         raw_admin,
         auth_token,
+        max_sessions,
+        idle_timeout,
     };
     let router = Router::new()
         .route("/mcp", post(http_mcp).delete(http_delete))
         .route("/healthz", get(|| async { StatusCode::NO_CONTENT }))
         .route("/metrics", get(http_metrics))
         .layer(DefaultBodyLimit::max(MAX_MESSAGE_BYTES))
-        .with_state(state);
+        .with_state(state.clone());
     let listener = TcpListener::bind(address).await?;
+    let eviction_state = state.clone();
+    let eviction = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(eviction_state.idle_timeout.min(Duration::from_secs(60))).await;
+            evict_http_sessions(&eviction_state).await;
+        }
+    });
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    eviction.abort();
     gateway.shutdown().await;
     Ok(())
 }
@@ -816,12 +832,22 @@ async fn http_mcp(
             return json_http_response(response, None);
         }
         let session_id = format!("mcp_{}", SessionId::new().0);
-        state.sessions.write().await.insert(
+        let mut sessions = state.sessions.write().await;
+        evict_expired_http_clients(&mut sessions, Instant::now(), state.idle_timeout);
+        if sessions.len() >= state.max_sessions {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "MCP HTTP session limit reached",
+            )
+                .into_response();
+        }
+        sessions.insert(
             session_id.clone(),
             HttpClient {
                 phase,
                 caller,
                 pending: HashMap::new(),
+                last_active: Instant::now(),
             },
         );
         return json_http_response(response, Some(&session_id));
@@ -832,8 +858,14 @@ async fn http_mcp(
     else {
         return (StatusCode::BAD_REQUEST, "Mcp-Session-Id is required").into_response();
     };
-    let Some(client) = state.sessions.read().await.get(session_id).cloned() else {
-        return (StatusCode::NOT_FOUND, "MCP session not found").into_response();
+    let client = {
+        let mut sessions = state.sessions.write().await;
+        evict_expired_http_clients(&mut sessions, Instant::now(), state.idle_timeout);
+        let Some(client) = sessions.get_mut(session_id) else {
+            return (StatusCode::NOT_FOUND, "MCP session not found").into_response();
+        };
+        client.last_active = Instant::now();
+        client.clone()
     };
     if id.is_none() {
         let mut sessions = state.sessions.write().await;
@@ -932,6 +964,30 @@ async fn http_mcp(
         client.pending.remove(&key);
     }
     json_http_response(response, Some(session_id))
+}
+
+async fn evict_http_sessions(state: &HttpState) {
+    let mut sessions = state.sessions.write().await;
+    evict_expired_http_clients(&mut sessions, Instant::now(), state.idle_timeout);
+}
+
+fn evict_expired_http_clients(
+    sessions: &mut HashMap<String, HttpClient>,
+    now: Instant,
+    idle_timeout: Duration,
+) {
+    // 2026-08-28: HTTP MCP sessions previously had no cap or idle eviction,
+    // so reconnecting clients could retain transport state without bound.
+    sessions.retain(|_, client| {
+        let active =
+            !client.pending.is_empty() || now.duration_since(client.last_active) < idle_timeout;
+        if !active {
+            for handle in client.pending.values().flatten() {
+                handle.abort();
+            }
+        }
+        active
+    });
 }
 
 async fn http_delete(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -2395,6 +2451,8 @@ mod tests {
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
             auth_token: Some(Arc::from("test-token")),
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(1),
         };
         let unauthorized = http_mcp(
             State(state.clone()),
@@ -2438,8 +2496,8 @@ mod tests {
         .await;
         assert_eq!(ready.status(), StatusCode::ACCEPTED);
         let listed = http_mcp(
-            State(state),
-            headers,
+            State(state.clone()),
+            headers.clone(),
             Json(json!({
                 "jsonrpc": "2.0",
                 "id": 2,
@@ -2459,6 +2517,40 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "gdb_values")
         );
+        let limited = http_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_VERSION,
+                    "clientInfo": {"name": "http-test-2", "version": "1"}
+                }
+            })),
+        )
+        .await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        for client in state.sessions.write().await.values_mut() {
+            client.last_active = Instant::now() - Duration::from_secs(2);
+        }
+        let replaced = http_mcp(
+            State(state.clone()),
+            headers,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_VERSION,
+                    "clientInfo": {"name": "http-test-3", "version": "1"}
+                }
+            })),
+        )
+        .await;
+        assert_eq!(replaced.status(), StatusCode::OK);
+        assert_eq!(state.sessions.read().await.len(), 1);
         gateway.shutdown().await;
     }
 

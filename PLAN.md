@@ -1122,6 +1122,8 @@ The supported TOML surface is:
 [server]
 transport = "stdio"
 max_sessions = 8
+max_http_sessions = 128
+http_session_idle_ms = 900000
 
 [gdb]
 path = "/usr/bin/gdb"

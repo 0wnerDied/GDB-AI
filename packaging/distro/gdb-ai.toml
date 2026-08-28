@@ -1,5 +1,7 @@
 [server]
 max_sessions = 8
+max_http_sessions = 128
+http_session_idle_ms = 900000
 command_timeout_ms = 5000
 wait_timeout_ms = 5000
 write_lease_ms = 30000

@@ -53,9 +53,12 @@ impl Config {
             && self.server.command_timeout_ms <= 300_000
             && self.server.wait_timeout_ms > 0
             && self.server.wait_timeout_ms <= 300_000
-            && self.server.write_lease_ms > 0;
+            && self.server.write_lease_ms > 0
+            && self.server.http_session_idle_ms >= 1_000;
         let limits_valid = self.server.max_sessions > 0
             && self.server.max_sessions <= 1_024
+            && self.server.max_http_sessions > 0
+            && self.server.max_http_sessions <= 16_384
             && self.limits.mi_record_bytes >= 1_024
             && self.limits.mi_depth > 0
             && self.limits.tool_response_bytes >= 1_024
@@ -104,6 +107,8 @@ impl Config {
 #[serde(default)]
 pub struct ServerConfig {
     pub max_sessions: usize,
+    pub max_http_sessions: usize,
+    pub http_session_idle_ms: u64,
     pub command_timeout_ms: u64,
     pub wait_timeout_ms: u64,
     pub write_lease_ms: u64,
@@ -116,6 +121,8 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             max_sessions: 8,
+            max_http_sessions: 128,
+            http_session_idle_ms: 15 * 60 * 1_000,
             command_timeout_ms: 5_000,
             wait_timeout_ms: 5_000,
             write_lease_ms: 30_000,
