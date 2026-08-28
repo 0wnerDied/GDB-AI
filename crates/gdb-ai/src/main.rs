@@ -1147,8 +1147,9 @@ for lab_mutation or an administrative caller selecting it. Renew an expired leas
 with acquire_write_lease and accept_latest_revision=true, omitting expected_revision. \
 Read inferior output from stream=pty. Use each returned stop_id for stop-scoped \
 inspection; resuming invalidates old frames and values. For stripped PIEs, set \
-module-offset breakpoints after launch maps the executable. Read large evidence \
-through gdbai:// resources and close the session when finished.";
+module-offset breakpoints only after inspection mappings shows the executable; \
+an earlier explicit-loader breakpoint stays pending. Read large evidence through \
+gdbai:// resources and close the session when finished.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {
@@ -1769,6 +1770,7 @@ mod tests {
             "accept_latest_revision",
             "stream=pty",
             "stop_id",
+            "inspection mappings",
         ] {
             assert!(instructions.contains(required), "missing {required}");
         }
