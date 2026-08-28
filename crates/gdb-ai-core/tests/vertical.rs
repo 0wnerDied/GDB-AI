@@ -73,9 +73,9 @@ async fn local_debugging_vertical_slice() {
     // 2026-08-29: The full vertical path exceeds the production lease default
     // under TCG. Keep this qualification focused on debugger semantics.
     config.server.write_lease_ms = 5 * 60 * 1_000;
-    // 2026-08-29: AArch64 TCG can use the complete GDB command deadline for
-    // cancelled-probe cleanup, so the assertion must share that deadline.
-    let cleanup_timeout = config.server.command_timeout();
+    // 2026-08-29: AArch64 TCG can use one GDB deadline for cancelled-probe
+    // cleanup and another for the assertion's breakpoint reconciliation.
+    let cleanup_timeout = config.server.command_timeout().saturating_mul(2);
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller::local("integration-test");
 
