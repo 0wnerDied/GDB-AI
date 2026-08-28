@@ -48,6 +48,20 @@ class Client:
             raise RuntimeError("server returned no MCP session ID")
         self._notify("notifications/initialized", {})
 
+    # 2026-08-28: Clients could create HTTP transport sessions but had no
+    # matching DELETE operation, leaving server state until idle eviction.
+    def disconnect(self) -> None:
+        if not self._mcp_session:
+            return
+        headers = {"Mcp-Session-Id": self._mcp_session}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        with urlopen(
+            Request(self.endpoint, headers=headers, method="DELETE"),
+            timeout=self.timeout,
+        ):
+            self._mcp_session = None
+
     def call(
         self,
         method: str,

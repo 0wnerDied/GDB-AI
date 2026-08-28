@@ -43,6 +43,20 @@ export class Client {
     await this.notify("notifications/initialized", {});
   }
 
+  // 2026-08-28: Clients could create HTTP transport sessions but had no
+  // matching DELETE operation, leaving server state until idle eviction.
+  async disconnect(): Promise<void> {
+    if (!this.mcpSession) return;
+    const response = await fetch(`${this.endpoint.replace(/\/$/, "")}/mcp`, {
+      method: "DELETE",
+      headers: this.headers(true),
+    });
+    if (!response.ok && response.status !== 404) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    this.mcpSession = undefined;
+  }
+
   async call<T = unknown>(
     method: string,
     parameters: Record<string, unknown> = {},

@@ -37,8 +37,13 @@ jobs:
       - name: Verify schemas
         run: cd schemas && sha256sum -c SHA256SUMS
       - name: Verify Python sources
-        run: python3 -m compileall -q gdb-extension sdk/python benchmarks/python
+        run: |
+          python3 -m compileall -q gdb-extension sdk/python benchmarks/python
+          PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests
       - name: Build TypeScript SDK
-        run: npm --prefix sdk/typescript ci && npm --prefix sdk/typescript run build
+        run: |
+          npm --prefix sdk/typescript ci
+          npm --prefix sdk/typescript run build
+          node sdk/typescript/test.mjs
       - name: Check fuzz targets
         run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
