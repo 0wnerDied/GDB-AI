@@ -21,10 +21,65 @@ use crate::{
         TrackingDefinition, TrackingId, ValueBinding, ValueId, WaitBaseline, WriteLease,
     },
     gateway::{Caller, Gateway, SessionEntry, now_unix_ms, same_principal},
+    persistence::Store,
     policy::{Profile, validate_console_command},
     protocol::ApiRequest,
     session::{CommandReply, OutputRing, SessionHandle, WaitUntil},
 };
+
+struct ProbeBreakpoint {
+    handle: SessionHandle,
+    store: Arc<Store>,
+    operation_id: OperationId,
+    backend_number: Option<String>,
+}
+
+impl ProbeBreakpoint {
+    async fn remove(&mut self) -> Result<()> {
+        let Some(backend_number) = self.backend_number.take() else {
+            return Ok(());
+        };
+        self.handle
+            .command(MiCommand::new("-break-delete")?.bare(backend_number)?)
+            .await?;
+        Ok(())
+    }
+}
+
+impl Drop for ProbeBreakpoint {
+    fn drop(&mut self) {
+        let Some(backend_number) = self.backend_number.take() else {
+            return;
+        };
+        let handle = self.handle.clone();
+        let store = self.store.clone();
+        let operation_id = self.operation_id.clone();
+        // 2026-08-28: Dropping a cancelled probe skipped its trailing delete
+        // and leaked a temporary breakpoint into later Agent operations.
+        tokio::spawn(async move {
+            let cleanup = async {
+                handle
+                    .command(MiCommand::new("-break-delete")?.bare(backend_number)?)
+                    .await?;
+                Result::<()>::Ok(())
+            }
+            .await;
+            if let Ok(Some(mut operation)) = store.get_operation(&operation_id.0) {
+                operation.status = if cleanup.is_ok() {
+                    OperationStatus::Cancelled
+                } else {
+                    OperationStatus::Failed
+                };
+                operation.error = cleanup.as_ref().err().map(ToString::to_string);
+                operation.completed_event_seq = Some(handle.state().event_seq);
+                let _ = store.upsert_operation(&operation);
+            }
+            if let Err(error) = cleanup {
+                tracing::warn!(%error, %operation_id, "failed to clean up cancelled probe");
+            }
+        });
+    }
+}
 
 impl Gateway {
     pub(crate) async fn execute_method(
@@ -2480,6 +2535,12 @@ impl Gateway {
             error: None,
         };
         self.store.upsert_operation(&operation)?;
+        let mut breakpoint = ProbeBreakpoint {
+            handle: entry.handle.clone(),
+            store: self.store.clone(),
+            operation_id: operation.operation_id.clone(),
+            backend_number: Some(backend_number.clone()),
+        };
         let started = tokio::time::Instant::now();
         let mut captures = Vec::new();
         let mut calls = 1usize;
@@ -2542,10 +2603,7 @@ impl Gateway {
                 Ok(result) => result,
                 Err(_) => Err(Error::new(ErrorCode::Timeout, "probe timed out")),
             };
-        let cleanup = entry
-            .handle
-            .command(MiCommand::new("-break-delete")?.bare(&backend_number)?)
-            .await;
+        let cleanup = breakpoint.remove().await;
         match run_result {
             Ok(mut result) => {
                 let cleanup_error = cleanup.err();

@@ -928,12 +928,89 @@ async fn local_debugging_vertical_slice() {
         .unwrap()
         .0
         .clone();
+    {
+        let probe = gateway.dispatch(
+            request(
+                "cancelled-probe",
+                Some(&close_session),
+                "agent.probe",
+                launched.revision,
+                json!({
+                    "lease_id": close_lease,
+                    "stop_id": close_stop,
+                    "location": {"function": "never_called_by_vertical_target"},
+                    "budget": {"wall_time_ms": 5000}
+                }),
+            ),
+            &caller,
+        );
+        tokio::pin!(probe);
+        tokio::select! {
+            response = &mut probe => panic!("probe completed before cancellation: {response:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+        }
+    }
+    let interrupted = successful(
+        gateway
+            .dispatch(
+                request(
+                    "cancelled-probe-interrupt",
+                    Some(&close_session),
+                    "execution.control",
+                    None,
+                    json!({
+                        "action": "interrupt",
+                        "lease_id": close_lease,
+                        "accept_latest_revision": true,
+                        "wait": {"until": "snapshot", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let listed = successful(
+                gateway
+                    .dispatch(
+                        request(
+                            "cancelled-probe-breakpoints",
+                            Some(&close_session),
+                            "breakpoint.list",
+                            None,
+                            json!({}),
+                        ),
+                        &caller,
+                    )
+                    .await,
+            );
+            if listed.result.unwrap()["breakpoints"]
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("cancelled probe retained its temporary breakpoint");
+    let close_stop = interrupted
+        .state
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
     let waiter = gateway.dispatch(
         request(
             "close-waiter",
             Some(&close_session),
             "execution.control",
-            launched.revision,
+            interrupted.revision,
             json!({
                 "action": "continue",
                 "lease_id": close_lease,
