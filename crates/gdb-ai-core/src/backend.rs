@@ -139,6 +139,7 @@ pub struct PtyOutput {
     ring: Mutex<ByteRing>,
     closed: AtomicBool,
     closed_notify: Notify,
+    rearm_notify: Notify,
 }
 
 impl PtyOutput {
@@ -147,6 +148,7 @@ impl PtyOutput {
             ring: Mutex::new(ByteRing::new(capacity)),
             closed: AtomicBool::new(false),
             closed_notify: Notify::new(),
+            rearm_notify: Notify::new(),
         }
     }
 
@@ -169,7 +171,19 @@ impl PtyOutput {
     }
 
     pub fn reset(&self) {
-        self.closed.store(false, Ordering::Release);
+        if self.closed.swap(false, Ordering::AcqRel) {
+            self.rearm_notify.notify_waiters();
+        }
+    }
+
+    async fn wait_rearmed(&self) {
+        loop {
+            let notified = self.rearm_notify.notified();
+            if !self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     pub fn read(&self, after_offset: u64, max_bytes: usize) -> RingRead {
@@ -695,7 +709,12 @@ where
                 if output.mark_closed() && sender.send(BackendInput::PtyEof).await.is_err() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                // 2026-08-28: A closed reusable PTY master returns EOF/EIO
+                // immediately. Wait for the next run instead of polling it.
+                tokio::select! {
+                    _ = output.wait_rearmed() => {}
+                    _ = sender.closed() => break,
+                }
             }
             Ok(length) => {
                 // 2026-08-28: Copying every PTY chunk through the actor and
@@ -718,7 +737,12 @@ where
                 if output.mark_closed() && sender.send(BackendInput::PtyEof).await.is_err() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                // 2026-08-28: Linux reports PTY hangup as EIO. A target run
+                // explicitly rearms the reader when a new slave can appear.
+                tokio::select! {
+                    _ = output.wait_rearmed() => {}
+                    _ = sender.closed() => break,
+                }
             }
             Err(_) => break,
         }
@@ -813,7 +837,26 @@ pub fn session_directory(root: &Path, session_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::{
+        io::Read,
+        pin::Pin,
+        sync::atomic::AtomicUsize,
+        task::{Context, Poll},
+    };
+    use tokio::io::ReadBuf;
+
+    struct CountingEof(Arc<AtomicUsize>);
+
+    impl AsyncRead for CountingEof {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn command_encoder_prevents_token_and_newline_injection() {
@@ -895,6 +938,24 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(output.read(0, 64).bytes, b"marker reached\n");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn closed_pty_waits_for_explicit_rearm() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let output = Arc::new(PtyOutput::new(64));
+        let task = tokio::spawn(read_pty(CountingEof(reads.clone()), sender, output.clone()));
+
+        assert!(matches!(receiver.recv().await, Some(BackendInput::PtyEof)));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+
+        output.reset();
+        assert!(matches!(receiver.recv().await, Some(BackendInput::PtyEof)));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
         task.abort();
     }
 }
