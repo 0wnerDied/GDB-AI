@@ -37,12 +37,15 @@ struct ProbeBreakpoint {
 
 impl ProbeBreakpoint {
     async fn remove(&mut self) -> Result<()> {
-        let Some(backend_number) = self.backend_number.take() else {
+        let Some(backend_number) = self.backend_number.clone() else {
             return Ok(());
         };
         self.handle
             .command(MiCommand::new("-break-delete")?.bare(backend_number)?)
             .await?;
+        // 2026-08-28: Taking the number before GDB confirmed deletion made a
+        // failed cleanup impossible to retry from Drop.
+        self.backend_number = None;
         Ok(())
     }
 }
@@ -66,14 +69,19 @@ impl Drop for ProbeBreakpoint {
             }
             .await;
             if let Ok(Some(mut operation)) = store.get_operation(&operation_id.0) {
-                operation.status = if cleanup.is_ok() {
-                    OperationStatus::Cancelled
-                } else {
-                    OperationStatus::Failed
-                };
-                operation.error = cleanup.as_ref().err().map(ToString::to_string);
-                operation.completed_event_seq = Some(handle.state().event_seq);
-                let _ = store.upsert_operation(&operation);
+                // 2026-08-28: Drop also retries failed explicit cleanup. Only
+                // an in-flight operation represents cancellation; preserve any
+                // completed, timed-out, or failed terminal result.
+                if operation.status == OperationStatus::WaitingForState {
+                    operation.status = if cleanup.is_ok() {
+                        OperationStatus::Cancelled
+                    } else {
+                        OperationStatus::Failed
+                    };
+                    operation.error = cleanup.as_ref().err().map(ToString::to_string);
+                    operation.completed_event_seq = Some(handle.state().event_seq);
+                    let _ = store.upsert_operation(&operation);
+                }
             }
             if let Err(error) = cleanup {
                 tracing::warn!(%error, %operation_id, "failed to clean up cancelled probe");
@@ -2749,6 +2757,7 @@ impl Gateway {
                     result["continued"] = Value::Bool(false);
                 }
                 operation.status = OperationStatus::Completed;
+                operation.error = cleanup_error.as_ref().map(ToString::to_string);
                 operation.completed_event_seq = Some(entry.handle.state().event_seq);
                 self.store.upsert_operation(&operation)?;
                 result["operation"] = serde_json::to_value(operation)?;
@@ -2760,12 +2769,18 @@ impl Gateway {
                 Ok(result)
             }
             Err(error) => {
+                let cleanup_error = cleanup.err();
                 operation.status = if error.code == ErrorCode::Timeout {
                     OperationStatus::TimedOut
                 } else {
                     OperationStatus::Failed
                 };
-                operation.error = Some(error.to_string());
+                operation.error = Some(match cleanup_error {
+                    Some(cleanup_error) => {
+                        format!("{error}; cleanup failed: {cleanup_error}")
+                    }
+                    None => error.to_string(),
+                });
                 operation.completed_event_seq = Some(entry.handle.state().event_seq);
                 self.store.upsert_operation(&operation)?;
                 Err(error)

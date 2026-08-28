@@ -1,6 +1,7 @@
 use std::{path::PathBuf, process::Command};
 
 use gdb_ai_core::{
+    ErrorCode,
     config::{ArtifactConfig, Config, PersistenceConfig},
     gateway::{Caller, Gateway},
     policy::Profile,
@@ -1004,13 +1005,80 @@ async fn local_debugging_vertical_slice() {
         .unwrap()
         .0
         .clone();
+    // 2026-08-28: A timed-out probe must remove its temporary breakpoint even
+    // though the inferior remains running until the caller interrupts it.
+    let timed_out_probe = gateway
+        .dispatch(
+            request(
+                "timed-out-probe",
+                Some(&close_session),
+                "agent.probe",
+                launched.revision,
+                json!({
+                    "lease_id": close_lease,
+                    "stop_id": close_stop,
+                    "location": {"function": "never_called_by_vertical_target"},
+                    "budget": {"wall_time_ms": 50}
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(timed_out_probe.error.unwrap().code, ErrorCode::Timeout);
+    let timed_out_interrupted = successful(
+        gateway
+            .dispatch(
+                request(
+                    "timed-out-probe-interrupt",
+                    Some(&close_session),
+                    "execution.control",
+                    None,
+                    json!({
+                        "action": "interrupt",
+                        "lease_id": close_lease,
+                        "accept_latest_revision": true,
+                        "wait": {"until": "snapshot", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let listed = successful(
+        gateway
+            .dispatch(
+                request(
+                    "timed-out-probe-breakpoints",
+                    Some(&close_session),
+                    "breakpoint.list",
+                    None,
+                    json!({}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(
+        listed.result.unwrap()["breakpoints"]
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    );
+    let close_stop = timed_out_interrupted
+        .state
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
     {
         let probe = gateway.dispatch(
             request(
                 "cancelled-probe",
                 Some(&close_session),
                 "agent.probe",
-                launched.revision,
+                timed_out_interrupted.revision,
                 json!({
                     "lease_id": close_lease,
                     "stop_id": close_stop,
