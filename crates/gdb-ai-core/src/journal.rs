@@ -94,10 +94,19 @@ impl Journal {
         )
     }
 
-    pub fn append_inferior_output(&mut self, bytes: &[u8]) -> Result<u64> {
+    pub fn append_inferior_output(
+        &mut self,
+        offset: u64,
+        length: usize,
+        dropped_bytes: u64,
+    ) -> Result<u64> {
         self.append(
             "inferior.output",
-            serde_json::json!({ "raw_base64": BASE64.encode(bytes) }),
+            serde_json::json!({
+                "offset": offset,
+                "length": length,
+                "dropped_bytes": dropped_bytes
+            }),
         )
     }
 
@@ -205,5 +214,22 @@ mod tests {
         assert_eq!(error.code, ErrorCode::OutputLimit);
         journal.flush().unwrap();
         assert!(std::fs::metadata(path).unwrap().len() <= 64);
+    }
+
+    #[test]
+    fn records_pty_offsets_without_copying_output_bytes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let mut journal = Journal::create(&path, 1024).unwrap();
+        journal.append_inferior_output(4096, 65_536, 128).unwrap();
+        journal.flush().unwrap();
+
+        let entry: JournalEntry =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(entry.kind, "inferior.output");
+        assert_eq!(entry.data["offset"], 4096);
+        assert_eq!(entry.data["length"], 65_536);
+        assert_eq!(entry.data["dropped_bytes"], 128);
+        assert!(entry.data.get("raw_base64").is_none());
     }
 }

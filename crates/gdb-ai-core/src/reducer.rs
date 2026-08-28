@@ -501,7 +501,7 @@ impl StateReducer {
                 }
                 true
             }
-            DomainEvent::Output { .. } => false,
+            DomainEvent::Output { .. } | DomainEvent::OutputAdvanced { .. } => false,
         }
     }
 

@@ -103,10 +103,17 @@ impl MiCommand {
 
 #[derive(Debug)]
 pub enum BackendInput {
-    Mi { raw: Vec<u8>, record: MiRecord },
+    Mi {
+        raw: Vec<u8>,
+        record: MiRecord,
+    },
     ProtocolError(Error),
     GdbStderr(Vec<u8>),
-    InferiorPty(Vec<u8>),
+    InferiorPty {
+        offset: u64,
+        length: usize,
+        dropped_bytes: u64,
+    },
     GdbEof,
     PtyEof,
 }
@@ -143,12 +150,14 @@ impl PtyOutput {
         }
     }
 
-    fn append(&self, bytes: &[u8]) {
+    fn append(&self, bytes: &[u8]) -> (u64, u64) {
         self.closed.store(false, Ordering::Release);
-        self.ring
+        let mut ring = self
+            .ring
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .append(bytes);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let offset = ring.append(bytes);
+        (offset, ring.dropped_bytes())
     }
 
     fn mark_closed(&self) -> bool {
@@ -689,11 +698,19 @@ where
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             Ok(length) => {
-                let bytes = buffer[..length].to_vec();
-                // 2026-08-28: Exit state could overtake the actor notification
-                // and hide trailing output. Publish bytes before queueing metadata.
-                output.append(&bytes);
-                if sender.send(BackendInput::InferiorPty(bytes)).await.is_err() {
+                // 2026-08-28: Copying every PTY chunk through the actor and
+                // base64 journal amplified noisy target output. The reader
+                // owns bulk delivery; the control path receives metadata only.
+                let (offset, dropped_bytes) = output.append(&buffer[..length]);
+                if sender
+                    .send(BackendInput::InferiorPty {
+                        offset,
+                        length,
+                        dropped_bytes,
+                    })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -836,7 +853,11 @@ mod tests {
             pty_closed: false,
         };
         pty_sender
-            .try_send(BackendInput::InferiorPty(vec![0; 64 * 1024]))
+            .try_send(BackendInput::InferiorPty {
+                offset: 0,
+                length: 64 * 1024,
+                dropped_bytes: 0,
+            })
             .unwrap();
         control_sender
             .try_send(BackendInput::Mi {

@@ -676,6 +676,12 @@ pub enum DomainEvent {
         source: OutputSource,
         bytes: Vec<u8>,
     },
+    OutputAdvanced {
+        source: OutputSource,
+        offset: u64,
+        length: usize,
+        dropped_bytes: u64,
+    },
     UnknownBackendEvent {
         class: String,
     },

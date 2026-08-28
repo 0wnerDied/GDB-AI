@@ -1909,16 +1909,24 @@ impl SessionWorker {
                 self.log_output.append(&bytes);
                 Ok(None)
             }
-            BackendInput::InferiorPty(bytes) => {
-                let appended = self.journal.append_inferior_output(&bytes);
+            BackendInput::InferiorPty {
+                offset,
+                length,
+                dropped_bytes,
+            } => {
+                let appended = self
+                    .journal
+                    .append_inferior_output(offset, length, dropped_bytes);
                 self.journal_result(appended)?;
-                let dropped = self.inferior_output.dropped_bytes();
-                self.metrics
-                    .inferior_output_dropped(dropped.saturating_sub(self.inferior_output_dropped));
-                self.inferior_output_dropped = dropped;
-                self.apply_event(DomainEvent::Output {
+                self.metrics.inferior_output_dropped(
+                    dropped_bytes.saturating_sub(self.inferior_output_dropped),
+                );
+                self.inferior_output_dropped = dropped_bytes;
+                self.apply_event(DomainEvent::OutputAdvanced {
                     source: OutputSource::InferiorPty,
-                    bytes,
+                    offset,
+                    length,
+                    dropped_bytes,
                 })?;
                 Ok(None)
             }
@@ -2146,8 +2154,12 @@ async fn wait_for_prompt(
             }
             BackendInput::ProtocolError(error) => return Err(error),
             BackendInput::GdbEof => return Err(Error::new(ErrorCode::GdbExited, "GDB exited")),
-            BackendInput::InferiorPty(bytes) => {
-                journal.append_inferior_output(&bytes)?;
+            BackendInput::InferiorPty {
+                offset,
+                length,
+                dropped_bytes,
+            } => {
+                journal.append_inferior_output(offset, length, dropped_bytes)?;
             }
             BackendInput::PtyEof => {}
         }
