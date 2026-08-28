@@ -1,152 +1,170 @@
 # GDB/MI
 
-GDB/MI is a stateful, agent-oriented control plane that runs GDB through its
-machine interface. It keeps GDB control traffic separate from inferior I/O,
-turns asynchronous MI records into explicit state, and exposes bounded
-semantic operations over MCP and canonical JSON-RPC.
+GDB/MI is a stateful, agent-oriented debugging control plane. It runs one
+isolated GDB process per session, separates inferior PTY traffic from MI
+control traffic, reduces asynchronous records into explicit state, and
+exposes bounded semantic operations through MCP and canonical JSON-RPC.
 
-The repository currently implements the first local Linux vertical slice.
-The complete North-star design and its delivery boundaries are recorded in
-[PLAN.md](PLAN.md).
+The repository is independently versioned as `gdb-ai`; the executable is
+`gdb-ai`, the stable protocol is `gdb.ai/v1`, and resources use `gdbai://`.
+The complete normative design is in [PLAN.md](PLAN.md).
 
-## Implemented scope
+## Implemented system
 
-- Rust GDB/MI framer, parser, encoder, and lossless AST
-- MI4 startup with MI3 fallback and command-based capability probing
-- One actor and one GDB child per session, with serialized MI commands
-- Separate inferior PTY with bounded offset-based output rings
-- Event-first reducer, revisions, execution epochs, stop IDs, and stale
-  context rejection
-- Local launch, run control, breakpoints, stack, locals, registers,
-  expression evaluation, memory reads, disassembly, and inferior I/O
-- Policy profiles, canonical path checks, bounded responses, audit records,
-  content-addressed artifacts, SQLite WAL metadata, and JSONL journals
-- MCP stdio tools and resources plus the `gdb.ai/call` JSON-RPC method
-- Deterministic replay from a complete journal
+- Bounded byte-stream MI4/MI3 framer, parser, encoder, lossless AST, saved
+  fixtures, property-style chunk tests, and cargo-fuzz targets
+- One session actor and GDB child per session with token correlation,
+  serialized commands, finite deadlines, cancellation, and interrupt support
+- Journal-before-reducer state, revisions, execution epochs, stop IDs,
+  stale-handle rejection, snapshots, tracked state, diffs, and replay
+- Local launch, allowlisted PID attach, core files, allowlisted gdbserver/RSP,
+  detach, restart, kill, fork/exec policy, and structured signal policy
+- Structured breakpoints/watchpoints/catchpoints, threads, frames, locals,
+  arguments, registers, variable objects, memory, disassembly, modules,
+  mappings, source excerpts, and inferior I/O
+- Compare-and-swap memory writes, register writes, bounded search, paged
+  values, content-addressed artifacts, and owner-checked resource access
+- Agent probes, experiments, hypothesis checks, observation budgets, tracked
+  expressions/memory, crash signatures, and provider provenance
+- Write leases, optimistic revisions, idempotency, profiles, rate limits,
+  redacted SQLite audit, WAL metadata, JSONL evidence, and reconciliation
+- MCP stdio, MCP Streamable HTTP, Unix socket, canonical JSON-RPC, Python SDK,
+  TypeScript SDK, CLI operations, schema files, and Prometheus text metrics
+- Secure GDB startup, clean inferior environment, workspace path policy,
+  bubblewrap isolation when available, `no_new_privs`, and process rlimits
+- Optional SHA-256-pinned GDB Python MI extension and conditional kernel
+  provider with an explicit monitor allowlist
 
-This slice intentionally does not claim attach, core, remote, non-stop,
-HTTP, multi-user leases, production namespaces/seccomp, persistent variable
-objects, SDKs, the Python extension, or kernel providers. Those remain in
-the delivery plan until the local path and Agent evaluation justify them.
+Version 1 intentionally remains all-stop and Linux-only. It does not claim
+non-stop execution, native Windows/macOS debugging, an LLDB backend, arbitrary
+interactive CLI/Python/shell access, proprietary JTAG unification, or live
+inferior restoration after GDB death.
 
 ## Requirements
 
-- Linux
-- Rust 1.88 or newer
+- Linux and Rust 1.88 or newer
 - GDB 13 or newer for MI4, or GDB 9 or newer for MI3 compatibility
-- A C compiler for the live integration fixture
+- Bubblewrap for the default mount/network sandbox (`auto` reports absence;
+  `required` fails closed)
+- A C compiler for integration tests
+- Optional: gdbserver, Python-enabled GDB, Node.js 18 or newer
 
 ## Build and verify
 
 ```sh
-cargo build --release
+cargo build --locked --release
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p gdb-ai -- doctor
 ```
 
-`doctor` starts a securely configured GDB session, completes capability
-negotiation, prints the result as JSON, and closes the session.
+Additional checks:
 
-## Run as an MCP server
+```sh
+cargo check --manifest-path fuzz/Cargo.toml --bins
+python3 -m compileall -q gdb-extension sdk/python benchmarks/python
+npm --prefix sdk/typescript ci
+npm --prefix sdk/typescript run build
+(cd schemas && sha256sum -c SHA256SUMS)
+```
+
+## Serve MCP and JSON-RPC
+
+Single-client stdio:
 
 ```sh
 target/release/gdb-ai serve --stdio
 ```
 
-A typical MCP client entry is:
+Multi-client local socket:
 
-```json
-{
-  "mcpServers": {
-    "gdb-ai": {
-      "command": "/absolute/path/to/gdb-ai",
-      "args": ["serve", "--stdio"]
-    }
-  }
-}
+```sh
+target/release/gdb-ai serve --unix /run/user/1000/gdb-ai.sock
 ```
 
-The stdio server supports MCP protocol versions `2025-11-25`,
-`2025-06-18`, `2025-03-26`, and `2024-11-05`. It exposes these tools:
+Streamable HTTP is loopback-only unless a bearer-token file is supplied:
+
+```sh
+target/release/gdb-ai serve --http 127.0.0.1:8080
+target/release/gdb-ai serve --http 0.0.0.0:8080 \
+  --auth-token-file /run/secrets/gdb-ai-token
+```
+
+HTTP endpoints are `/mcp`, `/healthz`, and `/metrics`. The same connection
+accepts MCP tools and the canonical `gdb.ai/call` JSON-RPC method. Supported
+MCP protocol versions are `2025-11-25`, `2025-06-18`, `2025-03-26`, and
+`2024-11-05`.
+
+## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `gdb_session` | Create, launch, inspect, list, and close sessions |
-| `gdb_run` | Continue, interrupt, step, and wait |
-| `gdb_breakpoints` | Create and manage breakpoints and watchpoints |
-| `gdb_inspect` | Read bounded debugger views |
-| `gdb_evaluate` | Evaluate with inferior calls and writes disabled |
-| `gdb_memory` | Read bounded memory ranges |
-| `gdb_disassemble` | Read bounded disassembly |
-| `gdb_io` | Read and write the separate inferior PTY |
+| `gdb_session` | Sessions, leases, launch/attach/core/remote, lifecycle, capabilities |
+| `gdb_run` | Continue, interrupt, source/instruction stepping, and waits |
+| `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
+| `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
+| `gdb_evaluate` | Side-effect-denied one-shot expression evaluation |
+| `gdb_values` | Stop-scoped variable objects with paged children and updates |
+| `gdb_memory` | Bounded read, CAS write, compare, and explicit-range search |
+| `gdb_registers` | Semantic register roles and audited writes |
+| `gdb_disassemble` | Normalized bounded instructions with source and bytes |
+| `gdb_io` | Separate PTY, MI target, console, and log I/O plus EOF and resize |
+| `gdb_tracking` | Tracked expressions/memory and bounded histories |
+| `gdb_signals` | Structured stop/print/pass signal policy |
+| `gdb_batch` | Multiple reads constrained to one stop |
+| `gdb_agent` | Probes, experiments, hypothesis checks, and evidence budgets |
+| `gdb_events` | Finite event waits |
+| `gdb_kernel` | Conditional kernel inspection and allowlisted monitor operations |
+| `gdb_raw` | Audited MI/CLI escape hatch, registered only with `--raw-admin` |
 
-Raw commands are absent by default. A local operator must start the process
-with `serve --stdio --raw-admin`, and the caller must create a session with
-`profile: "raw_admin"`, before the additional `gdb_raw` tool is registered.
-Dangerous CLI classes such as shell, Python, source, maintenance, and monitor
-remain denied; accepted raw commands taint consistency instead of claiming a
-complete reconciliation.
+Mutations require both the exact current `expected_revision` and `lease_id`,
+or an explicit `accept_latest_revision` where permitted. `session.create`
+returns the first expiring lease. Renew it with
+`session.acquire_write_lease`. Starting execution invalidates every previous
+frame and value handle.
 
-Large results contain a `gdbai://artifact/sha256:...` URI. MCP clients can
-retrieve it through `resources/read`. Session status is available at
-`gdbai://session/<session-id>/status`.
-
-Mutation calls require either the exact `expected_revision` returned by the
-previous response or `accept_latest_revision: true`. State-sensitive reads
-require the current `stop_id`; starting execution invalidates all previous
-stop-scoped handles.
-
-For clients that already implement the canonical protocol, the same stdio
-connection accepts the JSON-RPC method `gdb.ai/call`. Its params are a
-`gdb.ai/v1` request envelope. Export that envelope's JSON Schema with:
-
-```sh
-gdb-ai schema export
-```
-
-## Configuration
-
-Pass a TOML file with the global option:
+## Configuration and SDKs
 
 ```sh
 gdb-ai --config /absolute/path/to/gdb-ai.toml serve --stdio
 ```
 
-See [gdb-ai.example.toml](gdb-ai.example.toml). Target programs and working
-directories are canonicalized and must stay under a configured
-`workspace_roots` entry.
+See [gdb-ai.example.toml](gdb-ai.example.toml) and the hardened distribution
+sample in [packaging/distro/gdb-ai.toml](packaging/distro/gdb-ai.toml).
+Python and TypeScript clients live under [sdk](sdk). Static protocol schemas
+and their SHA-256 hashes live under [schemas](schemas).
 
-GDB starts without initialization files or target auto-load scripts. The
-service disables debuginfod, shell-based inferior launch, and inferior
-function calls, preserves normal ASLR behavior, clears GDB's inherited
-environment, and does not expose raw commands through the default MCP tool
-list.
+The optional extension at [gdb-extension/gdb_ai.py](gdb-extension/gdb_ai.py)
+must be configured with an absolute path and its exact SHA-256 digest. It is
+never auto-loaded from a target directory.
 
-## Replay
-
-Every session writes a complete JSONL journal under its configured session
-directory. Rebuild controller state without re-executing the inferior:
+## Replay and operations
 
 ```sh
+gdb-ai transcript export <session-id>
+gdb-ai transcript inspect /path/to/journal.jsonl
 gdb-ai replay /path/to/journal.jsonl --session-id sess_replay
+gdb-ai session list
+gdb-ai session inspect <session-id>
+gdb-ai session close <session-id>
+gdb-ai schema export
 ```
 
-Replay reconstructs GDB/MI controller state. It does not restore a live
+Session CLI commands connect to `server.unix_socket`. Replay validates strict
+journal ordering and reconstructs controller state and stored snapshots. A
+recorded `session.created` ID overrides `--session-id`; the flag supplies a
+legacy MI-only fallback. Replay never executes or claims to restore an
 inferior.
 
 ## Embedding in binutils-gdb
 
-The repository is independent and can be attached to a binutils-gdb checkout
-once it has a remote URL:
-
 ```sh
-git submodule add <gdb-ai-repository-url> gdb-ai
+git submodule add https://github.com/0wnerDied/GDB-AI.git gdb-ai
 cargo build --manifest-path gdb-ai/Cargo.toml --release
 ```
 
-No binutils-gdb source modification is required; GDB/MI controls the built or
-installed `gdb` executable through MI.
+No binutils-gdb source modification is required. GDB/MI controls the built or
+installed `gdb` executable through its machine interface.
 
 ## License
 
