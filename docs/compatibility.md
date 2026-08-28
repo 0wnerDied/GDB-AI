@@ -8,8 +8,8 @@ unknown state-changing event taints consistency instead of being guessed.
 ## Verified on 2026-08-28
 
 - Required CI run
-  [33155226125](https://github.com/0wnerDied/GDB-AI/actions/runs/33155226125)
-  passed at implementation baseline `9648037` with Ubuntu GDB and gdbserver
+  [33159548523](https://github.com/0wnerDied/GDB-AI/actions/runs/33159548523)
+  passed at implementation baseline `fd823ac` with Ubuntu GDB and gdbserver
   15.1.
 - Local GDB and gdbserver 17.1 passed the full locked workspace tests,
   including native launch, attach, core, gdbserver, raw reconciliation,

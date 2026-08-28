@@ -1649,7 +1649,8 @@ The first blind pilot ran on 2026-08-28 against SUCTF 2026 `SU_minivfs` at
 upstream commit `3529e65bed41dfc3f836bdeae95307c92d710692`. Each Agent saw
 only the stripped executable, matching loader and libc, and its own isolated
 working directory. Source, writeups, other arms, and Internet research were
-excluded. Each arm had a limit of 60 debugger or canonical API actions.
+excluded. The GDB/AI server was repository baseline `b21dc48`. Each arm had a
+limit of 60 debugger or canonical API actions.
 
 | Arm | Model and interface | Actions | Result |
 | --- | --- | ---: | --- |
@@ -1674,9 +1675,10 @@ observed.
 The pilot exposed four concrete usability costs: stale-revision lease
 renewal, opaque enum errors, unresolved module-offset breakpoints for a
 loader-launched stripped PIE, and incomplete MCP workflow instructions.
-Each received a focused regression fix after the run. The statistically
-meaningful A/B/C/D gate remains open and requires repeated paired tasks,
-matching models and permissions, and the semantic-probe arm.
+Each received a focused regression fix in `2183d57`, `a43719a`, `f15a3c7`,
+and `6b2c94e`, respectively. The statistically meaningful A/B/C/D gate
+remains open and requires repeated paired tasks, matching models and
+permissions, and the semantic-probe arm.
 
 ## 53. Corrected guarantees
 
@@ -1733,8 +1735,8 @@ instead of claiming it ran.
 
 ## 55. Current progress and resume point
 
-The 2026-08-28 verified implementation baseline is `9648037`. Required CI
-run `33155226125` passed workspace tests, Clippy, Rust 1.88, schema hashes,
+The 2026-08-28 verified implementation baseline is `fd823ac`. Required CI
+run `33159548523` passed workspace tests, Clippy, Rust 1.88, schema hashes,
 both SDKs, fuzz-target compilation, and two public Debian kernel jobs. Local
 GDB 17.1 passed the full workspace; CI GDB 15.1 provided an independent
 environment.

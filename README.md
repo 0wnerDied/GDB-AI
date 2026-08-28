@@ -18,8 +18,8 @@ The repository is independently versioned as `gdb-ai`; the executable is
 
 ## Verification status
 
-The 2026-08-28 implementation baseline `9648037` passed
-[required CI](https://github.com/0wnerDied/GDB-AI/actions/runs/33155226125):
+The 2026-08-28 implementation baseline `fd823ac` passed
+[required CI](https://github.com/0wnerDied/GDB-AI/actions/runs/33159548523):
 workspace tests, Clippy, Rust 1.88, schema hashes, both SDKs, fuzz-target
 compilation, and QEMU kernel tests using pinned Debian 6.1 and 6.12 builds.
 Local GDB 17.1 also passed the full workspace and both kernel tests; required
