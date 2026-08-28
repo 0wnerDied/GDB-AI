@@ -227,12 +227,7 @@ impl Gateway {
         self.validate_request(request)?;
         self.check_rate(&caller.identity).await?;
 
-        let mut effect = effect_for_method(&request.method).ok_or_else(|| {
-            Error::new(
-                ErrorCode::NotFound,
-                format!("unknown canonical method {}", request.method),
-            )
-        })?;
+        let mut effect = effect_for_method(request.method);
         if matches!(
             request.method.as_str(),
             "memory.read" | "memory.search" | "memory.compare"
@@ -299,7 +294,7 @@ impl Gateway {
                 "raw_admin requires an authenticated administrative caller",
             ));
         }
-        if let Err(error) = profile.authorize_method(&request.method, effect) {
+        if let Err(error) = profile.authorize_method(request.method, effect) {
             // 2026-08-28: Policy denials previously returned before audit.
             // Persist the denied decision so rejected mutations remain traceable.
             self.store.audit(

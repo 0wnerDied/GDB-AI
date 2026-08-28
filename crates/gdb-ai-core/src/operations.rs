@@ -23,7 +23,7 @@ use crate::{
     gateway::{Caller, Gateway, SessionEntry, now_unix_ms, same_principal},
     persistence::Store,
     policy::{Profile, validate_console_command},
-    protocol::ApiRequest,
+    protocol::{ApiRequest, CanonicalMethod},
     session::{CommandReply, OutputRing, SessionHandle, WaitUntil},
 };
 
@@ -87,74 +87,77 @@ impl Gateway {
         request: &ApiRequest,
         caller: &Caller,
     ) -> Result<Value> {
-        match request.method.as_str() {
-            "session.create" => self.session_create(request, caller).await,
-            "session.get" => self.session_get(request).await,
-            "session.list" => self.session_list(caller).await,
-            "session.close" => self.session_close(request).await,
-            "session.acquire_write_lease" => {
+        match request.method {
+            CanonicalMethod::SessionCreate => self.session_create(request, caller).await,
+            CanonicalMethod::SessionGet => self.session_get(request).await,
+            CanonicalMethod::SessionList => self.session_list(caller).await,
+            CanonicalMethod::SessionClose => self.session_close(request).await,
+            CanonicalMethod::SessionAcquireWriteLease => {
                 self.session_acquire_write_lease(request, caller).await
             }
-            "session.release_write_lease" => self.session_release_write_lease(request).await,
-            "session.attempt_recovery" => self.session_attempt_recovery(request).await,
-            "session.capabilities" => Ok(serde_json::to_value(
+            CanonicalMethod::SessionReleaseWriteLease => {
+                self.session_release_write_lease(request).await
+            }
+            CanonicalMethod::SessionAttemptRecovery => self.session_attempt_recovery(request).await,
+            CanonicalMethod::SessionCapabilities => Ok(serde_json::to_value(
                 self.entry(required_session(request)?)
                     .await?
                     .handle
                     .capabilities(),
             )?),
-            "session.providers" => self.session_providers(request).await,
-            "session.transcript" => self.session_transcript(request).await,
-            "session.event" => self.session_event(request).await,
-            "target.launch" => self.target_launch(request).await,
-            "target.attach" => self.target_attach(request).await,
-            "target.connect_remote" => self.target_connect_remote(request).await,
-            "target.open_core" => self.target_open_core(request).await,
-            "target.detach" => self.target_detach(request).await,
-            "target.restart" => self.target_restart(request).await,
-            "target.kill" => self.target_kill(request).await,
-            "execution.control" => self.execution_control(request).await,
-            "execution.wait" => self.execution_wait(request).await,
-            "breakpoint.create" => self.breakpoint_create(request).await,
-            "breakpoint.update" => self.breakpoint_update(request).await,
-            "breakpoint.delete" => self.breakpoint_delete(request).await,
-            "breakpoint.list" => self.breakpoint_list(request).await,
-            "inspection.get" => self.inspection_get(request).await,
-            "inspection.snapshot" => self.inspection_snapshot(request).await,
-            "inspection.diff" => self.inspection_diff(request).await,
-            "inspection.batch" => self.inspection_batch(request).await,
-            "inspection.snapshot_get" => self.inspection_snapshot_get(request).await,
-            "value.evaluate" => self.value_evaluate(request).await,
-            "value.create" => self.value_create(request).await,
-            "value.children" => self.value_children(request).await,
-            "value.update" => self.value_update(request).await,
-            "value.release" => self.value_release(request).await,
-            "memory.read" => self.memory_read(request).await,
-            "memory.write" => self.memory_write(request).await,
-            "memory.search" => self.memory_search(request).await,
-            "memory.compare" => self.memory_compare(request).await,
-            "register.read" => self.register_read(request).await,
-            "register.write" => self.register_write(request).await,
-            "disassembly.read" => self.disassembly_read(request).await,
-            "inferior_io.read" => self.io_read(request).await,
-            "inferior_io.write" => self.io_write(request).await,
-            "inferior_io.close_stdin" => self.io_close_stdin(request).await,
-            "inferior_io.resize" => self.io_resize(request).await,
-            "tracking.add_expression" => self.tracking_add_expression(request).await,
-            "tracking.add_memory" => self.tracking_add_memory(request).await,
-            "tracking.remove" => self.tracking_remove(request).await,
-            "tracking.list" => self.tracking_list(request).await,
-            "signal.get" => self.signal_get(request).await,
-            "signal.update" => self.signal_update(request).await,
-            "agent.hypothesis_check" => self.agent_hypothesis_check(request).await,
-            "agent.probe" | "agent.experiment" => self.agent_probe(request).await,
-            "kernel.inspect" => self.kernel_inspect(request).await,
-            "kernel.monitor" => self.kernel_monitor(request).await,
-            "artifact.get" => self.artifact_get(request, caller).await,
-            "events.wait" => self.events_wait(request).await,
-            "raw.mi" => self.raw_mi(request).await,
-            "raw.console" => self.raw_console(request).await,
-            _ => Err(Error::new(ErrorCode::NotFound, "unknown canonical method")),
+            CanonicalMethod::SessionProviders => self.session_providers(request).await,
+            CanonicalMethod::SessionTranscript => self.session_transcript(request).await,
+            CanonicalMethod::SessionEvent => self.session_event(request).await,
+            CanonicalMethod::TargetLaunch => self.target_launch(request).await,
+            CanonicalMethod::TargetAttach => self.target_attach(request).await,
+            CanonicalMethod::TargetConnectRemote => self.target_connect_remote(request).await,
+            CanonicalMethod::TargetOpenCore => self.target_open_core(request).await,
+            CanonicalMethod::TargetDetach => self.target_detach(request).await,
+            CanonicalMethod::TargetRestart => self.target_restart(request).await,
+            CanonicalMethod::TargetKill => self.target_kill(request).await,
+            CanonicalMethod::ExecutionControl => self.execution_control(request).await,
+            CanonicalMethod::ExecutionWait => self.execution_wait(request).await,
+            CanonicalMethod::BreakpointCreate => self.breakpoint_create(request).await,
+            CanonicalMethod::BreakpointUpdate => self.breakpoint_update(request).await,
+            CanonicalMethod::BreakpointDelete => self.breakpoint_delete(request).await,
+            CanonicalMethod::BreakpointList => self.breakpoint_list(request).await,
+            CanonicalMethod::InspectionGet => self.inspection_get(request).await,
+            CanonicalMethod::InspectionSnapshot => self.inspection_snapshot(request).await,
+            CanonicalMethod::InspectionDiff => self.inspection_diff(request).await,
+            CanonicalMethod::InspectionBatch => self.inspection_batch(request).await,
+            CanonicalMethod::InspectionSnapshotGet => self.inspection_snapshot_get(request).await,
+            CanonicalMethod::ValueEvaluate => self.value_evaluate(request).await,
+            CanonicalMethod::ValueCreate => self.value_create(request).await,
+            CanonicalMethod::ValueChildren => self.value_children(request).await,
+            CanonicalMethod::ValueUpdate => self.value_update(request).await,
+            CanonicalMethod::ValueRelease => self.value_release(request).await,
+            CanonicalMethod::MemoryRead => self.memory_read(request).await,
+            CanonicalMethod::MemoryWrite => self.memory_write(request).await,
+            CanonicalMethod::MemorySearch => self.memory_search(request).await,
+            CanonicalMethod::MemoryCompare => self.memory_compare(request).await,
+            CanonicalMethod::RegisterRead => self.register_read(request).await,
+            CanonicalMethod::RegisterWrite => self.register_write(request).await,
+            CanonicalMethod::DisassemblyRead => self.disassembly_read(request).await,
+            CanonicalMethod::InferiorIoRead => self.io_read(request).await,
+            CanonicalMethod::InferiorIoWrite => self.io_write(request).await,
+            CanonicalMethod::InferiorIoCloseStdin => self.io_close_stdin(request).await,
+            CanonicalMethod::InferiorIoResize => self.io_resize(request).await,
+            CanonicalMethod::TrackingAddExpression => self.tracking_add_expression(request).await,
+            CanonicalMethod::TrackingAddMemory => self.tracking_add_memory(request).await,
+            CanonicalMethod::TrackingRemove => self.tracking_remove(request).await,
+            CanonicalMethod::TrackingList => self.tracking_list(request).await,
+            CanonicalMethod::SignalGet => self.signal_get(request).await,
+            CanonicalMethod::SignalUpdate => self.signal_update(request).await,
+            CanonicalMethod::AgentHypothesisCheck => self.agent_hypothesis_check(request).await,
+            CanonicalMethod::AgentProbe | CanonicalMethod::AgentExperiment => {
+                self.agent_probe(request).await
+            }
+            CanonicalMethod::KernelInspect => self.kernel_inspect(request).await,
+            CanonicalMethod::KernelMonitor => self.kernel_monitor(request).await,
+            CanonicalMethod::ArtifactGet => self.artifact_get(request, caller).await,
+            CanonicalMethod::EventsWait => self.events_wait(request).await,
+            CanonicalMethod::RawMi => self.raw_mi(request).await,
+            CanonicalMethod::RawConsole => self.raw_console(request).await,
         }
     }
 
@@ -2530,7 +2533,7 @@ impl Gateway {
         let mut operation = OperationRecord {
             operation_id: OperationId::new(),
             session_id: entry.handle.id().clone(),
-            kind: request.method.clone(),
+            kind: request.method.to_string(),
             status: OperationStatus::WaitingForState,
             created_revision: initial.revision,
             wait_baseline: Some(WaitBaseline::from(&initial)),
@@ -2766,13 +2769,13 @@ impl Gateway {
             }
             "stack" => {
                 let mut subrequest = request.clone();
-                subrequest.method = "inspection.get".into();
+                subrequest.method = CanonicalMethod::InspectionGet;
                 subrequest.parameters["view"] = Value::String("stack".into());
                 self.inspection_get(&subrequest).await
             }
             "panic" => {
                 let mut subrequest = request.clone();
-                subrequest.method = "inspection.snapshot".into();
+                subrequest.method = CanonicalMethod::InspectionSnapshot;
                 subrequest.parameters["profile"] = Value::String("standard".into());
                 self.inspection_snapshot(&subrequest).await
             }

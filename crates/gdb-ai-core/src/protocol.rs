@@ -1,11 +1,131 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt, ops::Deref};
 
 use crate::{Error, domain::SessionState};
 
 pub const API_VERSION: &str = "gdb.ai/v1";
+
+// 2026-08-28: Free-form method strings let routing, policy, MCP projection,
+// and the published schema drift into four different canonical method sets.
+macro_rules! canonical_methods {
+    ($( $variant:ident => $name:literal ),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        pub enum CanonicalMethod {
+            $(#[serde(rename = $name)] $variant,)+
+        }
+
+        impl CanonicalMethod {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+        }
+    };
+}
+
+canonical_methods! {
+    SessionCreate => "session.create",
+    SessionGet => "session.get",
+    SessionList => "session.list",
+    SessionClose => "session.close",
+    SessionAcquireWriteLease => "session.acquire_write_lease",
+    SessionReleaseWriteLease => "session.release_write_lease",
+    SessionAttemptRecovery => "session.attempt_recovery",
+    SessionCapabilities => "session.capabilities",
+    SessionProviders => "session.providers",
+    SessionTranscript => "session.transcript",
+    SessionEvent => "session.event",
+    TargetLaunch => "target.launch",
+    TargetAttach => "target.attach",
+    TargetConnectRemote => "target.connect_remote",
+    TargetOpenCore => "target.open_core",
+    TargetDetach => "target.detach",
+    TargetRestart => "target.restart",
+    TargetKill => "target.kill",
+    ExecutionControl => "execution.control",
+    ExecutionWait => "execution.wait",
+    BreakpointCreate => "breakpoint.create",
+    BreakpointUpdate => "breakpoint.update",
+    BreakpointDelete => "breakpoint.delete",
+    BreakpointList => "breakpoint.list",
+    InspectionGet => "inspection.get",
+    InspectionSnapshot => "inspection.snapshot",
+    InspectionDiff => "inspection.diff",
+    InspectionBatch => "inspection.batch",
+    InspectionSnapshotGet => "inspection.snapshot_get",
+    ValueEvaluate => "value.evaluate",
+    ValueCreate => "value.create",
+    ValueChildren => "value.children",
+    ValueUpdate => "value.update",
+    ValueRelease => "value.release",
+    MemoryRead => "memory.read",
+    MemoryWrite => "memory.write",
+    MemorySearch => "memory.search",
+    MemoryCompare => "memory.compare",
+    RegisterRead => "register.read",
+    RegisterWrite => "register.write",
+    DisassemblyRead => "disassembly.read",
+    InferiorIoRead => "inferior_io.read",
+    InferiorIoWrite => "inferior_io.write",
+    InferiorIoCloseStdin => "inferior_io.close_stdin",
+    InferiorIoResize => "inferior_io.resize",
+    TrackingAddExpression => "tracking.add_expression",
+    TrackingAddMemory => "tracking.add_memory",
+    TrackingRemove => "tracking.remove",
+    TrackingList => "tracking.list",
+    SignalGet => "signal.get",
+    SignalUpdate => "signal.update",
+    AgentHypothesisCheck => "agent.hypothesis_check",
+    AgentProbe => "agent.probe",
+    AgentExperiment => "agent.experiment",
+    KernelInspect => "kernel.inspect",
+    KernelMonitor => "kernel.monitor",
+    ArtifactGet => "artifact.get",
+    EventsWait => "events.wait",
+    RawMi => "raw.mi",
+    RawConsole => "raw.console",
+}
+
+impl fmt::Display for CanonicalMethod {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Deref for CanonicalMethod {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl From<&str> for CanonicalMethod {
+    fn from(value: &str) -> Self {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|method| method.as_str() == value)
+            .unwrap_or_else(|| panic!("unknown internal canonical method {value}"))
+    }
+}
+
+impl From<String> for CanonicalMethod {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+
+impl PartialEq<&str> for CanonicalMethod {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -14,7 +134,7 @@ pub struct ApiRequest {
     pub request_id: String,
     #[serde(default)]
     pub session_id: Option<String>,
-    pub method: String,
+    pub method: CanonicalMethod,
     #[serde(default)]
     pub expected_revision: Option<u64>,
     #[serde(default)]
@@ -171,5 +291,30 @@ fn collect_evidence_sequences(value: &Value, depth: usize, output: &mut BTreeSet
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn published_schema_uses_the_canonical_method_set() {
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../schemas/gdb.ai.v1.json")).unwrap();
+        let published: BTreeSet<&str> = schema["properties"]["method"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|method| method.as_str().unwrap())
+            .collect();
+        let typed: BTreeSet<&str> = CanonicalMethod::ALL
+            .iter()
+            .map(|method| method.as_str())
+            .collect();
+        assert_eq!(published, typed);
+        assert!(
+            serde_json::from_value::<CanonicalMethod>(Value::String("unknown".into())).is_err()
+        );
     }
 }

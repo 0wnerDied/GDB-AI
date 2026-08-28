@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, ErrorCode, Result};
+use crate::{Error, ErrorCode, Result, protocol::CanonicalMethod};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,16 +26,16 @@ pub enum Effect {
 }
 
 impl Profile {
-    pub fn authorize_method(self, method: &str, effect: Effect) -> Result<()> {
+    pub fn authorize_method(self, method: CanonicalMethod, effect: Effect) -> Result<()> {
         // 2026-08-28: Read-only profiles could create sessions but could not
         // acquire a lease, open a core, or close their own session.
         if matches!(
             method,
-            "session.create"
-                | "session.close"
-                | "session.acquire_write_lease"
-                | "session.release_write_lease"
-        ) || (self == Self::OfflineCore && method == "target.open_core")
+            CanonicalMethod::SessionCreate
+                | CanonicalMethod::SessionClose
+                | CanonicalMethod::SessionAcquireWriteLease
+                | CanonicalMethod::SessionReleaseWriteLease
+        ) || (self == Self::OfflineCore && method == CanonicalMethod::TargetOpenCore)
         {
             return Ok(());
         }
@@ -68,64 +68,67 @@ impl Profile {
     }
 }
 
-pub fn effect_for_method(method: &str) -> Option<Effect> {
-    Some(match method {
-        method
-            if method.starts_with("session.get")
-                || method.starts_with("session.list")
-                || method == "session.capabilities"
-                || method == "session.providers"
-                || method == "session.transcript"
-                || method == "session.event"
-                || method.starts_with("inspection.")
-                || method == "value.evaluate"
-                || method == "value.children"
-                || method == "value.update"
-                || method == "memory.read"
-                || method == "memory.search"
-                || method == "memory.compare"
-                || method == "register.read"
-                || method == "disassembly.read"
-                || method == "inferior_io.read"
-                || method == "execution.wait"
-                || method == "tracking.list"
-                || method == "breakpoint.list"
-                || method == "signal.get"
-                || method == "agent.hypothesis_check"
-                || method == "kernel.inspect"
-                || method == "artifact.get"
-                || method == "events.wait" =>
-        {
-            Effect::Read
+pub fn effect_for_method(method: CanonicalMethod) -> Effect {
+    use CanonicalMethod::*;
+
+    match method {
+        SessionGet
+        | SessionList
+        | SessionCapabilities
+        | SessionProviders
+        | SessionTranscript
+        | SessionEvent
+        | InspectionGet
+        | InspectionSnapshot
+        | InspectionDiff
+        | InspectionBatch
+        | InspectionSnapshotGet
+        | ValueEvaluate
+        | ValueChildren
+        | ValueUpdate
+        | MemoryRead
+        | MemorySearch
+        | MemoryCompare
+        | RegisterRead
+        | DisassemblyRead
+        | InferiorIoRead
+        | ExecutionWait
+        | TrackingList
+        | BreakpointList
+        | SignalGet
+        | AgentHypothesisCheck
+        | KernelInspect
+        | ArtifactGet
+        | EventsWait => Effect::Read,
+        TargetConnectRemote => Effect::Network,
+        MemoryWrite | RegisterWrite | InferiorIoWrite | InferiorIoCloseStdin | InferiorIoResize => {
+            Effect::TargetMutation
         }
-        "target.connect_remote" => Effect::Network,
-        "memory.write"
-        | "register.write"
-        | "inferior.call"
-        | "inferior_io.write"
-        | "inferior_io.close_stdin"
-        | "inferior_io.resize" => Effect::TargetMutation,
-        "raw.mi" | "raw.console" | "kernel.monitor" => Effect::Raw,
-        method
-            if method.starts_with("target.")
-                || method.starts_with("execution.")
-                || method.starts_with("breakpoint.")
-                || method.starts_with("tracking.")
-                || method == "signal.update"
-                || method == "agent.probe"
-                || method == "agent.experiment"
-                || method == "value.create"
-                || method == "value.release" =>
-        {
-            Effect::Control
-        }
-        "session.create"
-        | "session.close"
-        | "session.acquire_write_lease"
-        | "session.release_write_lease"
-        | "session.attempt_recovery" => Effect::Control,
-        _ => return None,
-    })
+        RawMi | RawConsole | KernelMonitor => Effect::Raw,
+        TargetLaunch
+        | TargetAttach
+        | TargetOpenCore
+        | TargetDetach
+        | TargetRestart
+        | TargetKill
+        | ExecutionControl
+        | BreakpointCreate
+        | BreakpointUpdate
+        | BreakpointDelete
+        | TrackingAddExpression
+        | TrackingAddMemory
+        | TrackingRemove
+        | SignalUpdate
+        | AgentProbe
+        | AgentExperiment
+        | ValueCreate
+        | ValueRelease => Effect::Control,
+        SessionCreate
+        | SessionClose
+        | SessionAcquireWriteLease
+        | SessionReleaseWriteLease
+        | SessionAttemptRecovery => Effect::Control,
+    }
 }
 
 pub fn validate_console_command(command: &str) -> Result<()> {
@@ -208,12 +211,12 @@ mod tests {
         assert!(Profile::RawAdmin.authorize(Effect::Raw).is_ok());
         assert!(
             Profile::OfflineCore
-                .authorize_method("target.open_core", Effect::Control)
+                .authorize_method(CanonicalMethod::TargetOpenCore, Effect::Control)
                 .is_ok()
         );
         assert!(
             Profile::OfflineCore
-                .authorize_method("breakpoint.create", Effect::Control)
+                .authorize_method(CanonicalMethod::BreakpointCreate, Effect::Control)
                 .is_err()
         );
     }
