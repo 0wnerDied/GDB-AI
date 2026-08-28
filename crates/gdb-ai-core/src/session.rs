@@ -1091,13 +1091,16 @@ impl SessionWorker {
         ] {
             self.execute(command, Duration::from_secs(5)).await?;
         }
-        let target_writes = matches!(self.profile, Profile::LabMutation | Profile::RawAdmin);
         let target_control = matches!(
             self.profile,
             Profile::DebugControl | Profile::LabMutation | Profile::RawAdmin
         );
         for (setting, enabled) in [
-            ("may-write-memory", target_writes),
+            // 2026-08-28: GDB implements software breakpoints by writing the
+            // target instruction. DebugControl permits breakpoints, so this
+            // GDB guard must follow control permission; policy still denies
+            // the public memory.write method outside mutation profiles.
+            ("may-write-memory", target_control),
             // 2026-08-28: starti and some stepping paths update internal
             // registers. Service policy still denies register.write outside
             // lab_mutation, while safe evaluation temporarily disables writes.
@@ -2749,6 +2752,19 @@ mod tests {
         );
         assert!(session.capabilities().supports("async_execution"));
         assert!(session.capabilities().supports("inferior_tty"));
+        let memory_guard = session
+            .command(
+                MiCommand::new("-gdb-show")
+                    .unwrap()
+                    .bare("may-write-memory")
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            MiResult::find_str(memory_guard.record.results(), "value"),
+            Some("on")
+        );
         session.close().await.unwrap();
         assert_eq!(
             session.state().lifecycle,
