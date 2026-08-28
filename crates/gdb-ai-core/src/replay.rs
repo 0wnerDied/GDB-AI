@@ -80,14 +80,53 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
                 let record = gdb_ai_mi::parse_record(&raw, gdb_ai_mi::MiLimits::default())?;
                 parsed_mi_records += 1;
                 if let Some(event) = normalize(&record) {
-                    derived.push((entry.seq, event));
+                    derived.push((entry.seq, event, false));
                 }
             }
             "normalized.event" => {
                 saw_normalized = true;
                 let event: DomainEvent = serde_json::from_value(entry.data)?;
+                // 2026-08-28: Complete journals carried both raw MI and
+                // normalized events but replay trusted the latter blindly.
+                // Verify adjacent MI-derived events before reducing them.
+                if let Some((raw_seq, derived_event, matched)) = derived.last_mut()
+                    && *raw_seq + 1 == entry.seq
+                {
+                    if *derived_event != event {
+                        return Err(Error::new(
+                            ErrorCode::InvalidArgument,
+                            format!(
+                                "normalized event {} differs from MI record {}",
+                                entry.seq, raw_seq
+                            ),
+                        ));
+                    }
+                    *matched = true;
+                }
                 reducer.apply(&JournaledEvent::for_replay(entry.seq, event))?;
                 applied_events += 1;
+            }
+            "state.revision" => {
+                let revision = entry
+                    .data
+                    .get("revision")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        Error::new(ErrorCode::InvalidArgument, "missing state revision")
+                    })?;
+                let recorded: SessionState =
+                    serde_json::from_value(entry.data.get("state").cloned().ok_or_else(|| {
+                        Error::new(ErrorCode::InvalidArgument, "missing revision state")
+                    })?)?;
+                // 2026-08-28: Replay ignored persisted state checkpoints, so
+                // reducer regressions and corrupted journals appeared valid.
+                if !saw_normalized || revision != recorded.revision || reducer.state() != &recorded
+                {
+                    return Err(Error::new(
+                        ErrorCode::InvalidArgument,
+                        format!("state checkpoint {} does not match replay", entry.seq),
+                    ));
+                }
             }
             "snapshot.result" => {
                 snapshots += 1;
@@ -97,8 +136,15 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
         }
     }
 
-    if !saw_normalized {
-        for (seq, event) in derived {
+    if saw_normalized {
+        if let Some((seq, _, _)) = derived.iter().find(|(_, _, matched)| !matched) {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                format!("MI record {seq} has no matching normalized event"),
+            ));
+        }
+    } else {
+        for (seq, event, _) in derived {
             reducer.apply(&JournaledEvent::for_replay(seq, event))?;
             applied_events += 1;
         }
@@ -177,5 +223,111 @@ mod tests {
         skipped.seq = 2;
         writeln!(gap, "{}", serde_json::to_string(&skipped).unwrap()).unwrap();
         assert!(replay(gap.path(), SessionId("sess_test".into())).is_err());
+    }
+
+    #[test]
+    fn verifies_mi_events_and_state_checkpoints() {
+        let mut transcript = NamedTempFile::new().unwrap();
+        let session_id = SessionId("sess_recorded".into());
+        let created = JournalEntry {
+            seq: 1,
+            kind: "session.created".into(),
+            data: serde_json::json!({"session_id": session_id}),
+        };
+        let raw = b"*running,thread-id=\"all\"";
+        let event =
+            normalize(&gdb_ai_mi::parse_record(raw, gdb_ai_mi::MiLimits::default()).unwrap())
+                .unwrap();
+        let mut reducer = StateReducer::new(SessionState::creating(session_id));
+        reducer
+            .apply(&JournaledEvent::for_replay(3, event.clone()))
+            .unwrap();
+        let entries = [
+            created,
+            JournalEntry {
+                seq: 2,
+                kind: "mi.output".into(),
+                data: serde_json::json!({"raw_base64": BASE64.encode(raw)}),
+            },
+            JournalEntry {
+                seq: 3,
+                kind: "normalized.event".into(),
+                data: serde_json::to_value(event).unwrap(),
+            },
+            JournalEntry {
+                seq: 4,
+                kind: "state.revision".into(),
+                data: serde_json::json!({
+                    "revision": reducer.state().revision,
+                    "state": reducer.state()
+                }),
+            },
+        ];
+        for entry in entries {
+            writeln!(transcript, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+
+        let report = replay(transcript.path(), SessionId("ignored".into())).unwrap();
+        assert_eq!(report.state, *reducer.state());
+    }
+
+    #[test]
+    fn rejects_normalized_events_that_disagree_with_mi() {
+        let mut transcript = NamedTempFile::new().unwrap();
+        for entry in [
+            JournalEntry {
+                seq: 1,
+                kind: "session.created".into(),
+                data: serde_json::json!({"session_id": "sess_recorded"}),
+            },
+            JournalEntry {
+                seq: 2,
+                kind: "mi.output".into(),
+                data: serde_json::json!({
+                    "raw_base64": BASE64.encode("*running,thread-id=\"all\"")
+                }),
+            },
+            JournalEntry {
+                seq: 3,
+                kind: "normalized.event".into(),
+                data: serde_json::to_value(DomainEvent::BackendStarted).unwrap(),
+            },
+        ] {
+            writeln!(transcript, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+
+        let error = replay(transcript.path(), SessionId("ignored".into())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(error.message.contains("differs from MI record"));
+    }
+
+    #[test]
+    fn rejects_state_checkpoint_drift() {
+        let mut transcript = NamedTempFile::new().unwrap();
+        let mut state = SessionState::creating(SessionId("sess_recorded".into()));
+        state.revision = 99;
+        for entry in [
+            JournalEntry {
+                seq: 1,
+                kind: "session.created".into(),
+                data: serde_json::json!({"session_id": "sess_recorded"}),
+            },
+            JournalEntry {
+                seq: 2,
+                kind: "normalized.event".into(),
+                data: serde_json::to_value(DomainEvent::BackendStarted).unwrap(),
+            },
+            JournalEntry {
+                seq: 3,
+                kind: "state.revision".into(),
+                data: serde_json::json!({"revision": 99, "state": state}),
+            },
+        ] {
+            writeln!(transcript, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+
+        let error = replay(transcript.path(), SessionId("ignored".into())).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(error.message.contains("does not match replay"));
     }
 }

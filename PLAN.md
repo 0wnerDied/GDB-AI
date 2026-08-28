@@ -972,8 +972,10 @@ gdb-ai replay session.jsonl
 
 must validate parsing, rebuild deterministic reducer state, compare reducer
 versions, rebuild snapshots, reproduce mismatches, and support protocol
-migration tests. Replay never executes an inferior and never claims to restore
-a process. A complete deterministic replay journal includes MI input/output,
+migration tests. Replay rejects disagreement between adjacent raw MI and
+normalized events and between reducer output and recorded state checkpoints.
+It never executes an inferior or claims to restore a process. A complete
+deterministic replay journal includes MI input/output,
 PTY events, provider results, API requests, policy decisions,
 deadlines/cancellation, ID allocation (or a deterministic seed), and state
 transitions. An MI-only transcript can validate parsing and MI-derived

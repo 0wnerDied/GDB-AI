@@ -16,3 +16,6 @@ must enter the SessionActor control lane; both require `session_id` and
 
 Journals are stored per session. Use `gdb-ai transcript inspect`, `transcript
 export`, and `replay` for diagnosis without executing the inferior again.
+Replay rejects gaps and mismatches among raw MI, adjacent normalized events,
+and recorded reducer state checkpoints. MI-only transcripts have no checkpoint
+integrity guarantee and reconstruct only MI-derived controller state.
