@@ -982,6 +982,7 @@ struct SessionWorker {
     next_token: u64,
     timed_out_tokens: HashSet<u64>,
     stream_limit: usize,
+    command_timeout: Duration,
     values: BTreeMap<String, ValueBinding>,
     tracking: BTreeMap<String, TrackingDefinition>,
     tracking_history: BTreeMap<String, VecDeque<Value>>,
@@ -1050,6 +1051,7 @@ impl SessionWorker {
                 &mut target_output,
                 &mut console_output,
                 &mut log_output,
+                config.server.command_timeout(),
             )
             .await
             {
@@ -1113,6 +1115,7 @@ impl SessionWorker {
             next_token: 1,
             timed_out_tokens: HashSet::new(),
             stream_limit: config.limits.tool_response_bytes,
+            command_timeout: config.server.command_timeout(),
             values: BTreeMap::new(),
             tracking: BTreeMap::new(),
             tracking_history: BTreeMap::new(),
@@ -1152,7 +1155,7 @@ impl SessionWorker {
                 .bare("may-call-functions")?
                 .bare("off")?,
         ] {
-            self.execute(command, Duration::from_secs(5)).await?;
+            self.execute(command, self.command_timeout).await?;
         }
         let target_control = matches!(
             self.profile,
@@ -1175,12 +1178,12 @@ impl SessionWorker {
                 MiCommand::new("-gdb-set")?
                     .bare(setting)?
                     .bare(if enabled { "on" } else { "off" })?,
-                Duration::from_secs(5),
+                self.command_timeout,
             )
             .await?;
         }
         let features = self
-            .execute(MiCommand::new("-list-features")?, Duration::from_secs(5))
+            .execute(MiCommand::new("-list-features")?, self.command_timeout)
             .await?;
         self.capabilities
             .write()
@@ -1199,7 +1202,7 @@ impl SessionWorker {
             "-thread-info",
         ] {
             let probe = MiCommand::new("-info-gdb-mi-command")?.string(command);
-            let reply = self.execute(probe, Duration::from_secs(5)).await?;
+            let reply = self.execute(probe, self.command_timeout).await?;
             if mi_command_exists(&reply.record) {
                 self.capabilities
                     .write()
@@ -1231,7 +1234,7 @@ impl SessionWorker {
         let pty = self.backend.pty_path().as_bytes().to_vec();
         self.execute(
             MiCommand::new("-inferior-tty-set")?.string(pty),
-            Duration::from_secs(5),
+            self.command_timeout,
         )
         .await?;
         Ok(())
@@ -1268,7 +1271,7 @@ impl SessionWorker {
                 MiCommand::new("-interpreter-exec")?
                     .bare("console")?
                     .string(source),
-                Duration::from_secs(5),
+                self.command_timeout,
             )
             .await;
         if let Err(error) = loaded {
@@ -1282,7 +1285,7 @@ impl SessionWorker {
         match self
             .execute(
                 MiCommand::new("-gdb-ai-capabilities")?,
-                Duration::from_secs(5),
+                self.command_timeout,
             )
             .await
         {
@@ -1322,7 +1325,7 @@ impl SessionWorker {
         let reply = self
             .execute(
                 MiCommand::new("-list-target-features")?,
-                Duration::from_secs(5),
+                self.command_timeout,
             )
             .await?;
         let features = extract_string_list(&reply.record, "features");
@@ -1523,7 +1526,7 @@ impl SessionWorker {
             WorkerRequest::RefreshTargetCapabilities { response } => {
                 let result = match self.require_known_outcome_name("-list-target-features") {
                     Ok(()) => match self
-                        .restore_deferred_commands(command_deadline(Duration::from_secs(5)))
+                        .restore_deferred_commands(command_deadline(self.command_timeout))
                         .await
                     {
                         Ok(()) => self.refresh_target_capabilities().await,
@@ -1871,7 +1874,7 @@ impl SessionWorker {
             let reply = self
                 .execute(
                     breakpoint.command.clone().string(format!("*{address}")),
-                    Duration::from_secs(5),
+                    self.command_timeout,
                 )
                 .await?;
             let new_backend_number = breakpoint_number_from_record(&reply.record)?;
@@ -1887,7 +1890,7 @@ impl SessionWorker {
             if let Err(error) = self
                 .execute(
                     MiCommand::new("-break-delete")?.bare(breakpoint.backend_number.clone())?,
-                    Duration::from_secs(5),
+                    self.command_timeout,
                 )
                 .await
             {
@@ -2522,8 +2525,11 @@ async fn wait_for_prompt(
     target_output: &mut ByteRing,
     console_output: &mut ByteRing,
     log_output: &mut ByteRing,
+    timeout: Duration,
 ) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    // 2026-08-29: A fixed three-second prompt deadline rejected valid GDB
+    // startup on AArch64 TCG before the configured command timeout elapsed.
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let input = tokio::time::timeout_at(deadline, backend.next_input())
             .await

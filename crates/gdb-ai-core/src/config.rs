@@ -124,7 +124,7 @@ impl Default for ServerConfig {
             max_sessions: 8,
             max_http_sessions: 128,
             http_session_idle_ms: 15 * 60 * 1_000,
-            command_timeout_ms: 5_000,
+            command_timeout_ms: 15_000,
             wait_timeout_ms: 5_000,
             write_lease_ms: 30_000,
             unix_socket: None,
