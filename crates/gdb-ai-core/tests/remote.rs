@@ -177,6 +177,9 @@ async fn remote_disconnect_invalidates_live_target_state() {
     config.security.default_profile = Profile::RawAdmin;
     config.security.workspace_roots = vec![directory.path().to_owned()];
     config.security.remote_allowlist = vec![endpoint.clone()];
+    // 2026-08-29: Loaded CI runners can deliver GDB's disconnect notification
+    // after five seconds, so observe it for the configured command deadline.
+    let disconnect_timeout = config.server.command_timeout();
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller {
         identity: "disconnect-test".into(),
@@ -233,7 +236,7 @@ async fn remote_disconnect_invalidates_live_target_state() {
 
     server.kill().unwrap();
     server.wait().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(disconnect_timeout, async {
         loop {
             let state = gateway
                 .dispatch(
