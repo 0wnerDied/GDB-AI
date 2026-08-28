@@ -760,7 +760,11 @@ impl Gateway {
             }
         };
         command = context_options(command, &request.parameters, &state)?;
-        let reply = match entry.handle.command(command).await {
+        let reply = match if action == "interrupt" {
+            entry.handle.interrupt(command).await
+        } else {
+            entry.handle.command(command).await
+        } {
             Ok(reply) => reply,
             Err(error) => {
                 operation.status = OperationStatus::Failed;

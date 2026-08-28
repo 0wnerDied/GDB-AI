@@ -117,6 +117,7 @@ pub struct SessionHandle {
     profile: Profile,
     capabilities: Arc<StdRwLock<SessionCapabilities>>,
     requests: mpsc::Sender<WorkerRequest>,
+    controls: mpsc::Sender<ControlRequest>,
     state: watch::Receiver<SessionState>,
     events: broadcast::Sender<PublishedEvent>,
     command_timeout: Duration,
@@ -145,6 +146,9 @@ impl SessionHandle {
         let (state_sender, state) = watch::channel(initial_state.clone());
         let (events, _) = broadcast::channel(512);
         let (requests, receiver) = mpsc::channel(128);
+        // 2026-08-28: Interrupt and close previously waited behind the command
+        // they needed to preempt. Keep a dedicated bounded control lane.
+        let (controls, control_receiver) = mpsc::channel(16);
 
         let mut worker = SessionWorker::bootstrap(
             config.clone(),
@@ -157,6 +161,7 @@ impl SessionHandle {
             state_sender,
             events.clone(),
             receiver,
+            control_receiver,
         )
         .await?;
         let capabilities = worker.capabilities.clone();
@@ -169,6 +174,7 @@ impl SessionHandle {
             profile,
             capabilities,
             requests,
+            controls,
             state,
             events,
             command_timeout: config.server.command_timeout(),
@@ -522,10 +528,25 @@ impl SessionHandle {
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
     }
 
+    pub async fn interrupt(&self, command: MiCommand) -> Result<CommandReply> {
+        let (sender, receiver) = oneshot::channel();
+        self.controls
+            .send(ControlRequest::Interrupt {
+                command,
+                deadline: command_deadline(self.command_timeout),
+                response: sender,
+            })
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+        receiver
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+    }
+
     pub async fn close(&self) -> Result<()> {
         let (sender, receiver) = oneshot::channel();
-        self.requests
-            .send(WorkerRequest::Close { response: sender })
+        self.controls
+            .send(ControlRequest::Close { response: sender })
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
         receiver
@@ -668,13 +689,30 @@ enum WorkerRequest {
         columns: u16,
         response: oneshot::Sender<Result<()>>,
     },
+}
+
+enum ControlRequest {
+    Interrupt {
+        command: MiCommand,
+        deadline: tokio::time::Instant,
+        response: oneshot::Sender<Result<CommandReply>>,
+    },
     Close {
         response: oneshot::Sender<Result<()>>,
     },
 }
 
-// Owns both GDB input and reducer state. Callers cross the request channel so
-// only one MI command can be in flight and no other task can mutate state.
+struct PendingControl {
+    token: u64,
+    deadline: tokio::time::Instant,
+    escalate_at: tokio::time::Instant,
+    escalated: bool,
+    started: std::time::Instant,
+    response: oneshot::Sender<Result<CommandReply>>,
+}
+
+// Owns both GDB input and reducer state. One ordinary MI command may be in
+// flight; the separate control lane admits only interrupt or close.
 struct SessionWorker {
     backend: Box<dyn DebugBackend>,
     journal: Journal,
@@ -686,6 +724,8 @@ struct SessionWorker {
     state_sender: watch::Sender<SessionState>,
     events: broadcast::Sender<PublishedEvent>,
     requests: mpsc::Receiver<WorkerRequest>,
+    controls: mpsc::Receiver<ControlRequest>,
+    controls_open: bool,
     inferior_output: ByteRing,
     target_output: ByteRing,
     console_output: ByteRing,
@@ -716,6 +756,7 @@ impl SessionWorker {
         state_sender: watch::Sender<SessionState>,
         events: broadcast::Sender<PublishedEvent>,
         requests: mpsc::Receiver<WorkerRequest>,
+        controls: mpsc::Receiver<ControlRequest>,
     ) -> Result<Self> {
         let limits = MiLimits {
             max_record_bytes: config.limits.mi_record_bytes,
@@ -811,6 +852,8 @@ impl SessionWorker {
             state_sender,
             events,
             requests,
+            controls,
+            controls_open: true,
             inferior_output,
             target_output,
             console_output,
@@ -1048,6 +1091,16 @@ impl SessionWorker {
     async fn run(mut self) {
         loop {
             tokio::select! {
+                control = self.controls.recv(), if self.controls_open => {
+                    match control {
+                        Some(control) => {
+                            if self.handle_control(control).await {
+                                break;
+                            }
+                        }
+                        None => self.controls_open = false,
+                    }
+                }
                 request = self.requests.recv() => {
                     let Some(request) = request else {
                         let _ = self.close().await;
@@ -1358,16 +1411,44 @@ impl SessionWorker {
             } => {
                 let _ = response.send(self.backend.resize_inferior(rows, columns).await);
             }
-            WorkerRequest::Close { response } => {
-                let result = self.close().await;
-                let _ = response.send(result);
-                return true;
-            }
         }
         if self.fatal {
             let _ = self.backend.shutdown().await;
         }
         self.fatal
+    }
+
+    async fn handle_control(&mut self, control: ControlRequest) -> bool {
+        match control {
+            ControlRequest::Interrupt {
+                command,
+                deadline,
+                response,
+            } => {
+                let result = self.require_known_outcome(&command).and_then(|()| {
+                    (deadline > tokio::time::Instant::now())
+                        .then_some(())
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Timeout,
+                                "interrupt deadline expired while queued",
+                            )
+                            .retryable()
+                        })
+                });
+                let result = match result {
+                    Ok(()) => self.execute_until(command, deadline).await,
+                    Err(error) => Err(error),
+                };
+                let _ = response.send(result);
+                self.fatal
+            }
+            ControlRequest::Close { response } => {
+                let result = self.close().await;
+                let _ = response.send(result);
+                true
+            }
+        }
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -1503,6 +1584,199 @@ impl SessionWorker {
             )
             .retryable());
         }
+        let token = self.begin_command(&command).await?;
+
+        let mut streams = Vec::new();
+        let mut stream_bytes: usize = 0;
+        let mut stream_truncated = false;
+        let mut normal_result = None;
+        let mut pending_control: Option<PendingControl> = None;
+        loop {
+            if pending_control.is_none()
+                && let Some(result) = normal_result.take()
+            {
+                return result;
+            }
+            let mut wake = if normal_result.is_none() {
+                deadline
+            } else {
+                pending_control.as_ref().unwrap().deadline
+            };
+            if let Some(control) = &pending_control {
+                wake = wake.min(control.deadline);
+                if !control.escalated {
+                    wake = wake.min(control.escalate_at);
+                }
+            }
+
+            enum ExecutionInput {
+                Control(Option<ControlRequest>),
+                Backend(Option<BackendInput>),
+                Deadline,
+            }
+            let input = tokio::select! {
+                biased;
+                control = self.controls.recv(), if self.controls_open => {
+                    ExecutionInput::Control(control)
+                }
+                input = self.backend.next_input() => ExecutionInput::Backend(input),
+                _ = tokio::time::sleep_until(wake) => ExecutionInput::Deadline,
+            };
+
+            match input {
+                ExecutionInput::Control(None) => self.controls_open = false,
+                ExecutionInput::Control(Some(ControlRequest::Close { response })) => {
+                    let result = self.close().await;
+                    let _ = response.send(result);
+                    self.fatal = true;
+                    return Err(Error::new(ErrorCode::GdbExited, "session closed"));
+                }
+                ExecutionInput::Control(Some(ControlRequest::Interrupt {
+                    command,
+                    deadline,
+                    response,
+                })) => {
+                    if pending_control.is_some() {
+                        let _ = response.send(Err(Error::new(
+                            ErrorCode::Conflict,
+                            "an interrupt is already pending",
+                        )));
+                    } else if deadline <= tokio::time::Instant::now() {
+                        let _ = response.send(Err(Error::new(
+                            ErrorCode::Timeout,
+                            "interrupt deadline expired while queued",
+                        )
+                        .retryable()));
+                    } else {
+                        match self.begin_command(&command).await {
+                            Ok(control_token) => {
+                                let now = tokio::time::Instant::now();
+                                pending_control = Some(PendingControl {
+                                    token: control_token,
+                                    deadline,
+                                    escalate_at: now + Duration::from_millis(250),
+                                    escalated: false,
+                                    started: std::time::Instant::now(),
+                                    response,
+                                });
+                            }
+                            Err(error) => {
+                                let _ = response.send(Err(error));
+                            }
+                        }
+                    }
+                }
+                ExecutionInput::Deadline => {
+                    let now = tokio::time::Instant::now();
+                    let should_escalate = pending_control
+                        .as_ref()
+                        .is_some_and(|control| !control.escalated && control.escalate_at <= now);
+                    if should_escalate {
+                        // 2026-08-28: A blocked GDB cannot consume the queued
+                        // -exec-interrupt. Escalate only after its MI grace period.
+                        if let Err(error) = self.backend.signal_interrupt() {
+                            let control = pending_control.take().unwrap();
+                            let _ = control.response.send(Err(error));
+                        } else if let Some(control) = &mut pending_control {
+                            control.escalated = true;
+                        }
+                    }
+                    let control_timed_out = pending_control
+                        .as_ref()
+                        .is_some_and(|control| control.deadline <= now);
+                    if control_timed_out {
+                        let control = pending_control.take().unwrap();
+                        self.timed_out_tokens.insert(control.token);
+                        self.apply_event(DomainEvent::CommandOutcomeUnknown {
+                            token: control.token,
+                        })?;
+                        self.metrics.command(
+                            control.started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                            true,
+                        );
+                        let _ = control.response.send(Err(command_timeout(control.token)));
+                    }
+                    if normal_result.is_none() && deadline <= now {
+                        self.timed_out_tokens.insert(token);
+                        self.apply_event(DomainEvent::CommandOutcomeUnknown { token })?;
+                        self.metrics.command(
+                            started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                            true,
+                        );
+                        normal_result = Some(Err(command_timeout(token)));
+                    }
+                }
+                ExecutionInput::Backend(None) => {
+                    return Err(Error::new(ErrorCode::GdbExited, "GDB input channel closed"));
+                }
+                ExecutionInput::Backend(Some(input)) => {
+                    let Some((record, evidence_seq)) = self.process_input(input)? else {
+                        continue;
+                    };
+                    if let Some(delayed) = take_delayed_token(&mut self.timed_out_tokens, &record) {
+                        self.apply_event(DomainEvent::CommandOutcomeResolved { token: delayed })?;
+                    }
+                    let result_token = match &record {
+                        MiRecord::Result {
+                            token: Some(result_token),
+                            ..
+                        } => Some(*result_token),
+                        _ => None,
+                    };
+                    if pending_control
+                        .as_ref()
+                        .is_some_and(|control| Some(control.token) == result_token)
+                    {
+                        let control = pending_control.take().unwrap();
+                        self.metrics.command(
+                            control.started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                            false,
+                        );
+                        let _ = control.response.send(command_reply(
+                            control.token,
+                            record,
+                            evidence_seq,
+                            Vec::new(),
+                            false,
+                        ));
+                        continue;
+                    }
+                    if Some(token) == result_token {
+                        self.metrics.command(
+                            started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                            false,
+                        );
+                        normal_result = Some(command_reply(
+                            token,
+                            record,
+                            evidence_seq,
+                            std::mem::take(&mut streams),
+                            stream_truncated,
+                        ));
+                        continue;
+                    }
+                    if normal_result.is_none()
+                        && matches!(
+                            record,
+                            MiRecord::ConsoleStream(_)
+                                | MiRecord::TargetStream(_)
+                                | MiRecord::LogStream(_)
+                        )
+                    {
+                        let length = stream_len(&record);
+                        if stream_bytes.saturating_add(length) <= self.stream_limit {
+                            stream_bytes += length;
+                            streams.push(record);
+                        } else {
+                            stream_truncated = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn begin_command(&mut self, command: &MiCommand) -> Result<u64> {
         let token = self.next_token;
         self.next_token = self
             .next_token
@@ -1510,85 +1784,8 @@ impl SessionWorker {
             .ok_or_else(|| Error::new(ErrorCode::Internal, "MI token counter exhausted"))?;
         let raw = command.encoded(token);
         self.journal.append_mi_input(token, &raw)?;
-        self.backend.send(token, &command).await?;
-
-        let mut streams = Vec::new();
-        let mut stream_bytes: usize = 0;
-        let mut stream_truncated = false;
-        loop {
-            let input = match tokio::time::timeout_at(deadline, self.backend.next_input()).await {
-                Ok(input) => input,
-                Err(_) => {
-                    self.timed_out_tokens.insert(token);
-                    self.apply_event(DomainEvent::CommandOutcomeUnknown { token })?;
-                    self.metrics.command(
-                        started.elapsed().as_micros().min(u64::MAX as u128) as u64,
-                        true,
-                    );
-                    return Err(Error::new(
-                        ErrorCode::Timeout,
-                        // 2026-08-28: A timeout does not prove that GDB ignored
-                        // the command or that target state remained unchanged.
-                        format!("MI token {token} timed out; command completion is unknown"),
-                    )
-                    .retryable());
-                }
-            }
-            .ok_or_else(|| Error::new(ErrorCode::GdbExited, "GDB input channel closed"))?;
-            let Some((record, evidence_seq)) = self.process_input(input)? else {
-                continue;
-            };
-            if let Some(delayed) = take_delayed_token(&mut self.timed_out_tokens, &record) {
-                self.apply_event(DomainEvent::CommandOutcomeResolved { token: delayed })?;
-            }
-            if let MiRecord::Result {
-                token: Some(result_token),
-                class,
-                results,
-            } = &record
-                && *result_token == token
-            {
-                if class == "error" {
-                    self.metrics.command(
-                        started.elapsed().as_micros().min(u64::MAX as u128) as u64,
-                        false,
-                    );
-                    let message =
-                        MiResult::find_str(results, "msg").unwrap_or("GDB command failed");
-                    return Err(Error::new(ErrorCode::GdbError, message).with_details(
-                        serde_json::json!({
-                            "token": token,
-                            "record": record,
-                            "evidence_seq": evidence_seq
-                        }),
-                    ));
-                }
-                self.metrics.command(
-                    started.elapsed().as_micros().min(u64::MAX as u128) as u64,
-                    false,
-                );
-                return Ok(CommandReply {
-                    token,
-                    class: class.clone(),
-                    record,
-                    stream_records: streams,
-                    stream_truncated,
-                    evidence_seq,
-                });
-            }
-            if matches!(
-                record,
-                MiRecord::ConsoleStream(_) | MiRecord::TargetStream(_) | MiRecord::LogStream(_)
-            ) {
-                let length = stream_len(&record);
-                if stream_bytes.saturating_add(length) <= self.stream_limit {
-                    stream_bytes += length;
-                    streams.push(record);
-                } else {
-                    stream_truncated = true;
-                }
-            }
-        }
+        self.backend.send(token, command).await?;
+        Ok(token)
     }
 
     fn process_input(&mut self, input: BackendInput) -> Result<Option<(MiRecord, u64)>> {
@@ -1865,6 +2062,63 @@ fn stream_len(record: &MiRecord) -> usize {
     }
 }
 
+fn command_timeout(token: u64) -> Error {
+    Error::new(
+        ErrorCode::Timeout,
+        // 2026-08-28: A timeout does not prove that GDB ignored the command or
+        // that target state remained unchanged.
+        format!("MI token {token} timed out; command completion is unknown"),
+    )
+    .retryable()
+}
+
+fn command_reply(
+    token: u64,
+    record: MiRecord,
+    evidence_seq: u64,
+    stream_records: Vec<MiRecord>,
+    stream_truncated: bool,
+) -> Result<CommandReply> {
+    let MiRecord::Result {
+        token: Some(result_token),
+        class,
+        results,
+    } = &record
+    else {
+        return Err(Error::new(
+            ErrorCode::Internal,
+            "matched MI command record is not a result",
+        ));
+    };
+    if *result_token != token {
+        return Err(Error::new(
+            ErrorCode::Internal,
+            "matched MI command token changed",
+        ));
+    }
+    if class == "error" {
+        let message = MiResult::find_str(results, "msg")
+            .unwrap_or("GDB command failed")
+            .to_owned();
+        return Err(
+            Error::new(ErrorCode::GdbError, message).with_details(serde_json::json!({
+                "token": token,
+                "record": record,
+                "evidence_seq": evidence_seq
+            })),
+        );
+    }
+    let class = class.clone();
+    Ok(CommandReply {
+        token,
+        class,
+        record,
+        stream_records,
+        stream_truncated,
+        evidence_seq,
+    })
+}
+
 // 2026-08-28: Delayed results were detected only while the worker was idle;
 // another command could consume them without scheduling reconciliation.
 fn take_delayed_token(timed_out: &mut HashSet<u64>, record: &MiRecord) -> Option<u64> {
@@ -1929,6 +2183,39 @@ mod tests {
 
     use super::*;
     use crate::config::{ArtifactConfig, PersistenceConfig};
+
+    async fn control_test_session() -> Option<SessionHandle> {
+        if std::process::Command::new("gdb")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return None;
+        }
+        let directory = tempdir().unwrap();
+        let path = directory.keep();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: path.join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: path.join("state.sqlite"),
+                sessions: path.join("sessions"),
+            },
+            ..Config::default()
+        };
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        Some(
+            SessionHandle::start(
+                Arc::new(config),
+                Profile::RawAdmin,
+                store,
+                Arc::new(Metrics::default()),
+            )
+            .await
+            .unwrap(),
+        )
+    }
 
     #[test]
     fn reads_mi_command_probe_value() {
@@ -2189,6 +2476,77 @@ mod tests {
             .await
             .unwrap();
         session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupt_preempts_blocked_command() {
+        let Some(session) = control_test_session().await else {
+            return;
+        };
+        let slow_session = session.clone();
+        let slow = tokio::spawn(async move {
+            slow_session
+                .command_with_timeout(
+                    MiCommand::new("-interpreter-exec")
+                        .unwrap()
+                        .bare("console")
+                        .unwrap()
+                        .string("shell sleep 5"),
+                    Duration::from_secs(10),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let started = std::time::Instant::now();
+        let interrupt = session
+            .interrupt(MiCommand::new("-exec-interrupt").unwrap())
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        if let Err(error) = interrupt {
+            assert_eq!(error.code, ErrorCode::GdbError);
+        }
+        tokio::time::timeout(Duration::from_secs(2), slow)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_preempts_blocked_command() {
+        let Some(session) = control_test_session().await else {
+            return;
+        };
+        let slow_session = session.clone();
+        let slow = tokio::spawn(async move {
+            slow_session
+                .command_with_timeout(
+                    MiCommand::new("-interpreter-exec")
+                        .unwrap()
+                        .bare("console")
+                        .unwrap()
+                        .string("shell sleep 10"),
+                    Duration::from_secs(20),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let started = std::time::Instant::now();
+        session.close().await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(
+            session.state().lifecycle,
+            crate::domain::SessionLifecycle::Closed
+        );
+        let error = tokio::time::timeout(Duration::from_secs(1), slow)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::GdbExited);
     }
 
     #[tokio::test]

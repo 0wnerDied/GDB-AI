@@ -170,6 +170,7 @@ pub trait DebugBackend: Send {
     async fn next_input(&mut self) -> Option<BackendInput>;
     async fn write_inferior(&mut self, bytes: &[u8]) -> Result<()>;
     async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()>;
+    fn signal_interrupt(&mut self) -> Result<()>;
     fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>>;
     async fn shutdown(&mut self) -> Result<()>;
 }
@@ -411,6 +412,36 @@ impl GdbBackend {
         })
     }
 
+    pub fn signal_interrupt(&mut self) -> Result<()> {
+        let pid = self
+            .child
+            .id()
+            .ok_or_else(|| Error::new(ErrorCode::GdbExited, "GDB process has exited"))?;
+        let signal = nix::sys::signal::Signal::SIGINT;
+        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid as i32), signal).map_err(
+            |error| {
+                Error::new(
+                    ErrorCode::GdbUnresponsive,
+                    format!("cannot signal GDB process group: {error}"),
+                )
+            },
+        )?;
+        // 2026-08-28: GDB CLI helpers may create a separate process group, so
+        // signaling GDB's group alone left the helper blocking its event loop.
+        for descendant in process_descendants(pid) {
+            let result = nix::sys::signal::kill(nix::unistd::Pid::from_raw(descendant), signal);
+            if let Err(error) = result
+                && error != nix::errno::Errno::ESRCH
+            {
+                return Err(Error::new(
+                    ErrorCode::GdbUnresponsive,
+                    format!("cannot signal GDB child {descendant}: {error}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub async fn shutdown(&mut self) -> Result<()> {
         if self.child.try_wait()?.is_none() {
             let _ = self.stdin.write_all(b"-gdb-exit\n").await;
@@ -461,6 +492,10 @@ impl DebugBackend for GdbBackend {
         self.resize_inferior(rows, columns).await
     }
 
+    fn signal_interrupt(&mut self) -> Result<()> {
+        self.signal_interrupt()
+    }
+
     fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
         self.try_wait()
     }
@@ -468,6 +503,28 @@ impl DebugBackend for GdbBackend {
     async fn shutdown(&mut self) -> Result<()> {
         self.shutdown().await
     }
+}
+
+fn process_descendants(root: u32) -> Vec<i32> {
+    fn collect(parent: i32, descendants: &mut Vec<i32>) {
+        let path = format!("/proc/{parent}/task/{parent}/children");
+        let Ok(children) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for child in children
+            .split_ascii_whitespace()
+            .filter_map(|child| child.parse::<i32>().ok())
+        {
+            collect(child, descendants);
+            descendants.push(child);
+        }
+    }
+
+    let mut descendants = Vec::new();
+    if let Ok(root) = i32::try_from(root) {
+        collect(root, &mut descendants);
+    }
+    descendants
 }
 
 fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> std::io::Result<()> {
