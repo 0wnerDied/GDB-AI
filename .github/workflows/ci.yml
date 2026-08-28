@@ -90,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        series: ["6.1", "6.12"]
+        series: ["6.1", "6.12", "6.12-arm64"]
     env:
       GDB_AI_REQUIRE_INTEGRATION: "1"
       GDB_AI_REQUIRE_KERNEL_INTEGRATION: "1"
@@ -102,7 +102,9 @@ jobs:
       - name: Install kernel debugger prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y busybox-static cpio curl gdb qemu-system-x86 xz-utils
+          sudo apt-get install -y \
+            busybox-static cpio curl gdb gdb-multiarch \
+            qemu-system-arm qemu-system-x86 xz-utils
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/gdb-ai-kernel/downloads

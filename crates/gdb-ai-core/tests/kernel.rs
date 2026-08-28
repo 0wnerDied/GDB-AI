@@ -50,17 +50,22 @@ fn build_initramfs(directory: &std::path::Path, module: &std::path::Path) -> Pat
     for path in ["bin", "dev", "proc", "sys"] {
         std::fs::create_dir_all(root.join(path)).unwrap();
     }
-    let busybox = ["/usr/bin/busybox", "/bin/busybox"]
-        .into_iter()
+    let busybox = std::env::var_os("GDB_AI_KERNEL_BUSYBOX")
         .map(PathBuf::from)
-        .find(|path| path.is_file())
+        .or_else(|| {
+            ["/usr/bin/busybox", "/bin/busybox"]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.is_file())
+        })
         .expect("busybox must be installed for kernel integration");
+    assert!(busybox.is_file(), "kernel busybox must name a file");
     std::fs::copy(busybox, root.join("bin/busybox")).unwrap();
-    std::fs::copy(module, root.join("irqbypass.ko")).unwrap();
+    std::fs::copy(module, root.join("test.ko")).unwrap();
     let init = root.join("init");
     std::fs::write(
         &init,
-        "#!/bin/busybox sh\n/bin/busybox mount -t proc proc /proc\n/bin/busybox insmod /irqbypass.ko\n",
+        "#!/bin/busybox sh\n/bin/busybox mount -t proc proc /proc\n/bin/busybox insmod /test.ko\n",
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&init).unwrap().permissions();
@@ -113,7 +118,19 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     let Some((kernel_image, vmlinux, module)) = kernel_artifacts() else {
         return;
     };
-    if !support::require_commands(&["cpio", "gdb", "qemu-system-x86_64"]) {
+    let architecture = std::env::var("GDB_AI_KERNEL_ARCH").unwrap_or_else(|_| "x86_64".into());
+    let (gdb, qemu, console, expected_architecture, base_prefix) = match architecture.as_str() {
+        "x86_64" => ("gdb", "qemu-system-x86_64", "ttyS0", "x86-64", "0xffffffff"),
+        "aarch64" => (
+            "gdb-multiarch",
+            "qemu-system-aarch64",
+            "ttyAMA0",
+            "aarch64",
+            "0xffff",
+        ),
+        value => panic!("unsupported kernel integration architecture: {value}"),
+    };
+    if !support::require_commands(&["cpio", gdb, qemu]) {
         return;
     }
 
@@ -122,14 +139,24 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = listener.local_addr().unwrap().to_string();
     drop(listener);
+    let mut qemu_command = Command::new(qemu);
+    if architecture == "aarch64" {
+        qemu_command.args(["-machine", "virt,accel=tcg", "-cpu", "max"]);
+    } else {
+        qemu_command.args(["-accel", "tcg"]);
+    }
     let _qemu = ChildGuard(
-        Command::new("qemu-system-x86_64")
-            .args(["-accel", "tcg", "-m", "512M", "-smp", "1", "-S"])
+        qemu_command
+            .args(["-m", "512M", "-smp", "1", "-S"])
             .arg("-kernel")
             .arg(&kernel_image)
             .arg("-initrd")
             .arg(initramfs)
-            .args(["-append", "console=ttyS0 nokaslr rdinit=/init", "-gdb"])
+            .args([
+                "-append",
+                &format!("console={console} nokaslr rdinit=/init"),
+            ])
+            .arg("-gdb")
             .arg(format!("tcp:{endpoint}"))
             .args(["-display", "none", "-serial", "none", "-monitor", "none"])
             .stdout(Stdio::null())
@@ -149,6 +176,7 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
         },
         ..Config::default()
     };
+    config.gdb.path = gdb.into();
     config.security.default_profile = Profile::RawAdmin;
     config.security.workspace_roots = vec![
         directory.path().to_owned(),
@@ -293,7 +321,7 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     .await;
     assert_eq!(
         capabilities.result.as_ref().unwrap()["architecture"],
-        "x86-64"
+        expected_architecture
     );
     assert_eq!(
         capabilities.result.as_ref().unwrap()["transport"],
@@ -343,8 +371,8 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     assert!(
         base.result.as_ref().unwrap()["address"]
             .as_str()
-            .is_some_and(|address| address.starts_with("0xffffffff")),
-        "kernel base must be a canonical x86-64 kernel address"
+            .is_some_and(|address| address.starts_with(base_prefix)),
+        "kernel base must be a canonical {expected_architecture} kernel address"
     );
 
     let tasks = call(
@@ -457,13 +485,17 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     )
     .await;
     let loaded_modules_result = loaded_modules.result.as_ref().unwrap();
+    let module_name =
+        std::env::var("GDB_AI_KERNEL_MODULE_NAME").unwrap_or_else(|_| "irqbypass".into());
     let loaded_module = loaded_modules_result["modules"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|module| module["name"] == "irqbypass")
+        .find(|module| module["name"] == module_name)
         .unwrap_or_else(|| {
-            panic!("irqbypass module must be visible at do_init_module: {loaded_modules_result}")
+            panic!(
+                "{module_name} module must be visible at do_init_module: {loaded_modules_result}"
+            )
         });
     assert_ne!(loaded_module["base"], "0x0000000000000000");
     assert!(loaded_module["size"].as_u64().is_some_and(|size| size > 0));

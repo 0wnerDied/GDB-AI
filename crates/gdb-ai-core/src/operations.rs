@@ -3049,13 +3049,14 @@ impl Gateway {
                     .command(MiCommand::new("-data-list-register-names")?)
                     .await?;
                 let names = result_string_list(&names_reply.record, "register-names");
-                let (architecture, current_task) = if names.iter().any(|name| name == "gs_base") {
-                    ("x86-64", "gs_base + current_task per-CPU offset")
-                } else if names.iter().any(|name| name == "sp_el0") {
-                    ("aarch64", "sp_el0")
-                } else {
-                    ("unknown", "unavailable")
-                };
+                let (architecture, current_task) =
+                    if find_register_name(&names, "gs_base").is_some() {
+                        ("x86-64", "gs_base + current_task per-CPU offset")
+                    } else if find_register_name(&names, "sp_el0").is_some() {
+                        ("aarch64", "sp_el0")
+                    } else {
+                        ("unknown", "unavailable")
+                    };
                 let symbols =
                     match kernel_address(&entry, &request.parameters, &state, "&init_task").await {
                         Ok(symbols) => Some(symbols),
@@ -4696,7 +4697,7 @@ async fn kernel_current_text(
         .command(MiCommand::new("-data-list-register-names")?)
         .await?;
     let names = result_string_list(&reply.record, "register-names");
-    if names.iter().any(|name| name == "gs_base") {
+    if find_register_name(&names, "gs_base").is_some() {
         // 2026-08-28: Newer x86 kernels moved current_task into pcpu_hot,
         // while older distribution symbols expose the standalone per-CPU
         // variable. Try only the two documented layouts and preserve any
@@ -4713,8 +4714,14 @@ async fn kernel_current_text(
             .await,
             Err(error) => Err(error),
         }
-    } else if names.iter().any(|name| name == "sp_el0") {
-        kernel_text(entry, parameters, state, "(struct task_struct *)$sp_el0").await
+    } else if let Some(sp_el0) = find_register_name(&names, "sp_el0") {
+        kernel_text(
+            entry,
+            parameters,
+            state,
+            &format!("(struct task_struct *)${sp_el0}"),
+        )
+        .await
     } else {
         Err(Error::new(
             ErrorCode::CapabilityMissing,
@@ -5446,9 +5453,9 @@ fn register_role_candidates(role: &str) -> Option<&'static [&'static str]> {
 fn target_architecture(register_names: &[String]) -> &'static str {
     // 2026-08-29: `-gdb-show architecture` reports the configured selector
     // `auto`, not the architecture selected from a live remote target.
-    if register_names.iter().any(|name| name == "rip") {
+    if find_register_name(register_names, "rip").is_some() {
         "i386:x86-64"
-    } else if register_names.iter().any(|name| name == "x29") {
+    } else if find_register_name(register_names, "x29").is_some() {
         "aarch64"
     } else {
         "unknown"
@@ -5456,8 +5463,8 @@ fn target_architecture(register_names: &[String]) -> &'static str {
 }
 
 fn resolve_register_name(requested: &str, names: &[String]) -> Result<String> {
-    if names.iter().any(|name| name == requested) {
-        return Ok(requested.to_owned());
+    if let Some(name) = find_register_name(names, requested) {
+        return Ok(name.to_owned());
     }
     let candidates = register_role_candidates(requested).ok_or_else(|| {
         Error::new(
@@ -5465,16 +5472,25 @@ fn resolve_register_name(requested: &str, names: &[String]) -> Result<String> {
             format!("unknown register or role {requested}"),
         )
     })?;
-    names
+    candidates
         .iter()
-        .find(|name| candidates.contains(&name.as_str()))
-        .cloned()
+        .find_map(|candidate| find_register_name(names, candidate))
+        .map(str::to_owned)
         .ok_or_else(|| {
             Error::new(
                 ErrorCode::CapabilityMissing,
                 format!("target has no register for role {requested}"),
             )
         })
+}
+
+fn find_register_name<'a>(names: &'a [String], requested: &str) -> Option<&'a str> {
+    // 2026-08-29: QEMU preserves uppercase AArch64 system-register names in
+    // its target description; a lowercase exact lookup made `$sp_el0` void.
+    names
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case(requested))
+        .map(String::as_str)
 }
 
 fn valid_integer_literal(value: &str) -> bool {
