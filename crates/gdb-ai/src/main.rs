@@ -640,6 +640,20 @@ where
                         continue;
                     }
                 };
+                let progress_token = match progress_token(&params) {
+                    Ok(progress_token) => progress_token,
+                    Err(error) => {
+                        write_rpc(&mut output, rpc_fault(id, error)).await?;
+                        continue;
+                    }
+                };
+                if let Some(token) = &progress_token {
+                    write_rpc(
+                        &mut output,
+                        progress_notification(token.clone(), 0, "request started"),
+                    )
+                    .await?;
+                }
                 let gateway = gateway.clone();
                 let caller = caller.clone();
                 let responses = responses.clone();
@@ -662,6 +676,14 @@ where
                         ),
                         Err(error) => rpc_error(id, -32603, error.to_string()),
                     };
+                    if let Some(token) = progress_token {
+                        let _ = responses
+                            .send((
+                                None,
+                                progress_notification(token, 1, "request completed"),
+                            ))
+                            .await;
+                    }
                     let _ = responses.send((Some(task_key), response)).await;
                 });
                 pending.insert(
@@ -1313,6 +1335,35 @@ fn request_cancellation(method: &str, params: &Value) -> Result<RequestCancellat
         mode,
         session_id,
         lease_id,
+    })
+}
+
+fn progress_token(params: &Value) -> Result<Option<Value>, RpcFault> {
+    let Some(token) = params
+        .get("_meta")
+        .and_then(|metadata| metadata.get("progressToken"))
+    else {
+        return Ok(None);
+    };
+    if token.is_string() || token.is_number() {
+        Ok(Some(token.clone()))
+    } else {
+        Err(RpcFault::invalid(
+            "_meta.progressToken must be a string or number",
+        ))
+    }
+}
+
+fn progress_notification(token: Value, progress: u64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": progress,
+            "total": 1,
+            "message": message
+        }
     })
 }
 
@@ -2157,10 +2208,22 @@ mod tests {
         .unwrap();
         write_rpc(
             &mut client_output,
-            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {"_meta": {"progressToken": "list-progress"}}
+            }),
         )
         .await
         .unwrap();
+        let started = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(started["method"], "notifications/progress");
+        assert_eq!(started["params"]["progressToken"], "list-progress");
+        assert_eq!(started["params"]["progress"], 0);
+        let completed = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(completed["method"], "notifications/progress");
+        assert_eq!(completed["params"]["progress"], 1);
         let tools = read_json_line(&mut client_input).await.unwrap();
         assert!(tools["result"]["tools"].as_array().is_some());
         client_output.shutdown().await.unwrap();

@@ -14,6 +14,10 @@ without translating it into a tool action. Rust method contracts validate
 allowed, required, and typed parameters and generate both the canonical JSON
 Schema branches and MCP tool input schemas.
 
+Stdio and Unix stream clients may attach `_meta.progressToken` to a request.
+GDB/AI emits ordered `notifications/progress` records before and after the
+operation while continuing to accept cancellation and I/O requests.
+
 Large results return `gdbai://artifact/sha256:...`. Artifact reads re-check
 session ownership; the URI itself is not authorization. `artifact.get` uses
 `offset` and `max_bytes` and reports `next_offset` plus `truncated` so binary
