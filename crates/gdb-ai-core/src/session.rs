@@ -222,7 +222,7 @@ impl SessionHandle {
         self.requests
             .send(WorkerRequest::Command {
                 command,
-                timeout: timeout.max(Duration::from_millis(1)),
+                deadline: command_deadline(timeout),
                 response: sender,
             })
             .await
@@ -244,7 +244,7 @@ impl SessionHandle {
                 before,
                 command,
                 after,
-                timeout: self.command_timeout,
+                deadline: command_deadline(self.command_timeout),
                 response: sender,
             })
             .await
@@ -259,7 +259,7 @@ impl SessionHandle {
         self.requests
             .send(WorkerRequest::SafeEvaluate {
                 command,
-                timeout: self.command_timeout,
+                deadline: command_deadline(self.command_timeout),
                 response: sender,
             })
             .await
@@ -584,22 +584,26 @@ fn terminal(status: InferiorStatus) -> bool {
     )
 }
 
+fn command_deadline(timeout: Duration) -> tokio::time::Instant {
+    tokio::time::Instant::now() + timeout.max(Duration::from_millis(1))
+}
+
 enum WorkerRequest {
     Command {
         command: MiCommand,
-        timeout: Duration,
+        deadline: tokio::time::Instant,
         response: oneshot::Sender<Result<CommandReply>>,
     },
     Transaction {
         before: Vec<MiCommand>,
         command: MiCommand,
         after: Vec<MiCommand>,
-        timeout: Duration,
+        deadline: tokio::time::Instant,
         response: oneshot::Sender<Result<CommandReply>>,
     },
     SafeEvaluate {
         command: MiCommand,
-        timeout: Duration,
+        deadline: tokio::time::Instant,
         response: oneshot::Sender<Result<CommandReply>>,
     },
     RecordEvent {
@@ -1078,42 +1082,42 @@ impl SessionWorker {
         match request {
             WorkerRequest::Command {
                 command,
-                timeout,
+                deadline,
                 response,
             } => {
                 if let Err(error) = self.require_known_outcome(&command) {
                     let _ = response.send(Err(error));
                     return false;
                 }
-                self.cleanup_stale_values(timeout).await;
-                let _ = response.send(self.execute(command, timeout).await);
+                self.cleanup_stale_values(deadline).await;
+                let _ = response.send(self.execute_until(command, deadline).await);
             }
             WorkerRequest::Transaction {
                 before,
                 command,
                 after,
-                timeout,
+                deadline,
                 response,
             } => {
                 if let Err(error) = self.require_known_outcome(&command) {
                     let _ = response.send(Err(error));
                     return false;
                 }
-                self.cleanup_stale_values(timeout).await;
+                self.cleanup_stale_values(deadline).await;
                 let mut setup = Ok(());
                 for command in before {
-                    if let Err(error) = self.execute(command, timeout).await {
+                    if let Err(error) = self.execute_until(command, deadline).await {
                         setup = Err(error);
                         break;
                     }
                 }
                 let result = match setup {
-                    Ok(()) => self.execute(command, timeout).await,
+                    Ok(()) => self.execute_until(command, deadline).await,
                     Err(error) => Err(error),
                 };
                 let mut restoration_error = None;
                 for command in after {
-                    if let Err(error) = self.execute(command, timeout).await {
+                    if let Err(error) = self.execute_until(command, deadline).await {
                         restoration_error = Some(error);
                         break;
                     }
@@ -1132,15 +1136,15 @@ impl SessionWorker {
             }
             WorkerRequest::SafeEvaluate {
                 command,
-                timeout,
+                deadline,
                 response,
             } => {
                 if let Err(error) = self.require_known_outcome(&command) {
                     let _ = response.send(Err(error));
                     return false;
                 }
-                self.cleanup_stale_values(timeout).await;
-                let _ = response.send(self.execute_safe(command, timeout).await);
+                self.cleanup_stale_values(deadline).await;
+                let _ = response.send(self.execute_safe(command, deadline).await);
             }
             WorkerRequest::RecordEvent { event, response } => {
                 let _ = response.send(self.apply_event(event));
@@ -1377,7 +1381,7 @@ impl SessionWorker {
         Ok(())
     }
 
-    async fn cleanup_stale_values(&mut self, timeout: Duration) {
+    async fn cleanup_stale_values(&mut self, deadline: tokio::time::Instant) {
         if !self.reducer.state().inferiors.values().any(|inferior| {
             matches!(
                 inferior.status,
@@ -1392,7 +1396,7 @@ impl SessionWorker {
             else {
                 continue;
             };
-            let _ = self.execute(command, timeout).await;
+            let _ = self.execute_until(command, deadline).await;
         }
     }
 
@@ -1418,7 +1422,7 @@ impl SessionWorker {
     async fn execute_safe(
         &mut self,
         command: MiCommand,
-        timeout: Duration,
+        deadline: tokio::time::Instant,
     ) -> Result<CommandReply> {
         const SETTINGS: [&str; 3] = [
             "may-call-functions",
@@ -1428,7 +1432,7 @@ impl SessionWorker {
         let mut originals = Vec::new();
         for setting in SETTINGS {
             let reply = self
-                .execute(MiCommand::new("-gdb-show")?.bare(setting)?, timeout)
+                .execute_until(MiCommand::new("-gdb-show")?.bare(setting)?, deadline)
                 .await?;
             let value = MiResult::find_str(reply.record.results(), "value")
                 .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB setting has no value"))?;
@@ -1439,9 +1443,9 @@ impl SessionWorker {
         let mut setup_error = None;
         for setting in SETTINGS {
             if let Err(error) = self
-                .execute(
+                .execute_until(
                     MiCommand::new("-gdb-set")?.bare(setting)?.bare("off")?,
-                    timeout,
+                    deadline,
                 )
                 .await
             {
@@ -1451,14 +1455,14 @@ impl SessionWorker {
         }
         let result = match setup_error {
             Some(error) => Err(error),
-            None => self.execute(command, timeout).await,
+            None => self.execute_until(command, deadline).await,
         };
         let mut restoration_error = None;
         for (setting, value) in originals {
             if let Err(error) = self
-                .execute(
+                .execute_until(
                     MiCommand::new("-gdb-set")?.bare(setting)?.bare(value)?,
-                    timeout,
+                    deadline,
                 )
                 .await
             {
@@ -1480,7 +1484,25 @@ impl SessionWorker {
     }
 
     async fn execute(&mut self, command: MiCommand, timeout: Duration) -> Result<CommandReply> {
+        self.execute_until(command, command_deadline(timeout)).await
+    }
+
+    async fn execute_until(
+        &mut self,
+        command: MiCommand,
+        deadline: tokio::time::Instant,
+    ) -> Result<CommandReply> {
         let started = std::time::Instant::now();
+        // 2026-08-28: Starting the timeout inside the worker let requests sit
+        // past their API deadline and then execute. Expired work never reaches GDB.
+        if deadline <= tokio::time::Instant::now() {
+            self.metrics.command(0, true);
+            return Err(Error::new(
+                ErrorCode::Timeout,
+                "MI command deadline expired while queued",
+            )
+            .retryable());
+        }
         let token = self.next_token;
         self.next_token = self
             .next_token
@@ -1490,7 +1512,6 @@ impl SessionWorker {
         self.journal.append_mi_input(token, &raw)?;
         self.backend.send(token, &command).await?;
 
-        let deadline = tokio::time::Instant::now() + timeout;
         let mut streams = Vec::new();
         let mut stream_bytes: usize = 0;
         let mut stream_truncated = false;
@@ -2106,6 +2127,67 @@ mod tests {
         .await
         .unwrap();
         assert!(session.state().reconciliation_required);
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn queue_wait_counts_toward_command_deadline() {
+        if std::process::Command::new("gdb")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let session = SessionHandle::start(
+            Arc::new(config),
+            Profile::RawAdmin,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+        let slow_session = session.clone();
+        let slow = tokio::spawn(async move {
+            slow_session
+                .command_with_timeout(
+                    MiCommand::new("-interpreter-exec")
+                        .unwrap()
+                        .bare("console")
+                        .unwrap()
+                        .string("shell sleep 0.3"),
+                    Duration::from_secs(1),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let expired = session
+            .command_with_timeout(
+                MiCommand::new("-gdb-version").unwrap(),
+                Duration::from_millis(20),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(expired.code, ErrorCode::Timeout);
+        assert!(session.state().outcome_unknown_tokens.is_empty());
+        slow.await.unwrap().unwrap();
+        session
+            .command(MiCommand::new("-gdb-version").unwrap())
+            .await
+            .unwrap();
         session.close().await.unwrap();
     }
 
