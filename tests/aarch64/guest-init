@@ -43,6 +43,6 @@ export TMPDIR=/tmp
 echo "architecture=$(/bin/busybox uname -m)"
 gdb --version | /bin/busybox sed -n '1p'
 
-for test_name in vertical core remote; do
+for test_name in vertical attach core remote; do
     "$repository/target/aarch64-system-tests/$test_name" --nocapture
 done

@@ -137,7 +137,7 @@ jobs:
             debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 \
             uname -m)
           test "$architecture" = aarch64
-      - name: Verify native AArch64 launch, core, and gdbserver
+      - name: Verify native AArch64 launch, attach, core, and gdbserver
         run: tests/aarch64/run-system.sh "$RUNNER_TEMP/aarch64-system"
 
   compatibility:

@@ -36,7 +36,7 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CARGO_TARGET_DIR="$work/cargo-target" \
     cargo test --locked -p gdb-ai-core \
         --target aarch64-unknown-linux-gnu \
-        --test vertical --test core --test remote --no-run
+        --test vertical --test attach --test core --test remote --no-run
 
 copy_test() {
     name=$1
@@ -60,6 +60,7 @@ copy_test() {
 }
 
 copy_test vertical
+copy_test attach
 copy_test core
 copy_test remote
 
@@ -77,7 +78,7 @@ mkdir -p "$guest_repository/crates/gdb-ai-core" \
     "$guest_repository/tests/targets" \
     "$guest_repository/target/aarch64-system-tests"
 cp -a "$repository/tests/targets/c" "$guest_repository/tests/targets/"
-for test_name in vertical core remote; do
+for test_name in vertical attach core remote; do
     install -m 755 "$work/tests/$test_name" \
         "$guest_repository/target/aarch64-system-tests/$test_name"
 done
