@@ -240,6 +240,10 @@ async fn local_debugging_vertical_slice() {
         .unwrap()
         .0
         .clone();
+    let continued_operation = continued.result.as_ref().unwrap()["operation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert_ne!(first_stop, second_stop);
     let invalid_snapshot = gateway
         .dispatch(
@@ -758,6 +762,25 @@ async fn local_debugging_vertical_slice() {
         .unwrap()
         .0
         .clone();
+    let superseded_wait = gateway
+        .dispatch(
+            request(
+                "superseded-operation-wait",
+                Some(&session_id),
+                "execution.wait",
+                None,
+                json!({
+                    "operation_id": continued_operation,
+                    "wait": {"until": "snapshot", "timeout_ms": 100}
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(
+        superseded_wait.error.unwrap().code,
+        gdb_ai_core::ErrorCode::StaleContext
+    );
     let stale_value = gateway
         .dispatch(
             request(

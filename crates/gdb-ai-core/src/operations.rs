@@ -18,7 +18,7 @@ use crate::{
     domain::{
         BreakpointLocationState, DomainEvent, FrameId, FrameSummary, LeaseId, OperationId,
         OperationRecord, OperationStatus, SessionId, SignalPolicyState, StopId, TargetOrigin,
-        TrackingDefinition, TrackingId, ValueBinding, ValueId, WriteLease,
+        TrackingDefinition, TrackingId, ValueBinding, ValueId, WaitBaseline, WriteLease,
     },
     gateway::{Caller, Gateway, SessionEntry, now_unix_ms, same_principal},
     policy::{Profile, validate_console_command},
@@ -729,6 +729,10 @@ impl Gateway {
             kind: format!("execution.{action}"),
             status: OperationStatus::Accepted,
             created_revision: state.revision,
+            wait_baseline: Some(WaitBaseline::from(&state)),
+            expected_execution_epoch: Some(
+                state.execution_epoch + u64::from(action != "interrupt"),
+            ),
             accepted_event_seq: None,
             completed_event_seq: None,
             error: None,
@@ -841,7 +845,32 @@ impl Gateway {
         let wait = wait_spec(&request.parameters)?.ok_or_else(|| {
             Error::new(ErrorCode::InvalidArgument, "wait parameters are required")
         })?;
-        let state = apply_wait(&entry.handle, wait, None).await?;
+        // 2026-08-28: Waiting without the operation's creation baseline let
+        // an unrelated current or future state complete the wrong operation.
+        let baseline = operation
+            .as_ref()
+            .map(|operation| {
+                operation.wait_baseline.as_ref().ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidState,
+                        "operation predates attributable wait state",
+                    )
+                })
+            })
+            .transpose()?;
+        let expected_execution_epoch = operation
+            .as_ref()
+            .map(|operation| {
+                operation.expected_execution_epoch.ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidState,
+                        "operation predates attributable execution state",
+                    )
+                })
+            })
+            .transpose()?;
+        let state =
+            apply_wait_baseline(&entry.handle, wait, baseline, expected_execution_epoch).await?;
         if let Some(operation) = &mut operation {
             operation.status = OperationStatus::Completed;
             operation.completed_event_seq = Some(state.event_seq);
@@ -2444,6 +2473,8 @@ impl Gateway {
             kind: request.method.clone(),
             status: OperationStatus::WaitingForState,
             created_revision: initial.revision,
+            wait_baseline: Some(WaitBaseline::from(&initial)),
+            expected_execution_epoch: None,
             accepted_event_seq: Some(inserted.evidence_seq),
             completed_event_seq: None,
             error: None,
@@ -3292,6 +3323,16 @@ async fn apply_wait(
     wait: WaitSpec,
     baseline: Option<&crate::domain::SessionState>,
 ) -> Result<crate::domain::SessionState> {
+    let baseline = baseline.map(WaitBaseline::from);
+    apply_wait_baseline(handle, wait, baseline.as_ref(), None).await
+}
+
+async fn apply_wait_baseline(
+    handle: &SessionHandle,
+    wait: WaitSpec,
+    baseline: Option<&WaitBaseline>,
+    expected_execution_epoch: Option<u64>,
+) -> Result<crate::domain::SessionState> {
     wait.validate()?;
     let until = match wait.until.as_str() {
         "accepted" => return Ok(handle.state()),
@@ -3307,9 +3348,14 @@ async fn apply_wait(
         }
     };
     let timeout = Duration::from_millis(wait.timeout_ms);
-    match baseline {
-        Some(baseline) => handle.wait_after(until, timeout, baseline).await,
-        None => handle.wait(until, timeout).await,
+    match (baseline, expected_execution_epoch) {
+        (Some(baseline), Some(expected_execution_epoch)) => {
+            handle
+                .wait_for_operation(until, timeout, baseline, expected_execution_epoch)
+                .await
+        }
+        (Some(baseline), None) => handle.wait_after_baseline(until, timeout, baseline).await,
+        (None, _) => handle.wait(until, timeout).await,
     }
 }
 

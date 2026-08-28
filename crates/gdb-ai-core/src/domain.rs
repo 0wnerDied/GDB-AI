@@ -142,9 +142,21 @@ pub struct OperationRecord {
     pub kind: String,
     pub status: OperationStatus,
     pub created_revision: u64,
+    #[serde(default)]
+    pub wait_baseline: Option<WaitBaseline>,
+    #[serde(default)]
+    pub expected_execution_epoch: Option<u64>,
     pub accepted_event_seq: Option<u64>,
     pub completed_event_seq: Option<u64>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitBaseline {
+    pub event_seq: u64,
+    pub execution_epoch: u64,
+    pub stop_id: Option<StopId>,
+    pub terminal_inferiors: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -452,6 +464,29 @@ impl SessionState {
                     self.stop_id
                 ),
             ))
+        }
+    }
+}
+
+impl From<&SessionState> for WaitBaseline {
+    fn from(state: &SessionState) -> Self {
+        Self {
+            event_seq: state.event_seq,
+            execution_epoch: state.execution_epoch,
+            stop_id: state.stop_id.clone(),
+            terminal_inferiors: state
+                .inferiors
+                .iter()
+                .filter(|(_, inferior)| {
+                    matches!(
+                        inferior.status,
+                        InferiorStatus::Exited
+                            | InferiorStatus::Detached
+                            | InferiorStatus::Disconnected
+                    )
+                })
+                .map(|(backend_id, _)| backend_id.clone())
+                .collect(),
         }
     }
 }

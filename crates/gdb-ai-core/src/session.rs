@@ -22,7 +22,7 @@ use crate::{
     config::Config,
     domain::{
         DomainEvent, InferiorStatus, JournaledEvent, OutputSource, SessionId, SessionState,
-        SnapshotStatus, TrackingDefinition, ValueBinding,
+        SnapshotStatus, TrackingDefinition, ValueBinding, WaitBaseline,
     },
     journal::Journal,
     metrics::Metrics,
@@ -445,7 +445,7 @@ impl SessionHandle {
     }
 
     pub async fn wait(&self, until: WaitUntil, timeout: Duration) -> Result<SessionState> {
-        self.wait_from(until, timeout, None).await
+        self.wait_from(until, timeout, None, None).await
     }
 
     pub async fn wait_after(
@@ -454,21 +454,61 @@ impl SessionHandle {
         timeout: Duration,
         baseline: &SessionState,
     ) -> Result<SessionState> {
-        self.wait_from(until, timeout, Some(baseline)).await
+        self.wait_after_baseline(until, timeout, &WaitBaseline::from(baseline))
+            .await
+    }
+
+    pub async fn wait_after_baseline(
+        &self,
+        until: WaitUntil,
+        timeout: Duration,
+        baseline: &WaitBaseline,
+    ) -> Result<SessionState> {
+        self.wait_from(until, timeout, Some(baseline), None).await
+    }
+
+    pub async fn wait_for_operation(
+        &self,
+        until: WaitUntil,
+        timeout: Duration,
+        baseline: &WaitBaseline,
+        expected_execution_epoch: u64,
+    ) -> Result<SessionState> {
+        self.wait_from(
+            until,
+            timeout,
+            Some(baseline),
+            Some(expected_execution_epoch),
+        )
+        .await
     }
 
     async fn wait_from(
         &self,
         until: WaitUntil,
         timeout: Duration,
-        baseline: Option<&SessionState>,
+        baseline: Option<&WaitBaseline>,
+        expected_execution_epoch: Option<u64>,
     ) -> Result<SessionState> {
         let mut state = self.state.clone();
         let baseline = baseline.cloned();
         let wait = async {
             loop {
                 let current = state.borrow().clone();
-                if wait_satisfied(&current, until, baseline.as_ref()) {
+                // 2026-08-28: A later execution epoch belongs to another
+                // operation and must not satisfy this operation's waiter.
+                if expected_execution_epoch
+                    .is_some_and(|expected| current.execution_epoch > expected)
+                {
+                    return Err(Error::new(
+                        ErrorCode::StaleContext,
+                        "operation state was superseded by a later execution",
+                    ));
+                }
+                if expected_execution_epoch
+                    .is_none_or(|expected| current.execution_epoch == expected)
+                    && wait_satisfied(&current, until, baseline.as_ref())
+                {
                     return Ok(current);
                 }
                 state.changed().await.map_err(|_| {
@@ -577,7 +617,7 @@ impl SessionHandle {
 
 // 2026-08-28: Compare waits with pre-command state; otherwise an existing
 // stop or snapshot can satisfy a new resume request before a new async event.
-fn wait_satisfied(state: &SessionState, until: WaitUntil, baseline: Option<&SessionState>) -> bool {
+fn wait_satisfied(state: &SessionState, until: WaitUntil, baseline: Option<&WaitBaseline>) -> bool {
     let after_baseline = baseline.is_none_or(|baseline| state.event_seq > baseline.event_seq);
     match until {
         WaitUntil::Running => baseline.map_or_else(
@@ -608,12 +648,7 @@ fn wait_satisfied(state: &SessionState, until: WaitUntil, baseline: Option<&Sess
         // must not satisfy a new run-and-wait operation for another inferior.
         WaitUntil::Exited => state.inferiors.iter().any(|(backend_id, inferior)| {
             terminal(inferior.status)
-                && baseline.is_none_or(|baseline| {
-                    !baseline
-                        .inferiors
-                        .get(backend_id)
-                        .is_some_and(|inferior| terminal(inferior.status))
-                })
+                && baseline.is_none_or(|baseline| !baseline.terminal_inferiors.contains(backend_id))
         }),
     }
 }
@@ -2342,7 +2377,7 @@ mod tests {
                 .apply(&JournaledEvent::for_replay(seq, event))
                 .unwrap();
         }
-        let baseline = reducer.state().clone();
+        let baseline = WaitBaseline::from(reducer.state());
         reducer
             .apply(&JournaledEvent::for_replay(
                 4,
