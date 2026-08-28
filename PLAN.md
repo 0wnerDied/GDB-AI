@@ -1,6 +1,6 @@
 # GDB/AI Implementation Plan and Normative Specification
 
-Status: implemented version 1; host-dependent qualification remains capability-gated
+Status: North-star implementation present; release qualification in progress
 
 This document records the complete project requested for `GDB/AI`. It is the
 normative implementation and release checklist. Host-dependent functions are
@@ -1284,9 +1284,9 @@ hardware breakpoints/watchpoints, fork/exec, attach/detach, core, gdbserver,
 remote disconnect, target/GDB death, and raw commands changing selection or
 breakpoints.
 
-Compatibility CI covers GDB 13-17 MI4 and GDB 9-12 MI3; x86-64/AArch64;
-native/attach/core/gdbserver; full/partial/no symbols; PIE/non-PIE; and
-single/multi-thread. It must not depend on one rolling image.
+Release compatibility CI must cover GDB 13-17 MI4 and GDB 9-12 MI3;
+x86-64/AArch64; native/attach/core/gdbserver; full/partial/no symbols;
+PIE/non-PIE; and single/multi-thread. It must not depend on one rolling image.
 
 Chaos injects delayed/interleaved MI, stderr noise, sudden target/GDB exit,
 PTY EOF, remote disconnect, command timeout, artifact/SQLite failure, client
@@ -1695,3 +1695,38 @@ Release verification commands and deployment assets are maintained in
 soak and the GDB 13-17/AArch64 matrix are release-environment qualification
 gates; a development host that lacks those binaries reports the missing gate
 instead of claiming it ran.
+
+## 55. Current progress and resume point
+
+The 2026-08-28 verified implementation baseline is `9648037`. Required CI
+run `33155226125` passed workspace tests, Clippy, Rust 1.88, schema hashes,
+both SDKs, fuzz-target compilation, and two public Debian kernel jobs. Local
+GDB 17.1 passed the full workspace; CI GDB 15.1 provided an independent
+environment.
+
+Completed correctness work includes:
+
+- MI, stderr, and PTY control/data separation;
+- a preemptive control lane, absolute deadlines, and unknown-outcome fence;
+- stop-consistent composite observations and real minimal snapshots;
+- PTY hangup/rearm behavior and bounded output/evidence storage;
+- no-panic missing-session validation and generated method contracts;
+- typed stop attribution and bounded probe/experiment cleanup;
+- duplicate-running, thread-generation, and unknown-notification reduction;
+- verified native, attach, core, gdbserver, raw, state-service, and lifecycle
+  API paths; and
+- bounded Linux kernel tasks, modules, stack, panic, and monitor operations
+  on Debian 6.1 and 6.12 under QEMU.
+
+The implementation is paused after this baseline. Remaining release gates,
+in dependency order, are:
+
+1. run real GDB 9-17 compatibility jobs and AArch64 end-to-end targets;
+2. execute parser, framer, and reducer fuzz campaigns;
+3. run targeted chaos cases and the 10,000-cycle lifecycle soak;
+4. run the Agent A/B/C/D evaluation from section 52; and
+5. produce release-tag provenance and rerun the complete final matrix.
+
+Until those gates pass, `gdb.ai/v1` identifies the implemented protocol
+major version; it is not evidence that every North-star release environment
+has been qualified.

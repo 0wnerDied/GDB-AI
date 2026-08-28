@@ -1,9 +1,12 @@
 # Canonical Protocol
 
-The stable namespace is `gdb.ai/v1`. Requests carry a request ID, optional
-session ID, method, expected revision, idempotency key, and parameters.
-Mutations require the current revision and write lease. Stop-sensitive reads
-require the current `stop_id`.
+The current major namespace is `gdb.ai/v1`. Protocol compatibility and
+release qualification are separate: the schema follows the version-1
+compatibility rules, while [`compatibility.md`](compatibility.md) records
+which target matrices have actually run. Requests carry a request ID,
+optional session ID, method, expected revision, idempotency key, and
+parameters. Mutations require the current revision and write lease.
+Stop-sensitive reads require the current `stop_id`.
 
 Schema files and hashes live in [`../schemas`](../schemas). MCP is a compact
 projection over the same methods; `gdb.ai/call` exposes the canonical envelope
@@ -15,3 +18,10 @@ Large results return `gdbai://artifact/sha256:...`. Artifact reads re-check
 session ownership; the URI itself is not authorization. `artifact.get` uses
 `offset` and `max_bytes` and reports `next_offset` plus `truncated` so binary
 evidence never exceeds the response envelope.
+
+The implemented registry currently contains 61 canonical methods. The
+conditional `kernel.inspect` contract accepts `capabilities`, `version`,
+`base`, `current_task`, `init_task`, `tasks`, `modules`, `stack`, and `panic`.
+`kernel.monitor` remains an audited mutation restricted by the configured
+first-word allowlist. These contracts are generated into both the canonical
+schema and the `gdb_kernel` MCP projection; they are not GDB/MI extensions.
