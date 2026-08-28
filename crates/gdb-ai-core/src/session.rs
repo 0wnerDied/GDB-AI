@@ -1944,16 +1944,25 @@ impl SessionWorker {
         // 2026-08-28: Hard-coded restoration to "on" could weaken observer
         // policy after evaluation. Restore the exact values read in this worker.
         let mut setup_error = None;
+        let mut guarded = Vec::new();
         for setting in SETTINGS {
-            if let Err(error) = self
+            match self
                 .execute_until(
                     MiCommand::new("-gdb-set")?.bare(setting)?.bare("off")?,
                     deadline,
                 )
                 .await
             {
-                setup_error = Some(error);
-                break;
+                Ok(_) => guarded.push(setting),
+                // 2026-08-29: GDB 9-13 cannot change this setting after a
+                // live inferior exists. The expression validator is the
+                // primary register-mutation guard on those versions.
+                Err(error)
+                    if setting == "may-write-registers" && error.code == ErrorCode::GdbError => {}
+                Err(error) => {
+                    setup_error = Some(error);
+                    break;
+                }
             }
         }
         let result = match setup_error {
@@ -1962,6 +1971,7 @@ impl SessionWorker {
         };
         let restoration = originals
             .into_iter()
+            .filter(|(setting, _)| guarded.contains(setting))
             .map(|(setting, value)| MiCommand::new("-gdb-set")?.bare(setting)?.bare(value))
             .collect::<Result<Vec<_>>>()?;
         // 2026-08-28: Restoring safety settings before a timed-out evaluate
