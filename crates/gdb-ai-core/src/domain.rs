@@ -195,11 +195,14 @@ impl InferiorId {
 pub struct ThreadId(pub String);
 
 impl ThreadId {
-    pub fn from_backend(inferior: &InferiorId, generation: u64, backend_id: &str) -> Self {
+    // 2026-08-28: Inferior generation alone let a backend thread ID reused
+    // after exit alias the old public handle. Callers pass the thread's
+    // creation event sequence and retain that ID until the thread exits.
+    pub fn from_backend(inferior: &InferiorId, creation_generation: u64, backend_id: &str) -> Self {
         Self(format!(
             "thr_{}_{}_{}",
             inferior.0,
-            generation,
+            creation_generation,
             safe_component(backend_id)
         ))
     }

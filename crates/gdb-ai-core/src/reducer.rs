@@ -185,8 +185,13 @@ impl StateReducer {
                 let mut stopped_thread_id = None;
                 if let Some(backend_thread) = backend_thread {
                     let inferior = self.state.inferiors.get_mut(&backend_id).unwrap();
-                    let id =
-                        ThreadId::from_backend(&inferior.id, inferior.generation, backend_thread);
+                    let id = inferior
+                        .threads
+                        .get(backend_thread)
+                        .map(|thread| thread.id.clone())
+                        .unwrap_or_else(|| {
+                            ThreadId::from_backend(&inferior.id, seq, backend_thread)
+                        });
                     stopped_thread_id = Some(id.clone());
                     inferior.threads.insert(
                         backend_thread.clone(),
@@ -224,17 +229,24 @@ impl StateReducer {
             } => {
                 let seq = self.state.event_seq;
                 let inferior = self.ensure_inferior(backend_inferior, seq);
-                let id = ThreadId::from_backend(&inferior.id, inferior.generation, backend_thread);
-                inferior.threads.insert(
-                    backend_thread.clone(),
-                    ThreadState {
-                        id,
-                        backend_id: backend_thread.clone(),
-                        running: inferior.status == InferiorStatus::Running,
-                        frame: None,
-                    },
-                );
-                true
+                if let Some(thread) = inferior.threads.get_mut(backend_thread) {
+                    let running = inferior.status == InferiorStatus::Running;
+                    let changed = thread.running != running;
+                    thread.running = running;
+                    changed
+                } else {
+                    let id = ThreadId::from_backend(&inferior.id, seq, backend_thread);
+                    inferior.threads.insert(
+                        backend_thread.clone(),
+                        ThreadState {
+                            id,
+                            backend_id: backend_thread.clone(),
+                            running: inferior.status == InferiorStatus::Running,
+                            frame: None,
+                        },
+                    );
+                    true
+                }
             }
             DomainEvent::ThreadExited {
                 backend_inferior,
@@ -634,6 +646,48 @@ mod tests {
         );
         assert_eq!(reducer.state().execution_epoch, 1);
         assert_eq!(reducer.state().revision, revision);
+    }
+
+    #[test]
+    fn reused_backend_thread_id_gets_a_new_public_id() {
+        let mut reducer =
+            StateReducer::new(SessionState::creating(SessionId("sess_thread".into())));
+        apply(&mut reducer, 1, DomainEvent::BackendStarted);
+        apply(
+            &mut reducer,
+            2,
+            DomainEvent::InferiorAdded {
+                backend_id: "i1".into(),
+                pid: Some(42),
+            },
+        );
+        apply(
+            &mut reducer,
+            3,
+            DomainEvent::ThreadCreated {
+                backend_inferior: "i1".into(),
+                backend_thread: "1".into(),
+            },
+        );
+        let first = reducer.state().inferiors["i1"].threads["1"].id.clone();
+        apply(
+            &mut reducer,
+            4,
+            DomainEvent::ThreadExited {
+                backend_inferior: Some("i1".into()),
+                backend_thread: "1".into(),
+            },
+        );
+        apply(
+            &mut reducer,
+            5,
+            DomainEvent::ThreadCreated {
+                backend_inferior: "i1".into(),
+                backend_thread: "1".into(),
+            },
+        );
+        let second = reducer.state().inferiors["i1"].threads["1"].id.clone();
+        assert_ne!(first, second);
     }
 
     #[test]
