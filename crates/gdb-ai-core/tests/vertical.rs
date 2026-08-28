@@ -437,6 +437,28 @@ async fn local_debugging_vertical_slice() {
                 .await,
         );
     }
+    let batch = successful(
+        gateway
+            .dispatch(
+                request(
+                    "inspection-batch",
+                    Some(&session_id),
+                    "inspection.batch",
+                    None,
+                    json!({
+                        "stop_id": second_stop,
+                        "requests": [
+                            {"name": "stack", "view": "stack", "limit": 2},
+                            {"name": "registers", "view": "registers", "roles": ["pc", "sp"]}
+                        ]
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(batch.result.as_ref().unwrap()["results"]["stack"].is_object());
+    assert!(batch.result.as_ref().unwrap()["results"]["registers"].is_object());
     let mappings = successful(
         gateway
             .dispatch(
@@ -499,6 +521,27 @@ async fn local_debugging_vertical_slice() {
         .next()
         .unwrap()
         .to_owned();
+    let hypothesis = successful(
+        gateway
+            .dispatch(
+                request(
+                    "hypothesis",
+                    Some(&session_id),
+                    "agent.hypothesis_check",
+                    None,
+                    json!({
+                        "claim": "global_value is initialized before marker",
+                        "expression": "global_value",
+                        "operator": "equals",
+                        "expected": "7",
+                        "stop_id": second_stop
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(hypothesis.result.as_ref().unwrap()["verdict"], "confirmed");
 
     let memory = successful(
         gateway
