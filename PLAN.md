@@ -1,8 +1,8 @@
-# GDB/MI Implementation Plan and Normative Specification
+# GDB/AI Implementation Plan and Normative Specification
 
 Status: implemented version 1; host-dependent qualification remains capability-gated
 
-This document records the complete project requested for `GDB/MI`. It is the
+This document records the complete project requested for `GDB/AI`. It is the
 normative implementation and release checklist. Host-dependent functions are
 reported as supported only when runtime probes and tests agree; unavailable
 kernel, architecture, sandbox, Python, and remote facilities remain explicit
@@ -10,10 +10,12 @@ capability results rather than simulated success.
 
 ## 1. Product definition
 
-`GDB/MI` is a stateful debugging control plane for autonomous agents, running
-on top of GDB. It does not replace GDB and does not expose GDB/MI as the normal
-agent interface. It turns GDB asynchronous events, implicit context, inferior
-I/O, lifecycle, and safety policy into:
+`GDB/AI` means **GDB Agent Interface**. It is a stateful debugging control
+plane for modern Agents doing dynamic debugging, vulnerability validation,
+and authorized vulnerability exploitation. It runs on top of GDB and its
+GDB/MI machine interface. It does not replace GDB or expose GDB/MI as the
+normal Agent interface. It turns GDB asynchronous events, implicit context,
+inferior I/O, lifecycle, and safety policy into:
 
 - a versioned semantic API;
 - an explicit debugger state machine;
@@ -22,13 +24,14 @@ I/O, lifecycle, and safety policy into:
 - results traceable to raw debugging evidence; and
 - MCP, JSON-RPC, Python SDK, and TypeScript SDK interfaces.
 
-GDB/MI is the backend protocol. Terminal prompt parsing is never the control
-foundation.
+GDB/MI is supplied by GNU GDB in binutils-gdb and is only the backend
+protocol. GDB/AI does not define it. Terminal prompt parsing is never the
+control foundation.
 
 Canonical names:
 
 ```text
-project:             GDB/MI
+project:             GDB/AI (Agent Interface)
 repository:          gdb-ai
 executable:          gdb-ai
 protocol namespace:  gdb.ai/v1
@@ -76,7 +79,7 @@ The North-star support matrix is:
 | Binaries | ELF, PIE, and shared libraries |
 | Transports | MCP stdio, MCP Streamable HTTP, JSON-RPC, Python and TypeScript SDKs |
 | GDB/MI | full MI4, compatible MI3 |
-| Session | one independent GDB process per GDB/MI session |
+| Session | one independent GDB process per GDB/AI session |
 | Concurrency | one writer, multiple observers |
 
 Compatibility levels:
@@ -238,7 +241,7 @@ BreakpointLocation, ValueObject, StopSnapshot, TrackedExpression,
 TrackedMemoryRange, Artifact, Operation, Event, PolicyDecision
 ```
 
-Public identifiers are allocated by GDB/MI, generation-safe, and do not expose
+Public identifiers are allocated by GDB/AI, generation-safe, and do not expose
 temporary GDB numbers as stable IDs:
 
 ```text
@@ -505,7 +508,7 @@ Local launches use an independent PTY:
 ```text
 GDB stdin/stdout/stderr       MI pipes
 inferior stdin/out/err        PTY slave
-GDB/MI                        PTY master
+GDB/AI                        PTY master
 ```
 
 The worker binds it with `-inferior-tty-set`. Every output record names its
@@ -1371,7 +1374,7 @@ state or security foundation.
 
 LLDB's MCP session URIs, create/list/close operations, and command
 serialization are useful precedents. Its command-interpreter text model and
-separate inferior output are not sufficient here. GDB/MI keeps persistent
+separate inferior output are not sufficient here. GDB/AI keeps persistent
 sessions/resources while placing typed semantic tools, independent PTY I/O,
 and event reduction in the core.
 
@@ -1609,8 +1612,8 @@ an Agent. Evaluation compares:
 ```text
 A. shell plus CLI GDB
 B. persistent raw GDB
-C. structured GDB/MI control plane
-D. structured GDB/MI plus semantic probes/experiments
+C. structured GDB/AI control plane
+D. structured GDB/AI plus semantic probes/experiments
 ```
 
 Tasks are labelled `static-solvable`, `runtime-helpful`, or

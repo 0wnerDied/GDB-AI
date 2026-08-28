@@ -1,5 +1,5 @@
 [Unit]
-Description=GDB/MI agent debugging control plane
+Description=GDB/AI Agent Interface control plane
 After=local-fs.target
 
 [Service]

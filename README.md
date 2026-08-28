@@ -1,9 +1,16 @@
-# GDB/MI
+# GDB/AI
 
-GDB/MI is a stateful, agent-oriented debugging control plane. It runs one
-dedicated GDB process per session, separates inferior PTY traffic from MI
-control traffic, reduces asynchronous records into explicit state, and
-exposes bounded semantic operations through MCP and canonical JSON-RPC.
+**GDB/AI (Agent Interface)** is a stateful interface for modern Agents doing
+dynamic debugging, vulnerability validation, and authorized vulnerability
+exploitation. It runs above GDB and the GDB/MI machine interface, exposing
+bounded semantic operations through MCP and canonical JSON-RPC instead of
+requiring Agents to manage debugger processes, parse terminal prompts, or
+depend on implicit GDB context.
+
+GDB/AI does not define or replace GDB/MI. GDB/MI is part of GNU GDB in the
+binutils-gdb project and serves only as GDB/AI's backend protocol. Each GDB/AI
+session runs one dedicated GDB process, separates inferior PTY traffic from
+MI control traffic, and reduces asynchronous records into explicit state.
 
 The repository is independently versioned as `gdb-ai`; the executable is
 `gdb-ai`, the stable protocol is `gdb.ai/v1`, and resources use `gdbai://`.
@@ -164,8 +171,8 @@ git submodule add https://github.com/0wnerDied/GDB-AI.git gdb-ai
 cargo build --manifest-path gdb-ai/Cargo.toml --release
 ```
 
-No binutils-gdb source modification is required. GDB/MI controls the built or
-installed `gdb` executable through its machine interface.
+No binutils-gdb source modification is required. GDB/AI controls the built or
+installed `gdb` executable through GDB's existing GDB/MI machine interface.
 
 ## License
 

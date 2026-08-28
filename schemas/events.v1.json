@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.gdb-ai.dev/events.v1.json",
-  "title": "GDB/MI normalized event",
+  "title": "GDB/AI normalized event",
   "type": "object",
   "required": ["type"],
   "properties": {

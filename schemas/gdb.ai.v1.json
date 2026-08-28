@@ -2996,6 +2996,6 @@
     "method",
     "parameters"
   ],
-  "title": "GDB/MI canonical request",
+  "title": "GDB/AI canonical request",
   "type": "object"
 }

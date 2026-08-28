@@ -1,4 +1,4 @@
-# GDB/MI Architecture
+# GDB/AI Architecture
 
 The server is one Rust process with a Gateway and one Tokio session actor per
 GDB child. The actor is the only writer of MI commands and the only owner of

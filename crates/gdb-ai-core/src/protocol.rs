@@ -129,6 +129,8 @@ impl PartialEq<&str> for CanonicalMethod {
 
 // 2026-08-28: The published envelope described parameters as an arbitrary
 // object. Generate each method branch from the runtime contract instead.
+// 2026-08-28: GDB/AI is the Agent Interface; GNU GDB supplies the GDB/MI
+// backend protocol.
 pub fn canonical_request_schema() -> Value {
     let methods = CanonicalMethod::ALL
         .iter()
@@ -151,7 +153,7 @@ pub fn canonical_request_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://schemas.gdb-ai.dev/gdb.ai.v1.json",
-        "title": "GDB/MI canonical request",
+        "title": "GDB/AI canonical request",
         "type": "object",
         "additionalProperties": false,
         "required": ["api_version", "request_id", "method", "parameters"],

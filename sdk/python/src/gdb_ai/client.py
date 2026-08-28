@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Dependency-free HTTP client for the canonical GDB/MI API."""
+"""Dependency-free HTTP client for the canonical GDB/AI API."""
 
 from __future__ import annotations
 
