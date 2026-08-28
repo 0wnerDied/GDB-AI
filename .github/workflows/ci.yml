@@ -107,3 +107,80 @@ jobs:
         run: tests/kernel/fetch-debian-kernel.sh "${{ runner.temp }}/gdb-ai-kernel" "${{ matrix.series }}" >> "$GITHUB_ENV"
       - name: Verify Linux kernel provider
         run: cargo test --locked -p gdb-ai-core --test kernel -- --nocapture
+
+  compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "9.2"
+            expected_mi: mi3
+            sha256: 360cd7ae79b776988e89d8f9a01c985d0b1fa21c767a4295e5f88cb49175c555
+            image: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+          - version: "10.2"
+            expected_mi: mi3
+            sha256: aaa1223d534c9b700a8bec952d9748ee1977513f178727e1bee520ee000b4f29
+            image: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+          - version: "11.2"
+            expected_mi: mi3
+            sha256: 1497c36a71881b8671a9a84a0ee40faab788ca30d7ba19d8463c3cc787152e32
+            image: ubuntu:20.04@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+          - version: "12.1"
+            expected_mi: mi3
+            sha256: 0e1793bf8f2b54d53f46dea84ccfd446f48f81b297b28c4f7fc017b818d69fed
+            image: ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
+          - version: "13.2"
+            expected_mi: mi4
+            sha256: fd5bebb7be1833abdb6e023c2f498a354498281df9d05523d8915babeb893f0a
+            image: ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
+          - version: "14.2"
+            expected_mi: mi4
+            sha256: 2d4dd8061d8ded12b6c63f55e45344881e8226105f4d2a9b234040efa5ce7772
+            image: ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
+          - version: "15.2"
+            expected_mi: mi4
+            sha256: 83350ccd35b5b5a0cba6b334c41294ea968158c573940904f00b92f76345314d
+            image: ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+          - version: "16.3"
+            expected_mi: mi4
+            sha256: bcfcd095528a987917acf9fff3f1672181694926cc18d609c99d0042c00224c5
+            image: ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+          - version: "17.1"
+            expected_mi: mi4
+            sha256: 14996f5f74c9f68f5a543fdc45bca7800207f91f92aeea6c2e791822c7c6d876
+            image: ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+    env:
+      GDB_AI_REQUIRE_INTEGRATION: "1"
+      GDB_AI_EXPECTED_MI: ${{ matrix.expected_mi }}
+    steps:
+      - name: Install compatibility prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bison build-essential ca-certificates curl flex git \
+            libexpat1-dev libgmp-dev libmpfr-dev libreadline-dev \
+            texinfo xz-utils zstd
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gdb/${{ matrix.version }}
+          key: gdb-${{ matrix.version }}-${{ matrix.sha256 }}-${{ matrix.image }}
+      - name: Build GNU GDB ${{ matrix.version }}
+        run: |
+          tests/compatibility/build-gdb.sh \
+            "${{ matrix.version }}" \
+            "${{ matrix.sha256 }}" \
+            "$RUNNER_TEMP/gdb/${{ matrix.version }}"
+          ln -sf "$RUNNER_TEMP/gdb/${{ matrix.version }}/bin/gdb" /usr/bin/gdb
+          gdb --version | head -n 1
+      - name: Verify GDB/AI vertical slice
+        run: |
+          cargo test --locked -p gdb-ai-core --test vertical \
+            local_debugging_vertical_slice -- --exact --nocapture

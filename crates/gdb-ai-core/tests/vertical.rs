@@ -88,6 +88,12 @@ async fn local_debugging_vertical_slice() {
         .and_then(Value::as_str)
         .unwrap()
         .to_owned();
+    if let Ok(expected) = std::env::var("GDB_AI_EXPECTED_MI") {
+        assert_eq!(
+            created.result.as_ref().unwrap()["backend"]["mi_version"].as_str(),
+            Some(expected.as_str())
+        );
+    }
     assert_eq!(created.session_id.as_deref(), Some(session_id.as_str()));
     assert!(created.revision.is_some());
     let lease_id = created.result.as_ref().unwrap()["write_lease"]["lease_id"]
