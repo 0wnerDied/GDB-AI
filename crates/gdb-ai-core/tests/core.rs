@@ -7,7 +7,7 @@ use gdb_ai_core::{
     protocol::{API_VERSION, ApiRequest},
 };
 use serde_json::{Value, json};
-use tempfile::tempdir;
+use tempfile::Builder;
 
 fn request(
     id: &str,
@@ -34,7 +34,7 @@ async fn opens_and_inspects_core_without_execution() {
     {
         return;
     }
-    let directory = tempdir().unwrap();
+    let directory = Builder::new().prefix("gdb ai core ").tempdir().unwrap();
     let executable = directory.path().join("crash");
     let core = directory.path().join("crash.core");
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/crash.c");

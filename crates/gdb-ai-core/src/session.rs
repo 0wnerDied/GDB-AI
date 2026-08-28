@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock as StdRwLock},
     time::Duration,
 };
@@ -120,6 +120,7 @@ pub struct SessionHandle {
     state: watch::Receiver<SessionState>,
     events: broadcast::Sender<PublishedEvent>,
     command_timeout: Duration,
+    session_dir: PathBuf,
     journal_path: PathBuf,
 }
 
@@ -150,7 +151,7 @@ impl SessionHandle {
             profile,
             store,
             metrics.clone(),
-            session_dir,
+            session_dir.clone(),
             journal,
             initial_state,
             state_sender,
@@ -171,12 +172,17 @@ impl SessionHandle {
             state,
             events,
             command_timeout: config.server.command_timeout(),
+            session_dir,
             journal_path,
         })
     }
 
     pub fn id(&self) -> &SessionId {
         &self.id
+    }
+
+    pub(crate) fn session_directory(&self) -> &Path {
+        &self.session_dir
     }
 
     pub fn profile(&self) -> Profile {

@@ -623,6 +623,13 @@ impl Gateway {
         let executable = self.workspace_path(&string(&request.parameters, "executable")?, false)?;
         let core = self.workspace_path(&string(&request.parameters, "core")?, false)?;
         let entry = self.entry(required_session(request)?).await?;
+        let core_link = entry.handle.session_directory().join("target.core");
+        if let Err(error) = std::fs::remove_file(&core_link)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+        std::os::unix::fs::symlink(core, core_link)?;
         let reply = entry
             .handle
             .transaction(
@@ -630,9 +637,12 @@ impl Gateway {
                     MiCommand::new("-file-exec-and-symbols")?
                         .string(executable.as_os_str().as_encoded_bytes()),
                 ],
+                // 2026-08-28: GDB 15 treats filename quotes literally while
+                // GDB 17 requires them for spaces. A session-local safe name
+                // gives both versions the same unquoted target argument.
                 MiCommand::new("-target-select")?
                     .bare("core")?
-                    .string(core.as_os_str().as_encoded_bytes()),
+                    .bare("target.core")?,
                 Vec::new(),
             )
             .await?;
