@@ -32,6 +32,11 @@ Agent A/B/C/D evaluation, and release provenance remain open. See
 [compatibility status](docs/compatibility.md) and PLAN section 55. The
 `gdb.ai/v1` namespace does not turn an unexecuted matrix entry into support.
 
+A matched blind Sol xhigh pilot completed SUCTF 2026 `SU_minivfs` with both
+native GDB and GDB/AI. GDB/AI finished in 20:31 and native GDB in 24:56; one
+paired task is evidence of usability, not a general effect claim. See PLAN
+section 52.2 for the controls, replay evidence, and observed limitations.
+
 ## Implemented system
 
 - Bounded byte-stream MI4/MI3 framer, parser, encoder, lossless AST, saved

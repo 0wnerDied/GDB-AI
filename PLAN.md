@@ -1680,6 +1680,50 @@ and `6b2c94e`, respectively. The statistically meaningful A/B/C/D gate
 remains open and requires repeated paired tasks, matching models and
 permissions, and the semantic-probe arm.
 
+### 52.2 Matched Sol completion trial
+
+A second blind trial ran on 2026-08-28 with two fresh Sol xhigh Agents and
+repository baseline `b52929c`. Both arms used the same upstream challenge
+commit, stripped executable, loader, libc, one-hour limit, isolated roots,
+and unique hidden flag files. Source, writeups, prior Agent output, Internet
+research, and direct flag reads by the helper process were prohibited. The
+GDB/AI arm
+used `lab_mutation` and a one-hour lease so target input permissions matched
+native GDB.
+
+| Interface | Elapsed | Debugger use | Outcome |
+| --- | ---: | --- | --- |
+| Native GDB | 24:56 | 9 sessions and 47 `-ex` commands | Target printed its flag |
+| GDB/AI | 20:31 | 31 tool calls and 102 backend commands | Target printed its flag |
+
+The GDB/AI count excludes MCP initialize and tools/list; two of its 31 calls
+returned typed errors. It used three sessions and four target stops. The
+Agent verified its exploit on three clean ASLR runs, and the parent reran it
+twice. The native Agent reported four post-development ASLR runs, followed by
+two independent parent reruns. Script inspection confirmed that only each
+target process opened and emitted its flag.
+
+All three GDB/AI journals replayed to `CLOSED` and `CLEAN`. Across 236 MI
+records, metrics reported no session failures, parse errors, command timeouts,
+reconciliation, consistency loss, response truncation, or dropped inferior
+output. Each state revision retained the owning journal's session ID;
+distinct target output also confirmed arm isolation.
+
+The matched result is a positive usability signal: GDB/AI reached full
+exploitation 4:25 sooner in this sample. It is not a statistical claim. The
+two Agents followed different valid exploit trajectories, and neither
+debugger interface uniquely caused success. Repeated paired tasks and the
+raw/structured/probe arms from section 52 remain required.
+
+Two actionable issues emerged. Relative `program` paths were resolved before
+the requested `cwd`; `b08bce7` fixes that shared launch path. A stripped-PIE
+module-offset breakpoint created at the explicit loader entry truthfully
+remained pending because the executable was not mapped and the semantic
+specification is not rebound after exec. `4f95c4a` clarifies the required
+mapping check; persistent delayed module-offset rebinding remains an open
+design item. Attach allowlist rejection was intentional policy, and a 73 KiB
+tools/list response was transport-complete despite the shell display limit.
+
 ## 53. Corrected guarantees
 
 The following wording supersedes any broader interpretation elsewhere in this
@@ -1754,8 +1798,8 @@ Completed correctness work includes:
   API paths;
 - bounded Linux kernel tasks, modules, stack, panic, and monitor operations
   on Debian 6.1 and 6.12 under QEMU; and
-- one blind native-GDB versus GDB/AI Agent pilot with replay and session
-  isolation evidence.
+- two blind native-GDB versus GDB/AI Agent pilots, including one matched pair
+  that completed target-side flag reads with replay and isolation evidence.
 
 The implementation is paused after this baseline. Remaining release gates,
 in dependency order, are:
