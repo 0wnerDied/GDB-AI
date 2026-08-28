@@ -344,6 +344,8 @@ impl GdbBackend {
             .arg("set disable-randomization off")
             .arg("-iex")
             .arg("set may-call-functions off")
+            .arg("-iex")
+            .arg("unset environment MALLOC_ARENA_MAX")
             .arg(format!("--interpreter={mi_version}"))
             .current_dir(session_dir)
             .env_clear()
@@ -353,6 +355,10 @@ impl GdbBackend {
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
             .env("TERM", "dumb")
+            // 2026-08-29: GDB 10 creates a glibc arena for each worker before
+            // the prompt and can exhaust RLIMIT_AS on large hosts. Bound GDB's
+            // allocator arenas, then remove this variable from the inferior.
+            .env("MALLOC_ARENA_MAX", "2")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
