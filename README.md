@@ -27,8 +27,8 @@ CI used GDB 15.1.
 
 The North-star code surface is implemented, but release qualification is not
 complete. The real GDB 9-14 and 16 compatibility cases, AArch64 end-to-end
-paths, executed fuzz campaigns, chaos and 10,000-cycle soak gates, Agent
-A/B/C/D evaluation, and release provenance remain open. See
+paths, executed fuzz campaigns, chaos and 10,000-cycle soak gates, repeated
+Agent A/B/C/D evaluation, and release provenance remain open. See
 [compatibility status](docs/compatibility.md) and PLAN section 55. The
 `gdb.ai/v1` namespace does not turn an unexecuted matrix entry into support.
 

@@ -1643,6 +1643,41 @@ Correctness, boundedness, security, replay, and chaos tests remain release
 gates. Agent-effect metrics decide whether a semantic abstraction belongs in
 the product; they are not replaced by architecture completeness.
 
+### 52.1 Blind SU_minivfs pilot
+
+The first blind pilot ran on 2026-08-28 against SUCTF 2026 `SU_minivfs` at
+upstream commit `3529e65bed41dfc3f836bdeae95307c92d710692`. Each Agent saw
+only the stripped executable, matching loader and libc, and its own isolated
+working directory. Source, writeups, other arms, and Internet research were
+excluded. Each arm had a limit of 60 debugger or canonical API actions.
+
+| Arm | Model and interface | Actions | Result |
+| --- | --- | ---: | --- |
+| A | Terra xhigh with native GDB | 60 | Proved the heap metadata corruption primitive |
+| B | Terra xhigh with GDB/AI | 57 | Found the root cause and deterministic corruption primitive |
+| C | Sol xhigh with GDB/AI | 59 | Proved the corruption and a live overlapping-allocation primitive |
+
+No arm printed the test flag, so all three finished at evidence tier 4 of 5.
+The native arm took about 14 minutes; the two GDB/AI arms took about 20 and
+21 minutes. Those timings and outcomes are descriptive, not a causal product
+claim: arm C used a different model, and the GDB/AI server used the default
+`debug_control` profile while exploitation input requires `lab_mutation`.
+
+Communication evidence was clean for this run. All eight GDB/AI challenge
+journals replayed successfully. Server metrics reported no GDB startup or
+session failures, MI parse errors, unknown MI classes, command timeouts,
+consistency loss, response truncation, or dropped inferior output. Every
+replayed revision retained its journal's session ID, and no journal referred
+to both isolated Agent roots. No mixed result or cross-session state was
+observed.
+
+The pilot exposed four concrete usability costs: stale-revision lease
+renewal, opaque enum errors, unresolved module-offset breakpoints for a
+loader-launched stripped PIE, and incomplete MCP workflow instructions.
+Each received a focused regression fix after the run. The statistically
+meaningful A/B/C/D gate remains open and requires repeated paired tasks,
+matching models and permissions, and the semantic-probe arm.
+
 ## 53. Corrected guarantees
 
 The following wording supersedes any broader interpretation elsewhere in this
@@ -1714,9 +1749,11 @@ Completed correctness work includes:
 - typed stop attribution and bounded probe/experiment cleanup;
 - duplicate-running, thread-generation, and unknown-notification reduction;
 - verified native, attach, core, gdbserver, raw, state-service, and lifecycle
-  API paths; and
+  API paths;
 - bounded Linux kernel tasks, modules, stack, panic, and monitor operations
-  on Debian 6.1 and 6.12 under QEMU.
+  on Debian 6.1 and 6.12 under QEMU; and
+- one blind native-GDB versus GDB/AI Agent pilot with replay and session
+  isolation evidence.
 
 The implementation is paused after this baseline. Remaining release gates,
 in dependency order, are:
@@ -1724,7 +1761,7 @@ in dependency order, are:
 1. run real GDB 9-17 compatibility jobs and AArch64 end-to-end targets;
 2. execute parser, framer, and reducer fuzz campaigns;
 3. run targeted chaos cases and the 10,000-cycle lifecycle soak;
-4. run the Agent A/B/C/D evaluation from section 52; and
+4. repeat the paired Agent A/B/C/D evaluation from section 52; and
 5. produce release-tag provenance and rerun the complete final matrix.
 
 Until those gates pass, `gdb.ai/v1` identifies the implemented protocol

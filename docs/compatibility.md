@@ -30,7 +30,7 @@ unknown state-changing event taints consistency instead of being guessed.
 - executed libFuzzer campaigns rather than target compilation alone;
 - delayed-result, disconnect, storage-failure, and noisy-I/O chaos runs;
 - the 10,000-cycle session lifecycle soak;
-- Agent A/B/C/D effect evaluation; and
+- repeated paired Agent A/B/C/D effect evaluation; and
 - release artifact hashes and provenance tied to a release tag.
 
 The architecture and capability model contain these paths, but an open item
