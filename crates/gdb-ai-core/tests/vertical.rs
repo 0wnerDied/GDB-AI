@@ -94,6 +94,82 @@ async fn local_debugging_vertical_slice() {
         .as_str()
         .unwrap()
         .to_owned();
+    // 2026-08-28: Batch validation must happen before the first signal policy
+    // reaches GDB, otherwise a later malformed name leaves a partial mutation.
+    let invalid_signals = gateway
+        .dispatch(
+            request(
+                "invalid-signals",
+                Some(&session_id),
+                "signal.update",
+                created.revision,
+                json!({
+                    "lease_id": lease_id,
+                    "signals": {
+                        "SIGUSR1": {"stop": true, "print": true, "pass": false},
+                        "invalid": {"stop": false, "print": false, "pass": true}
+                    }
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(
+        invalid_signals.error.unwrap().code,
+        ErrorCode::InvalidArgument
+    );
+    let signals = successful(
+        gateway
+            .dispatch(
+                request(
+                    "signals-after-invalid-update",
+                    Some(&session_id),
+                    "signal.get",
+                    None,
+                    json!({}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(
+        signals
+            .result
+            .as_ref()
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+    let partial_signals = gateway
+        .dispatch(
+            request(
+                "partially-applied-signals",
+                Some(&session_id),
+                "signal.update",
+                signals.revision,
+                json!({
+                    "lease_id": lease_id,
+                    "signals": {
+                        "SIGUSR1": {"stop": true, "print": true, "pass": false},
+                        "SIGZZZ": {"stop": false, "print": false, "pass": true}
+                    }
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    let partial_error = partial_signals.error.as_ref().unwrap();
+    assert_eq!(partial_error.code, ErrorCode::GdbError);
+    assert_eq!(
+        partial_error.details.as_ref().unwrap()["partial"],
+        Value::Bool(true)
+    );
+    assert!(
+        partial_error.details.as_ref().unwrap()["applied"]
+            .get("SIGUSR1")
+            .is_some()
+    );
 
     let launched = successful(
         gateway
@@ -102,7 +178,7 @@ async fn local_debugging_vertical_slice() {
                     "launch",
                     Some(&session_id),
                     "target.launch",
-                    created.revision,
+                    partial_signals.revision,
                     json!({
                         "program": executable,
                         "lease_id": lease_id,

@@ -2532,20 +2532,28 @@ impl Gateway {
                 "signals must contain 1 to 64 entries",
             ));
         }
+        // 2026-08-28: Validating while executing allowed a malformed later
+        // entry to return INVALID_ARGUMENT after earlier policies had changed.
+        let policies = policies
+            .iter()
+            .map(|(signal, value)| {
+                if !valid_signal_name(signal) {
+                    return Err(Error::new(
+                        ErrorCode::InvalidArgument,
+                        format!("invalid signal name {signal}"),
+                    ));
+                }
+                let policy = serde_json::from_value(value.clone())
+                    .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))?;
+                Ok((signal.clone(), policy))
+            })
+            .collect::<Result<BTreeMap<String, SignalPolicyState>>>()?;
         let extension = entry.handle.capabilities().supports("custom_extension");
         let mut applied = BTreeMap::new();
-        for (signal, value) in policies {
-            if !valid_signal_name(signal) {
-                return Err(Error::new(
-                    ErrorCode::InvalidArgument,
-                    format!("invalid signal name {signal}"),
-                ));
-            }
-            let policy: SignalPolicyState = serde_json::from_value(value.clone())
-                .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))?;
+        for (signal, policy) in policies {
             let command = if extension {
                 MiCommand::new("-gdb-ai-signal-policy")?
-                    .bare(signal)?
+                    .bare(signal.clone())?
                     .bare(policy.stop.to_string())?
                     .bare(policy.print.to_string())?
                     .bare(policy.pass.to_string())?
@@ -2559,7 +2567,12 @@ impl Gateway {
                         if policy.pass { "pass" } else { "nopass" }
                     ))
             };
-            entry.handle.command(command).await?;
+            if let Err(error) = entry.handle.command(command).await {
+                return Err(error.with_details(json!({
+                    "partial": !applied.is_empty(),
+                    "applied": applied
+                })));
+            }
             entry
                 .handle
                 .record_event(DomainEvent::SignalPolicyChanged {
@@ -2567,7 +2580,7 @@ impl Gateway {
                     policy: policy.clone(),
                 })
                 .await?;
-            applied.insert(signal.clone(), policy);
+            applied.insert(signal, policy);
         }
         Ok(
             json!({ "signals": applied, "mechanism": if extension { "gdb-python-mi" } else { "controlled-console" } }),
