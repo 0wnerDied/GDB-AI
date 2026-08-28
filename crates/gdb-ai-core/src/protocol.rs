@@ -262,7 +262,7 @@ impl ApiResponse {
         // 2026-08-28: Command evidence stayed buried in result objects and the
         // envelope often pointed at no raw MI record. Promote bounded journal
         // sequence references without traversing large byte arrays.
-        let evidence = response_evidence(session_id.as_deref(), state.as_ref(), Some(&result));
+        let evidence = response_evidence(session_id.as_deref(), Some(&result));
         Self {
             api_version: API_VERSION.into(),
             request_id: request.request_id.clone(),
@@ -280,11 +280,7 @@ impl ApiResponse {
     }
 
     pub fn failure(request: &ApiRequest, error: Error, state: Option<SessionState>) -> Self {
-        let evidence = response_evidence(
-            request.session_id.as_deref(),
-            state.as_ref(),
-            error.details.as_ref(),
-        );
+        let evidence = response_evidence(request.session_id.as_deref(), error.details.as_ref());
         Self {
             api_version: API_VERSION.into(),
             request_id: request.request_id.clone(),
@@ -307,20 +303,13 @@ impl ApiResponse {
     }
 }
 
-fn response_evidence(
-    session_id: Option<&str>,
-    state: Option<&SessionState>,
-    source: Option<&Value>,
-) -> Vec<Evidence> {
+fn response_evidence(session_id: Option<&str>, source: Option<&Value>) -> Vec<Evidence> {
     let mut sequences = BTreeSet::new();
     if let Some(source) = source {
         collect_evidence_sequences(source, 0, &mut sequences);
     }
-    if sequences.is_empty()
-        && let Some(event_seq) = state.map(|state| state.event_seq).filter(|seq| *seq > 0)
-    {
-        sequences.insert(event_seq);
-    }
+    // 2026-08-28: Falling back to the session's latest event attributed an
+    // unrelated record to results that had no evidence. Empty is truthful.
     session_id
         .map(|session_id| {
             sequences
@@ -410,5 +399,24 @@ mod tests {
                 .unwrap()
                 .contains(&Value::String("address".into()))
         );
+    }
+
+    #[test]
+    fn response_without_explicit_evidence_has_no_evidence_link() {
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "evidence".into(),
+            session_id: Some("sess_test".into()),
+            method: CanonicalMethod::SessionGet,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({}),
+        };
+        let mut state = SessionState::creating(crate::domain::SessionId("sess_test".into()));
+        state.event_seq = 42;
+
+        let response = ApiResponse::success(&request, Some(state), json!({"status": "ready"}));
+
+        assert!(response.evidence.is_empty());
     }
 }
