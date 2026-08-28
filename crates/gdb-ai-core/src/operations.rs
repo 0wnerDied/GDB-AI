@@ -17,8 +17,9 @@ use crate::{
     backend::MiCommand,
     domain::{
         BreakpointLocationState, DomainEvent, FrameId, FrameSummary, LeaseId, OperationId,
-        OperationRecord, OperationStatus, SessionId, SignalPolicyState, StopId, TargetOrigin,
-        TrackingDefinition, TrackingId, ValueBinding, ValueId, WaitBaseline, WriteLease,
+        OperationRecord, OperationStatus, SessionId, SignalPolicyState, StopId, StopReason,
+        TargetOrigin, TrackingDefinition, TrackingId, ValueBinding, ValueId, WaitBaseline,
+        WriteLease,
     },
     gateway::{Caller, Gateway, SessionEntry, now_unix_ms, same_principal},
     persistence::Store,
@@ -730,6 +731,7 @@ impl Gateway {
                 backend_inferior: Some(backend_id.clone()),
                 backend_thread: None,
                 reason: "core".into(),
+                reason_detail: Some(StopReason::Core),
                 frame: frame_summary(&frame_reply.record),
             })
             .await?;
@@ -1426,6 +1428,7 @@ impl Gateway {
             "revision": current.revision,
             "profile": profile,
             "reason": state.stop_reason,
+            "reason_detail": state.stop_reason_detail,
             "stack": stack,
             "locals": locals,
             "arguments": arguments,
@@ -2577,6 +2580,7 @@ impl Gateway {
                         .handle
                         .wait_after(WaitUntil::Snapshot, remaining, &baseline)
                         .await?;
+                    require_probe_hit(&request.parameters, &baseline, &stopped, &backend_number)?;
                     let capture = self
                         .capture_probe_observation(request, &entry, &stopped, &budget, &mut calls)
                         .await?;
@@ -4540,6 +4544,69 @@ fn compare_observation(actual: &str, operator: &str, expected: &str) -> Result<b
     }
 }
 
+// 2026-08-28: Probes previously counted every new stop as their own hit,
+// turning signals, interrupts, and unrelated breakpoints into false evidence.
+fn require_probe_hit(
+    parameters: &Value,
+    baseline: &crate::domain::SessionState,
+    stopped: &crate::domain::SessionState,
+    expected_breakpoint: &str,
+) -> Result<()> {
+    let new_stop = stopped.stop_id.is_some()
+        && stopped.stop_id != baseline.stop_id
+        && stopped.execution_epoch > baseline.execution_epoch;
+    let breakpoint_matches = matches!(
+        &stopped.stop_reason_detail,
+        Some(StopReason::Breakpoint {
+            backend_number: Some(actual),
+            ..
+        }) if same_breakpoint_number(expected_breakpoint, actual)
+    );
+    let inferior_matches = parameters
+        .get("inferior_id")
+        .and_then(Value::as_str)
+        .is_none_or(|expected| {
+            stopped
+                .stopped_inferior_id
+                .as_ref()
+                .is_some_and(|actual| actual.0 == expected)
+        });
+    let thread_matches = parameters
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .is_none_or(|expected| {
+            stopped
+                .stopped_thread_id
+                .as_ref()
+                .is_some_and(|actual| actual.0 == expected)
+        });
+    if new_stop && breakpoint_matches && inferior_matches && thread_matches {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::InvalidState,
+        "target stopped somewhere other than the probe breakpoint",
+    )
+    .with_details(json!({
+        "expected_breakpoint": expected_breakpoint,
+        "actual_reason": stopped.stop_reason_detail,
+        "raw_reason": stopped.stop_reason,
+        "stop_id": stopped.stop_id,
+        "stopped_inferior_id": stopped.stopped_inferior_id,
+        "stopped_thread_id": stopped.stopped_thread_id
+    })))
+}
+
+fn same_breakpoint_number(expected: &str, actual: &str) -> bool {
+    actual == expected
+        || actual
+            .strip_prefix(expected)
+            .and_then(|suffix| suffix.strip_prefix('.'))
+            .is_some_and(|location| {
+                !location.is_empty() && location.bytes().all(|byte| byte.is_ascii_digit())
+            })
+}
+
 fn parse_observed_integer(value: &str) -> Result<i128> {
     let value = value.trim();
     if let Some(hex) = value.strip_prefix("0x") {
@@ -4714,4 +4781,61 @@ fn raw_mi_is_denied(command: &str) -> bool {
             | "-environment-cd"
             | "-inferior-tty-set"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{InferiorId, SessionState, StopId, ThreadId};
+
+    #[test]
+    fn probe_accepts_only_its_breakpoint_and_scope() {
+        let mut baseline = SessionState::creating(SessionId("sess_probe".into()));
+        baseline.stop_id = Some(StopId("stop_before".into()));
+        baseline.execution_epoch = 4;
+        let mut stopped = baseline.clone();
+        stopped.stop_id = Some(StopId("stop_after".into()));
+        stopped.execution_epoch = 5;
+        stopped.stop_reason = Some("breakpoint-hit".into());
+        stopped.stop_reason_detail = Some(StopReason::Breakpoint {
+            backend_number: Some("7.2".into()),
+            disposition: Some("keep".into()),
+        });
+        stopped.stopped_inferior_id = Some(InferiorId("inf_expected".into()));
+        stopped.stopped_thread_id = Some(ThreadId("thr_expected".into()));
+        let scope = json!({
+            "inferior_id": "inf_expected",
+            "thread_id": "thr_expected"
+        });
+
+        require_probe_hit(&scope, &baseline, &stopped, "7").unwrap();
+
+        stopped.stop_reason = Some("signal-received".into());
+        stopped.stop_reason_detail = Some(StopReason::Signal {
+            name: Some("SIGSEGV".into()),
+            meaning: Some("Segmentation fault".into()),
+        });
+        assert_eq!(
+            require_probe_hit(&scope, &baseline, &stopped, "7")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidState
+        );
+    }
+
+    #[test]
+    fn probe_rejects_an_unrelated_breakpoint() {
+        let mut baseline = SessionState::creating(SessionId("sess_probe".into()));
+        baseline.stop_id = Some(StopId("stop_before".into()));
+        let mut stopped = baseline.clone();
+        stopped.stop_id = Some(StopId("stop_after".into()));
+        stopped.execution_epoch = 1;
+        stopped.stop_reason = Some("breakpoint-hit".into());
+        stopped.stop_reason_detail = Some(StopReason::Breakpoint {
+            backend_number: Some("8".into()),
+            disposition: None,
+        });
+
+        assert!(require_probe_hit(&json!({}), &baseline, &stopped, "7").is_err());
+    }
 }

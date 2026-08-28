@@ -1,6 +1,6 @@
 use gdb_ai_mi::{MiRecord, MiResult, MiValue};
 
-use crate::domain::{DomainEvent, FrameSummary, OutputSource};
+use crate::domain::{DomainEvent, FrameSummary, OutputSource, StopReason};
 
 pub fn normalize(record: &MiRecord) -> Option<DomainEvent> {
     match record {
@@ -34,11 +34,11 @@ pub fn normalize(record: &MiRecord) -> Option<DomainEvent> {
 }
 
 fn stopped(results: &[MiResult]) -> Option<DomainEvent> {
-    let reason = MiResult::find_str(results, "reason")
+    let raw_reason = MiResult::find_str(results, "reason")
         .unwrap_or("unknown")
         .to_owned();
     let backend_inferior = MiResult::find_str(results, "thread-group").map(str::to_owned);
-    if reason.starts_with("exited") {
+    if raw_reason.starts_with("exited") {
         return Some(DomainEvent::InferiorExited {
             backend_id: backend_inferior.unwrap_or_else(|| "i1".into()),
             exit_code: MiResult::find_str(results, "exit-code").map(str::to_owned),
@@ -47,9 +47,40 @@ fn stopped(results: &[MiResult]) -> Option<DomainEvent> {
     Some(DomainEvent::TargetStopped {
         backend_inferior,
         backend_thread: MiResult::find_str(results, "thread-id").map(str::to_owned),
-        reason,
+        reason: raw_reason.clone(),
+        reason_detail: Some(stop_reason(results, raw_reason)),
         frame: MiResult::find(results, "frame").and_then(frame),
     })
+}
+
+// 2026-08-28: Keeping only GDB's reason string discarded bkptno and signal
+// metadata, so Agent probes could treat any stop as evidence of their own hit.
+fn stop_reason(results: &[MiResult], raw_reason: String) -> StopReason {
+    match raw_reason.as_str() {
+        "breakpoint-hit" => StopReason::Breakpoint {
+            backend_number: text(results, "bkptno"),
+            disposition: text(results, "disp"),
+        },
+        "watchpoint-trigger" | "read-watchpoint-trigger" | "access-watchpoint-trigger" => {
+            let fields = ["wpt", "hw-rwpt", "hw-awpt"]
+                .iter()
+                .find_map(|name| MiResult::find(results, name).and_then(MiValue::results));
+            StopReason::Watchpoint {
+                backend_number: fields.and_then(|fields| text(fields, "number")),
+                expression: fields.and_then(|fields| text(fields, "exp")),
+                access: raw_reason,
+            }
+        }
+        "signal-received" => StopReason::Signal {
+            name: text(results, "signal-name"),
+            meaning: text(results, "signal-meaning"),
+        },
+        "end-stepping-range" => StopReason::EndSteppingRange,
+        "function-finished" => StopReason::FunctionFinished,
+        "location-reached" => StopReason::LocationReached,
+        "interrupt" => StopReason::Interrupt,
+        _ => StopReason::Unknown { raw_reason },
+    }
 }
 
 fn notification(class: &str, results: &[MiResult]) -> Option<DomainEvent> {
@@ -147,11 +178,43 @@ mod tests {
             MiLimits::default(),
         )
         .unwrap();
-        let DomainEvent::TargetStopped { reason, frame, .. } = normalize(&record).unwrap() else {
+        let DomainEvent::TargetStopped {
+            reason,
+            reason_detail,
+            frame,
+            ..
+        } = normalize(&record).unwrap()
+        else {
             panic!("wrong event");
         };
         assert_eq!(reason, "breakpoint-hit");
+        assert_eq!(
+            reason_detail,
+            Some(StopReason::Breakpoint {
+                backend_number: None,
+                disposition: None
+            })
+        );
         assert_eq!(frame.unwrap().function.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn preserves_stop_attribution_fields() {
+        let record = parse_record(
+            b"*stopped,reason=\"breakpoint-hit\",disp=\"keep\",bkptno=\"7.2\",thread-id=\"3\",thread-group=\"i1\"",
+            MiLimits::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            normalize(&record),
+            Some(DomainEvent::TargetStopped {
+                reason_detail: Some(StopReason::Breakpoint {
+                    backend_number: Some(number),
+                    disposition: Some(disposition),
+                }),
+                ..
+            }) if number == "7.2" && disposition == "keep"
+        ));
     }
 
     #[test]

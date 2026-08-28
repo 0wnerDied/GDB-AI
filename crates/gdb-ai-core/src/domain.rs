@@ -322,6 +322,62 @@ pub struct FrameSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StopReason {
+    Breakpoint {
+        backend_number: Option<String>,
+        disposition: Option<String>,
+    },
+    Watchpoint {
+        backend_number: Option<String>,
+        expression: Option<String>,
+        access: String,
+    },
+    Signal {
+        name: Option<String>,
+        meaning: Option<String>,
+    },
+    EndSteppingRange,
+    FunctionFinished,
+    LocationReached,
+    Interrupt,
+    Core,
+    Unknown {
+        raw_reason: String,
+    },
+}
+
+impl fmt::Display for StopReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Breakpoint { backend_number, .. } => write!(
+                formatter,
+                "breakpoint:{}",
+                backend_number.as_deref().unwrap_or("unknown")
+            ),
+            Self::Watchpoint {
+                backend_number,
+                access,
+                ..
+            } => write!(
+                formatter,
+                "{access}:{}",
+                backend_number.as_deref().unwrap_or("unknown")
+            ),
+            Self::Signal { name, .. } => {
+                write!(formatter, "signal:{}", name.as_deref().unwrap_or("unknown"))
+            }
+            Self::EndSteppingRange => formatter.write_str("end-stepping-range"),
+            Self::FunctionFinished => formatter.write_str("function-finished"),
+            Self::LocationReached => formatter.write_str("location-reached"),
+            Self::Interrupt => formatter.write_str("interrupt"),
+            Self::Core => formatter.write_str("core"),
+            Self::Unknown { raw_reason } => formatter.write_str(raw_reason),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadState {
     pub id: ThreadId,
     pub backend_id: String,
@@ -405,6 +461,12 @@ pub struct SessionState {
     pub stop_id: Option<StopId>,
     pub stop_reason: Option<String>,
     #[serde(default)]
+    pub stop_reason_detail: Option<StopReason>,
+    #[serde(default)]
+    pub stopped_inferior_id: Option<InferiorId>,
+    #[serde(default)]
+    pub stopped_thread_id: Option<ThreadId>,
+    #[serde(default)]
     pub target_origin: TargetOrigin,
     pub inferiors: BTreeMap<String, InferiorState>,
     pub breakpoints: BTreeMap<String, BreakpointState>,
@@ -429,6 +491,9 @@ impl SessionState {
             outcome_unknown_tokens: BTreeSet::new(),
             stop_id: None,
             stop_reason: None,
+            stop_reason_detail: None,
+            stopped_inferior_id: None,
+            stopped_thread_id: None,
             target_origin: TargetOrigin::Unknown,
             inferiors: BTreeMap::new(),
             breakpoints: BTreeMap::new(),
@@ -507,6 +572,8 @@ pub enum DomainEvent {
         backend_inferior: Option<String>,
         backend_thread: Option<String>,
         reason: String,
+        #[serde(default)]
+        reason_detail: Option<StopReason>,
         frame: Option<FrameSummary>,
     },
     InferiorAdded {

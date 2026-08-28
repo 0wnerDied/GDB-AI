@@ -3,7 +3,7 @@ use crate::{
     domain::{
         BackendHealth, BreakpointId, BreakpointState, Consistency, DomainEvent, InferiorId,
         InferiorState, InferiorStatus, JournaledEvent, ModuleState, SessionLifecycle, SessionState,
-        SnapshotRef, SnapshotStatus, StopId, TargetOrigin, ThreadId, ThreadState,
+        SnapshotRef, SnapshotStatus, StopId, StopReason, TargetOrigin, ThreadId, ThreadState,
     },
 };
 
@@ -93,6 +93,10 @@ impl StateReducer {
                 // 2026-08-28: Inferior exit left the last stop and snapshot
                 // looking current even though no stop-scoped object survived.
                 self.state.stop_id = None;
+                self.state.stop_reason = None;
+                self.state.stop_reason_detail = None;
+                self.state.stopped_inferior_id = None;
+                self.state.stopped_thread_id = None;
                 self.state.snapshot = None;
                 true
             }
@@ -117,6 +121,9 @@ impl StateReducer {
                 self.state.execution_epoch += 1;
                 self.state.stop_id = None;
                 self.state.stop_reason = None;
+                self.state.stop_reason_detail = None;
+                self.state.stopped_inferior_id = None;
+                self.state.stopped_thread_id = None;
                 self.state.snapshot = None;
                 true
             }
@@ -124,6 +131,7 @@ impl StateReducer {
                 backend_inferior,
                 backend_thread,
                 reason,
+                reason_detail,
                 frame,
             } => {
                 let backend_id = backend_inferior
@@ -146,10 +154,17 @@ impl StateReducer {
                         }
                     }
                 }
+                let stopped_inferior_id = self
+                    .state
+                    .inferiors
+                    .get(&backend_id)
+                    .map(|inferior| inferior.id.clone());
+                let mut stopped_thread_id = None;
                 if let Some(backend_thread) = backend_thread {
                     let inferior = self.state.inferiors.get_mut(&backend_id).unwrap();
                     let id =
                         ThreadId::from_backend(&inferior.id, inferior.generation, backend_thread);
+                    stopped_thread_id = Some(id.clone());
                     inferior.threads.insert(
                         backend_thread.clone(),
                         ThreadState {
@@ -163,6 +178,13 @@ impl StateReducer {
                 let stop_id = StopId::from_event(&self.state.session_id, self.state.event_seq);
                 self.state.stop_id = Some(stop_id.clone());
                 self.state.stop_reason = Some(reason.clone());
+                self.state.stop_reason_detail = reason_detail.clone().or_else(|| {
+                    Some(StopReason::Unknown {
+                        raw_reason: reason.clone(),
+                    })
+                });
+                self.state.stopped_inferior_id = stopped_inferior_id;
+                self.state.stopped_thread_id = stopped_thread_id;
                 self.state.snapshot = Some(SnapshotRef {
                     snapshot_id: format!("snap_{stop_id}"),
                     stop_id,
@@ -394,6 +416,9 @@ impl StateReducer {
                 // and snapshot even though no stop-scoped handle was usable.
                 self.state.stop_id = None;
                 self.state.stop_reason = None;
+                self.state.stop_reason_detail = None;
+                self.state.stopped_inferior_id = None;
+                self.state.stopped_thread_id = None;
                 self.state.snapshot = None;
                 true
             }
@@ -402,6 +427,10 @@ impl StateReducer {
                     inferior.status = InferiorStatus::Detached;
                 }
                 self.state.stop_id = None;
+                self.state.stop_reason = None;
+                self.state.stop_reason_detail = None;
+                self.state.stopped_inferior_id = None;
+                self.state.stopped_thread_id = None;
                 self.state.snapshot = None;
                 true
             }
@@ -448,7 +477,9 @@ impl StateReducer {
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::{DomainEvent, FrameSummary, JournaledEvent, SessionId, SessionState};
+    use crate::domain::{
+        DomainEvent, FrameSummary, JournaledEvent, SessionId, SessionState, StopReason,
+    };
 
     use super::*;
 
@@ -478,6 +509,10 @@ mod tests {
                 backend_inferior: Some("i1".into()),
                 backend_thread: Some("1".into()),
                 reason: "breakpoint-hit".into(),
+                reason_detail: Some(StopReason::Breakpoint {
+                    backend_number: Some("1".into()),
+                    disposition: Some("keep".into()),
+                }),
                 frame: Some(FrameSummary {
                     level: 0,
                     address: Some("0x1".into()),
@@ -512,6 +547,10 @@ mod tests {
                 backend_inferior: Some("i1".into()),
                 backend_thread: Some("1".into()),
                 reason: "signal-received".into(),
+                reason_detail: Some(StopReason::Signal {
+                    name: Some("SIGTRAP".into()),
+                    meaning: Some("Trace/breakpoint trap".into()),
+                }),
                 frame: None,
             },
         );
