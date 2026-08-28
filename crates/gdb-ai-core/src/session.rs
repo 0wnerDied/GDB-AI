@@ -2485,6 +2485,13 @@ impl SessionWorker {
     }
 
     fn mark_failed(&mut self) {
+        // 2026-08-29: Evidence-storage failures stopped the worker before a
+        // BackendExited event could be journaled, leaving live clients with a
+        // stale READY/ACTIVE state. The reducer still owns this emergency
+        // terminal transition even though the failed journal cannot record it.
+        if self.reducer.fail_closed() {
+            self.state_sender.send_replace(self.reducer.state().clone());
+        }
         if self.metric_active {
             self.metrics.session_failed();
             self.metrics.session_closed();

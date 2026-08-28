@@ -28,6 +28,17 @@ impl StateReducer {
         self.state
     }
 
+    pub fn fail_closed(&mut self) -> bool {
+        let changed = self.state.lifecycle != SessionLifecycle::Failed
+            || self.state.backend != BackendHealth::Dead;
+        self.state.lifecycle = SessionLifecycle::Failed;
+        self.state.backend = BackendHealth::Dead;
+        if changed {
+            self.state.revision += 1;
+        }
+        changed
+    }
+
     pub fn apply(&mut self, journaled: &JournaledEvent) -> Result<bool> {
         if journaled.seq() <= self.state.event_seq {
             return Err(Error::new(
@@ -561,6 +572,18 @@ mod tests {
         reducer
             .apply(&JournaledEvent::for_replay(seq, event))
             .unwrap();
+    }
+
+    #[test]
+    fn fail_closed_publishes_one_terminal_revision() {
+        let mut reducer =
+            StateReducer::new(SessionState::creating(SessionId("sess_failed".into())));
+        assert!(reducer.fail_closed());
+        assert_eq!(reducer.state().lifecycle, SessionLifecycle::Failed);
+        assert_eq!(reducer.state().backend, BackendHealth::Dead);
+        assert_eq!(reducer.state().revision, 1);
+        assert!(!reducer.fail_closed());
+        assert_eq!(reducer.state().revision, 1);
     }
 
     #[test]
