@@ -2903,27 +2903,21 @@ impl Gateway {
                 // 2026-08-28: Linux current is a C macro, while current_task
                 // is an unrelocated per-CPU offset. Resolve the live pointer
                 // from the architecture register and keep task output bounded.
-                let expression = if view == "current_task" {
-                    kernel_current_expression(&entry).await?
+                let (value, evidence_seq) = if view == "current_task" {
+                    kernel_current_text(&entry, &request.parameters, &state).await?
                 } else {
-                    "&init_task"
+                    kernel_text(&entry, &request.parameters, &state, "&init_task").await?
                 };
-                let command = context_options(
-                    MiCommand::new("-data-evaluate-expression")?.string(expression),
-                    &request.parameters,
-                    &state,
-                )?;
-                let reply = safe_evaluate_command(&entry.handle, command).await?;
                 Ok(json!({
                     "view": view,
-                    "value": result_text(&reply.record, "value"),
+                    "value": value,
                     "stop_id": state.stop_id,
                     "source": {
                         "provider": "linux-kernel",
                         "version": LINUX_KERNEL_PROVIDER_VERSION,
                         "mechanism": "gdb-expression"
                     },
-                    "evidence_seq": reply.evidence_seq
+                    "evidence_seq": evidence_seq
                 }))
             }
             "version" => {
@@ -3080,22 +3074,16 @@ impl Gateway {
         evidence_seq = evidence_seq.max(seq);
         // 2026-08-28: Optional current-task metadata previously swallowed
         // timeouts and could send more MI commands after an unknown outcome.
-        let current = match kernel_current_expression(entry).await {
-            Ok(expression) => {
-                match kernel_address(entry, &request.parameters, state, expression).await {
-                    Ok((address, _)) => Some(address),
-                    Err(error)
-                        if matches!(
-                            error.code,
-                            ErrorCode::CapabilityMissing | ErrorCode::GdbError
-                        ) =>
-                    {
-                        None
-                    }
-                    Err(error) => return Err(error),
-                }
+        let current = match kernel_current_text(entry, &request.parameters, state).await {
+            Ok((value, _)) => Some(parse_gdb_u64(&value)?),
+            Err(error)
+                if matches!(
+                    error.code,
+                    ErrorCode::CapabilityMissing | ErrorCode::GdbError
+                ) =>
+            {
+                None
             }
-            Err(error) if error.code == ErrorCode::CapabilityMissing => None,
             Err(error) => return Err(error),
         };
         let mut task_addresses = vec![init_task];
@@ -4594,16 +4582,35 @@ async fn safe_evaluate_command(handle: &SessionHandle, command: MiCommand) -> Re
     handle.safe_evaluate(command).await
 }
 
-async fn kernel_current_expression(entry: &SessionEntry) -> Result<&'static str> {
+async fn kernel_current_text(
+    entry: &SessionEntry,
+    parameters: &Value,
+    state: &crate::domain::SessionState,
+) -> Result<(String, u64)> {
     let reply = entry
         .handle
         .command(MiCommand::new("-data-list-register-names")?)
         .await?;
     let names = result_string_list(&reply.record, "register-names");
     if names.iter().any(|name| name == "gs_base") {
-        Ok("*(struct task_struct **)((unsigned long)$gs_base+(unsigned long)&current_task)")
+        // 2026-08-28: Newer x86 kernels moved current_task into pcpu_hot,
+        // while older distribution symbols expose the standalone per-CPU
+        // variable. Try only the two documented layouts and preserve any
+        // timeout or transport failure from the first evaluation.
+        let modern = "*(struct task_struct **)((unsigned long)$gs_base+(unsigned long)&pcpu_hot.current_task)";
+        match kernel_text(entry, parameters, state, modern).await {
+            Ok(value) => Ok(value),
+            Err(error) if error.code == ErrorCode::GdbError => kernel_text(
+                entry,
+                parameters,
+                state,
+                "*(struct task_struct **)((unsigned long)$gs_base+(unsigned long)&current_task)",
+            )
+            .await,
+            Err(error) => Err(error),
+        }
     } else if names.iter().any(|name| name == "sp_el0") {
-        Ok("(struct task_struct *)$sp_el0")
+        kernel_text(entry, parameters, state, "(struct task_struct *)$sp_el0").await
     } else {
         Err(Error::new(
             ErrorCode::CapabilityMissing,

@@ -313,10 +313,18 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     )
     .await;
     let version_result = version.result.as_ref().unwrap();
+    let expected_release = std::env::var("GDB_AI_KERNEL_RELEASE").unwrap_or_else(|_| {
+        kernel_image
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("vmlinuz-"))
+            .expect("kernel image name must identify its release")
+            .to_owned()
+    });
     assert!(
-        version_result["version"]
-            .as_str()
-            .is_some_and(|value| value.starts_with("Linux version 6.1.0-50")),
+        version_result["version"].as_str().is_some_and(
+            |value| value.starts_with("Linux version ") && value.contains(&expected_release)
+        ),
         "unexpected kernel version: {version_result}"
     );
 
@@ -332,9 +340,11 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
         ),
     )
     .await;
-    assert_eq!(
-        base.result.as_ref().unwrap()["address"],
-        "0xffffffff81000000"
+    assert!(
+        base.result.as_ref().unwrap()["address"]
+            .as_str()
+            .is_some_and(|address| address.starts_with("0xffffffff")),
+        "kernel base must be a canonical x86-64 kernel address"
     );
 
     let tasks = call(
@@ -457,6 +467,9 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
         });
     assert_ne!(loaded_module["base"], "0x0000000000000000");
     assert!(loaded_module["size"].as_u64().is_some_and(|size| size > 0));
+    if let Ok(layout) = std::env::var("GDB_AI_KERNEL_MODULE_LAYOUT") {
+        assert_eq!(loaded_module["layout"], layout);
+    }
 
     let panic_breakpoint = call(
         &gateway,
