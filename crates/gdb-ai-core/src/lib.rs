@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod backend;
 pub mod config;
+mod contracts;
 pub mod domain;
 pub mod error;
 pub mod gateway;

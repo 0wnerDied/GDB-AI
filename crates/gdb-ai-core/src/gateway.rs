@@ -518,6 +518,10 @@ impl Gateway {
                 "parameters must be an object",
             ));
         }
+        // 2026-08-28: The envelope schema accepted arbitrary method
+        // parameters, so misspelled or wrong-typed mutation fields were
+        // silently ignored by handlers that read serde_json::Value directly.
+        request.method.validate_parameters(&request.parameters)?;
         if let Some(session_id) = &request.session_id {
             crate::domain::SessionId::parse(session_id)?;
         }
@@ -1016,5 +1020,49 @@ mod tests {
         assert!(serde_json::to_vec(&response).unwrap().len() <= 1_024);
         assert!(response.truncated);
         assert_eq!(response.artifacts.len(), 1);
+    }
+
+    #[test]
+    fn rejects_unknown_or_wrong_typed_method_parameters() {
+        let directory = tempdir().unwrap();
+        let gateway = Gateway::new(Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        })
+        .unwrap();
+        let request = |parameters| ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "invalid-parameters".into(),
+            session_id: Some("sess_test".into()),
+            method: "memory.read".into(),
+            expected_revision: None,
+            idempotency_key: None,
+            parameters,
+        };
+        assert!(
+            gateway
+                .validate_request(&request(json!({
+                    "address": "0x1000",
+                    "length": 16,
+                    "stop_id": "stop_test",
+                    "lenght": 16
+                })))
+                .is_err()
+        );
+        assert!(
+            gateway
+                .validate_request(&request(json!({
+                    "address": "0x1000",
+                    "length": "16",
+                    "stop_id": "stop_test"
+                })))
+                .is_err()
+        );
     }
 }

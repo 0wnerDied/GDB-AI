@@ -1,6 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{collections::BTreeSet, fmt, ops::Deref};
 
 use crate::{Error, domain::SessionState};
@@ -125,6 +125,50 @@ impl PartialEq<&str> for CanonicalMethod {
     fn eq(&self, other: &&str) -> bool {
         self.as_str() == *other
     }
+}
+
+// 2026-08-28: The published envelope described parameters as an arbitrary
+// object. Generate each method branch from the runtime contract instead.
+pub fn canonical_request_schema() -> Value {
+    let methods = CanonicalMethod::ALL
+        .iter()
+        .map(|method| method.as_str())
+        .collect::<Vec<_>>();
+    let contracts = CanonicalMethod::ALL
+        .iter()
+        .map(|method| {
+            json!({
+                "if": {
+                    "properties": {"method": {"const": method.as_str()}},
+                    "required": ["method"]
+                },
+                "then": {
+                    "properties": {"parameters": method.parameter_schema()}
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://schemas.gdb-ai.dev/gdb.ai.v1.json",
+        "title": "GDB/MI canonical request",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["api_version", "request_id", "method", "parameters"],
+        "properties": {
+            "api_version": {"const": API_VERSION},
+            "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "session_id": {
+                "type": ["string", "null"],
+                "pattern": "^sess_[A-Za-z0-9_-]{1,256}$"
+            },
+            "method": {"type": "string", "enum": methods},
+            "expected_revision": {"type": ["integer", "null"], "minimum": 0},
+            "idempotency_key": {"type": ["string", "null"], "maxLength": 256},
+            "parameters": {"type": "object"}
+        },
+        "allOf": contracts
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -315,6 +359,34 @@ mod tests {
         assert_eq!(published, typed);
         assert!(
             serde_json::from_value::<CanonicalMethod>(Value::String("unknown".into())).is_err()
+        );
+    }
+
+    #[test]
+    fn generated_schema_contains_method_parameter_contracts() {
+        let schema = canonical_request_schema();
+        let published: Value =
+            serde_json::from_str(include_str!("../../../schemas/gdb.ai.v1.json")).unwrap();
+        assert_eq!(published, schema);
+        assert_eq!(
+            schema["allOf"].as_array().unwrap().len(),
+            CanonicalMethod::ALL.len()
+        );
+        let memory = schema["allOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| branch["if"]["properties"]["method"]["const"] == "memory.read")
+            .unwrap();
+        assert_eq!(
+            memory["then"]["properties"]["parameters"]["additionalProperties"],
+            false
+        );
+        assert!(
+            memory["then"]["properties"]["parameters"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("address".into()))
         );
     }
 }

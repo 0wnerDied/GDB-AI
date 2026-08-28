@@ -1,16 +1,2915 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.gdb-ai.dev/gdb.ai.v1.json",
-  "title": "GDB/MI canonical request",
-  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "required": ["api_version", "request_id", "method", "parameters"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.create"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "profile": {
+                "enum": [
+                  "offline_core",
+                  "live_observer",
+                  "debug_control",
+                  "lab_mutation",
+                  "raw_admin"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.get"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.list"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.close"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.acquire_write_lease"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "force": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.release_write_lease"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.attempt_recovery"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.capabilities"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.providers"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.transcript"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "max_bytes": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "offset": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "session.event"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "event_seq": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "event_seq"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "target.launch"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "argv": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "aslr": {
+                "enum": [
+                  "preserve",
+                  "disable"
+                ],
+                "type": "string"
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "detach_on_fork": {
+                "type": "boolean"
+              },
+              "environment": {
+                "type": "object"
+              },
+              "environment_mode": {
+                "enum": [
+                  "clean"
+                ],
+                "type": "string"
+              },
+              "follow_exec": {
+                "enum": [
+                  "same-inferior"
+                ],
+                "type": "string"
+              },
+              "follow_fork": {
+                "enum": [
+                  "parent",
+                  "child"
+                ],
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "program": {
+                "type": "string"
+              },
+              "stop": {
+                "enum": [
+                  "entry",
+                  "none"
+                ],
+                "type": "string"
+              },
+              "wait": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "program"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "target.attach"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "executable": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "pid": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "wait": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "pid"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "target.connect_remote"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "endpoint": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object"
+                  }
+                ]
+              },
+              "executable": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "mode": {
+                "enum": [
+                  "remote",
+                  "extended-remote"
+                ],
+                "type": "string"
+              },
+              "wait": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "endpoint"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "target.open_core"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "core": {
+                "type": "string"
+              },
+              "executable": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "executable",
+              "core"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "target.detach"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "target.restart"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "stop_at_entry": {
+                "type": "boolean"
+              },
+              "wait": {
+                "type": "object"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "target.kill"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "wait": {
+                "type": "object"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "execution.control"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "action": {
+                "enum": [
+                  "continue",
+                  "interrupt",
+                  "step",
+                  "next",
+                  "finish",
+                  "step_instruction",
+                  "next_instruction",
+                  "until"
+                ],
+                "type": "string"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "location": {
+                "type": "string"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "wait": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "execution.wait"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "operation_id": {
+                "type": "string"
+              },
+              "wait": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "wait"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "breakpoint.create"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "address": {
+                "type": "string"
+              },
+              "catch": {
+                "type": "string"
+              },
+              "condition": {
+                "type": "string"
+              },
+              "expression": {
+                "type": "string"
+              },
+              "function": {
+                "type": "string"
+              },
+              "hardware": {
+                "oneOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "enum": [
+                      "auto",
+                      "required"
+                    ],
+                    "type": "string"
+                  }
+                ]
+              },
+              "ignore_count": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "software",
+                  "hardware",
+                  "temporary",
+                  "instruction",
+                  "watchpoint",
+                  "read_watchpoint",
+                  "access_watchpoint",
+                  "catchpoint"
+                ],
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "location": {
+                "type": "object"
+              },
+              "module_offset": {
+                "type": "object"
+              },
+              "pending": {
+                "type": "boolean"
+              },
+              "source": {
+                "type": "object"
+              },
+              "temporary": {
+                "type": "boolean"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "breakpoint.update"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "backend_number": {
+                "type": "string"
+              },
+              "breakpoint_id": {
+                "type": "string"
+              },
+              "condition": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "ignore_count": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "breakpoint.delete"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "backend_number": {
+                "type": "string"
+              },
+              "breakpoint_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "breakpoint.list"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "inspection.get"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "after_lines": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "around": {
+                "type": "object"
+              },
+              "before_lines": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "include_bytes": {
+                "type": "boolean"
+              },
+              "include_source": {
+                "type": "boolean"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "limit": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "line": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "offset": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "profile": {
+                "enum": [
+                  "minimal",
+                  "brief",
+                  "standard",
+                  "deep"
+                ],
+                "type": "string"
+              },
+              "range": {
+                "type": "object"
+              },
+              "roles": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "view": {
+                "enum": [
+                  "stop_context",
+                  "target",
+                  "capabilities",
+                  "providers",
+                  "crash",
+                  "threads",
+                  "stack",
+                  "frame",
+                  "locals",
+                  "arguments",
+                  "registers",
+                  "modules",
+                  "breakpoints",
+                  "source",
+                  "mappings",
+                  "signals"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "view"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "inspection.snapshot"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "around": {
+                "type": "object"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "include_bytes": {
+                "type": "boolean"
+              },
+              "include_source": {
+                "type": "boolean"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "limit": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "profile": {
+                "enum": [
+                  "minimal",
+                  "brief",
+                  "standard",
+                  "deep"
+                ],
+                "type": "string"
+              },
+              "range": {
+                "type": "object"
+              },
+              "roles": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "inspection.diff"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "after_snapshot_id": {
+                "type": "string"
+              },
+              "before_snapshot_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "before_snapshot_id",
+              "after_snapshot_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "inspection.batch"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "requests": {
+                "type": "array"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "requests"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "inspection.snapshot_get"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "snapshot_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "snapshot_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "value.evaluate"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "expression": {
+                "type": "string"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "side_effects": {
+                "enum": [
+                  "deny"
+                ],
+                "type": "string"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "expression"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "value.create"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "expression": {
+                "type": "string"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "expression"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "value.children"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "limit": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "offset": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "value_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "value_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "value.update"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "value_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "value_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "value.release"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "value_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "value_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "memory.read"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "address": {
+                "type": "string"
+              },
+              "allow_partial": {
+                "type": "boolean"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "length": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "volatile": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "address",
+              "length"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "memory.write"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "address": {
+                "type": "string"
+              },
+              "data_base64": {
+                "type": "string"
+              },
+              "expected": {
+                "type": "object"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "address",
+              "expected"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "memory.search"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "length": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "max_results": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "pattern": {
+                "type": "object"
+              },
+              "start": {
+                "type": "string"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "volatile": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "start",
+              "length",
+              "pattern"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "memory.compare"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "address": {
+                "type": "string"
+              },
+              "expected": {
+                "type": "object"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "length": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "volatile": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "address",
+              "length",
+              "expected"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "register.read"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "roles": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "register.write"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "register": {
+                "type": "string"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "register",
+              "value",
+              "reason"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "disassembly.read"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "around": {
+                "type": "object"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "include_bytes": {
+                "type": "boolean"
+              },
+              "include_source": {
+                "type": "boolean"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "range": {
+                "type": "object"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "inferior_io.read"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "after_offset": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "max_bytes": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "stream": {
+                "enum": [
+                  "pty",
+                  "target",
+                  "console",
+                  "log"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "inferior_io.write"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "data_base64": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "inferior_io.close_stdin"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "inferior_io.resize"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "columns": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "rows": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "rows",
+              "columns"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "tracking.add_expression"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "expression": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "max_value_bytes": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "expression"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "tracking.add_memory"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "address_expression": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "length": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "max_history": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "address_expression",
+              "length"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "tracking.remove"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "tracking_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "tracking_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "tracking.list"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "signal.get"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "signal.update"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "signals": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "signals"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "agent.hypothesis_check"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "claim": {
+                "type": "string"
+              },
+              "expected": {
+                "type": "string"
+              },
+              "expression": {
+                "type": "string"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "operator": {
+                "enum": [
+                  "equals",
+                  "not_equals",
+                  "contains",
+                  "greater_than",
+                  "less_than"
+                ],
+                "type": "string"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "expression",
+              "expected"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "agent.probe"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "address": {
+                "type": "string"
+              },
+              "budget": {
+                "type": "object"
+              },
+              "capture": {
+                "type": "array"
+              },
+              "condition": {
+                "type": "string"
+              },
+              "expression": {
+                "type": "string"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "function": {
+                "type": "string"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "location": {
+                "type": "object"
+              },
+              "max_hits": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "module_offset": {
+                "type": "object"
+              },
+              "source": {
+                "type": "object"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "stop_policy": {
+                "enum": [
+                  "on_condition",
+                  "continue_after_capture"
+                ],
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "agent.experiment"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "address": {
+                "type": "string"
+              },
+              "budget": {
+                "type": "object"
+              },
+              "capture": {
+                "type": "array"
+              },
+              "condition": {
+                "type": "string"
+              },
+              "expression": {
+                "type": "string"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "function": {
+                "type": "string"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "location": {
+                "type": "object"
+              },
+              "max_hits": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "module_offset": {
+                "type": "object"
+              },
+              "source": {
+                "type": "object"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "stop_policy": {
+                "enum": [
+                  "on_condition",
+                  "continue_after_capture"
+                ],
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "kernel.inspect"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_current_stop": {
+                "type": "boolean"
+              },
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "around": {
+                "type": "object"
+              },
+              "frame_id": {
+                "type": "string"
+              },
+              "frame_level": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "include_bytes": {
+                "type": "boolean"
+              },
+              "include_source": {
+                "type": "boolean"
+              },
+              "inferior_id": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "limit": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "offset": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "range": {
+                "type": "object"
+              },
+              "roles": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "stop_id": {
+                "type": "string"
+              },
+              "thread_id": {
+                "type": "string"
+              },
+              "view": {
+                "enum": [
+                  "current_task",
+                  "init_task",
+                  "stack",
+                  "panic"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "view"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "kernel.monitor"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "command": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "artifact.get"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "max_bytes": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "offset": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "uri": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "uri"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "events.wait"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "after_event_seq": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "timeout_ms": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "raw.mi"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "arguments": {
+                "type": "array"
+              },
+              "command": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "timeout_ms": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
+            "const": "raw.console"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "command": {
+                "type": "string"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "timeout_ms": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    }
+  ],
   "properties": {
-    "api_version": {"const": "gdb.ai/v1"},
-    "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
-    "session_id": {"type": ["string", "null"], "pattern": "^sess_[A-Za-z0-9_-]{1,256}$"},
+    "api_version": {
+      "const": "gdb.ai/v1"
+    },
+    "expected_revision": {
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "idempotency_key": {
+      "maxLength": 256,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "method": {
-      "type": "string",
       "enum": [
         "session.create",
         "session.get",
@@ -72,10 +2971,31 @@
         "events.wait",
         "raw.mi",
         "raw.console"
-      ]
+      ],
+      "type": "string"
     },
-    "expected_revision": {"type": ["integer", "null"], "minimum": 0},
-    "idempotency_key": {"type": ["string", "null"], "maxLength": 256},
-    "parameters": {"type": "object"}
-  }
+    "parameters": {
+      "type": "object"
+    },
+    "request_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "session_id": {
+      "pattern": "^sess_[A-Za-z0-9_-]{1,256}$",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "api_version",
+    "request_id",
+    "method",
+    "parameters"
+  ],
+  "title": "GDB/MI canonical request",
+  "type": "object"
 }
