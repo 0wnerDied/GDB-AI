@@ -688,7 +688,17 @@ impl CanonicalMethod {
             KernelInspect => MethodContract::contextual(vec![
                 required(
                     "view",
-                    Enum(&["current_task", "init_task", "stack", "panic"]),
+                    Enum(&[
+                        "capabilities",
+                        "version",
+                        "base",
+                        "current_task",
+                        "init_task",
+                        "tasks",
+                        "modules",
+                        "stack",
+                        "panic",
+                    ]),
                 ),
                 optional("limit", Unsigned),
                 optional("offset", Unsigned),

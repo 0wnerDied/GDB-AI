@@ -3433,8 +3433,13 @@
               },
               "view": {
                 "enum": [
+                  "capabilities",
+                  "version",
+                  "base",
                   "current_task",
                   "init_task",
+                  "tasks",
+                  "modules",
                   "stack",
                   "panic"
                 ],

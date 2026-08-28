@@ -1,5 +1,7 @@
 use std::{
+    fs::File,
     net::TcpListener,
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
 };
@@ -25,20 +27,57 @@ impl Drop for ChildGuard {
     }
 }
 
-fn kernel_artifacts() -> Option<(PathBuf, PathBuf)> {
+fn kernel_artifacts() -> Option<(PathBuf, PathBuf, PathBuf)> {
     let image = std::env::var_os("GDB_AI_KERNEL_IMAGE").map(PathBuf::from);
     let symbols = std::env::var_os("GDB_AI_KERNEL_VMLINUX").map(PathBuf::from);
-    if let (Some(image), Some(symbols)) = (image, symbols)
+    let module = std::env::var_os("GDB_AI_KERNEL_MODULE").map(PathBuf::from);
+    if let (Some(image), Some(symbols), Some(module)) = (image, symbols, module)
         && image.is_file()
         && symbols.is_file()
+        && module.is_file()
     {
-        return Some((image, symbols));
+        return Some((image, symbols, module));
     }
     if std::env::var_os("GDB_AI_REQUIRE_KERNEL_INTEGRATION").is_some() {
-        panic!("GDB_AI_KERNEL_IMAGE and GDB_AI_KERNEL_VMLINUX must name files");
+        panic!("kernel image, vmlinux, and module environment variables must name files");
     }
     eprintln!("skipped kernel integration; Debian kernel artifacts are not configured");
     None
+}
+
+fn build_initramfs(directory: &std::path::Path, module: &std::path::Path) -> PathBuf {
+    let root = directory.join("initramfs");
+    for path in ["bin", "dev", "proc", "sys"] {
+        std::fs::create_dir_all(root.join(path)).unwrap();
+    }
+    let busybox = ["/usr/bin/busybox", "/bin/busybox"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .expect("busybox must be installed for kernel integration");
+    std::fs::copy(busybox, root.join("bin/busybox")).unwrap();
+    std::fs::copy(module, root.join("irqbypass.ko")).unwrap();
+    let init = root.join("init");
+    std::fs::write(
+        &init,
+        "#!/bin/busybox sh\n/bin/busybox mount -t proc proc /proc\n/bin/busybox insmod /irqbypass.ko\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&init).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&init, permissions).unwrap();
+    let archive = directory.join("initramfs.cpio");
+    let status = Command::new("sh")
+        .args([
+            "-c",
+            "find . -print0 | cpio --null --quiet -o --format=newc",
+        ])
+        .current_dir(&root)
+        .stdout(Stdio::from(File::create(&archive).unwrap()))
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to build kernel initramfs");
+    archive
 }
 
 fn request(
@@ -71,14 +110,15 @@ async fn call(gateway: &Gateway, caller: &Caller, request: ApiRequest) -> ApiRes
 
 #[tokio::test]
 async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
-    let Some((kernel_image, vmlinux)) = kernel_artifacts() else {
+    let Some((kernel_image, vmlinux, module)) = kernel_artifacts() else {
         return;
     };
-    if !support::require_commands(&["gdb", "qemu-system-x86_64"]) {
+    if !support::require_commands(&["cpio", "gdb", "qemu-system-x86_64"]) {
         return;
     }
 
     let directory = tempdir().unwrap();
+    let initramfs = build_initramfs(directory.path(), &module);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = listener.local_addr().unwrap().to_string();
     drop(listener);
@@ -87,7 +127,9 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
             .args(["-accel", "tcg", "-m", "512M", "-smp", "1", "-S"])
             .arg("-kernel")
             .arg(&kernel_image)
-            .args(["-append", "console=ttyS0 nokaslr", "-gdb"])
+            .arg("-initrd")
+            .arg(initramfs)
+            .args(["-append", "console=ttyS0 nokaslr rdinit=/init", "-gdb"])
             .arg(format!("tcp:{endpoint}"))
             .args(["-display", "none", "-serial", "none", "-monitor", "none"])
             .stdout(Stdio::null())
@@ -237,6 +279,245 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
         "linux-kernel"
     );
 
+    let capabilities = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-kernel-capabilities",
+            Some(&session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "capabilities", "stop_id": kernel_stop}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        capabilities.result.as_ref().unwrap()["architecture"],
+        "x86-64"
+    );
+    assert_eq!(
+        capabilities.result.as_ref().unwrap()["transport"],
+        "gdb-remote"
+    );
+
+    let version = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-kernel-version",
+            Some(&session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "version", "stop_id": kernel_stop}),
+        ),
+    )
+    .await;
+    let version_result = version.result.as_ref().unwrap();
+    assert!(
+        version_result["version"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("Linux version 6.1.0-50")),
+        "unexpected kernel version: {version_result}"
+    );
+
+    let base = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-kernel-base",
+            Some(&session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "base", "stop_id": kernel_stop}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        base.result.as_ref().unwrap()["address"],
+        "0xffffffff81000000"
+    );
+
+    let tasks = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-kernel-tasks",
+            Some(&session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "tasks", "stop_id": kernel_stop, "limit": 8}),
+        ),
+    )
+    .await;
+    let task = &tasks.result.as_ref().unwrap()["tasks"][0];
+    assert_eq!(task["pid"], 0);
+    assert_eq!(task["name"], "swapper");
+    assert_eq!(task["current"], true);
+
+    let modules = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-kernel-modules",
+            Some(&session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "modules", "stop_id": kernel_stop, "limit": 8}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        modules.result.as_ref().unwrap()["modules"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    let stack = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-kernel-stack",
+            Some(&session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "stack", "stop_id": kernel_stop, "limit": 4}),
+        ),
+    )
+    .await;
+    assert!(
+        stack.result.as_ref().unwrap()["frames"]
+            .as_array()
+            .is_some_and(|frames| !frames.is_empty())
+    );
+    assert_eq!(
+        stack.result.as_ref().unwrap()["source"]["provider"],
+        "linux-kernel"
+    );
+
+    let module_breakpoint = call(
+        &gateway,
+        &caller,
+        request(
+            "module-init-breakpoint",
+            Some(&session_id),
+            "breakpoint.create",
+            stack.revision,
+            json!({"lease_id": lease_id, "location": {"function": "do_init_module"}}),
+        ),
+    )
+    .await;
+    let module_stop = call(
+        &gateway,
+        &caller,
+        request(
+            "continue-to-module-init",
+            Some(&session_id),
+            "execution.control",
+            module_breakpoint.revision,
+            json!({
+                "action": "continue",
+                "lease_id": lease_id,
+                "stop_id": kernel_stop,
+                "wait": {"until": "snapshot", "timeout_ms": 30000}
+            }),
+        ),
+    )
+    .await;
+    let module_stop_id = module_stop
+        .state
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    let loaded_modules = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-loaded-kernel-module",
+            Some(&session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "modules", "stop_id": module_stop_id, "limit": 8}),
+        ),
+    )
+    .await;
+    let loaded_modules_result = loaded_modules.result.as_ref().unwrap();
+    let loaded_module = loaded_modules_result["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|module| module["name"] == "irqbypass")
+        .unwrap_or_else(|| {
+            panic!("irqbypass module must be visible at do_init_module: {loaded_modules_result}")
+        });
+    assert_ne!(loaded_module["base"], "0x0000000000000000");
+    assert!(loaded_module["size"].as_u64().is_some_and(|size| size > 0));
+
+    let panic_breakpoint = call(
+        &gateway,
+        &caller,
+        request(
+            "panic-breakpoint",
+            Some(&session_id),
+            "breakpoint.create",
+            loaded_modules.revision,
+            json!({"lease_id": lease_id, "location": {"function": "panic"}}),
+        ),
+    )
+    .await;
+    let panic_stop = call(
+        &gateway,
+        &caller,
+        request(
+            "continue-to-kernel-panic",
+            Some(&session_id),
+            "execution.control",
+            panic_breakpoint.revision,
+            json!({
+                "action": "continue",
+                "lease_id": lease_id,
+                "stop_id": module_stop_id,
+                "wait": {"until": "snapshot", "timeout_ms": 30000}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        panic_stop.state.as_ref().unwrap().stop_reason.as_deref(),
+        Some("breakpoint-hit")
+    );
+    let panic_stop_id = panic_stop
+        .state
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    let panic_context = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-kernel-panic-context",
+            Some(&session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "panic", "stop_id": panic_stop_id}),
+        ),
+    )
+    .await;
+    assert!(panic_context.result.as_ref().unwrap()["snapshot_id"].is_string());
+    assert_eq!(
+        panic_context.result.as_ref().unwrap()["source"]["provider"],
+        "linux-kernel"
+    );
+
     let monitored = call(
         &gateway,
         &caller,
@@ -244,7 +525,7 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
             "monitor-registers",
             Some(&session_id),
             "kernel.monitor",
-            current_task.revision,
+            panic_context.revision,
             json!({"lease_id": lease_id, "command": "info registers"}),
         ),
     )

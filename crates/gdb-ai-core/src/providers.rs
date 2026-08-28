@@ -6,6 +6,8 @@ use crate::{
     session::SessionCapabilities,
 };
 
+pub const LINUX_KERNEL_PROVIDER_VERSION: &str = "1.1.0";
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ProviderDescriptor {
     pub name: &'static str,
@@ -102,7 +104,7 @@ pub fn descriptors(
         },
         ProviderDescriptor {
             name: "linux-kernel",
-            version: "1.0.0",
+            version: LINUX_KERNEL_PROVIDER_VERSION,
             status: if kernel_enabled {
                 ProviderStatus::Conditional
             } else {

@@ -41,7 +41,8 @@ The complete normative design is in [PLAN.md](PLAN.md).
   bubblewrap filesystem/network hardening when available, `no_new_privs`, and
   process rlimits; untrusted targets require an external container or VM
 - Optional SHA-256-pinned GDB Python MI extension and conditional kernel
-  provider with an explicit monitor allowlist
+  provider with bounded tasks/modules/panic context and an explicit monitor
+  allowlist; see [Linux kernel debugging](docs/kernel.md)
 
 Version 1 intentionally remains all-stop and Linux-only. It does not claim
 non-stop execution, native Windows/macOS debugging, an LLDB backend, arbitrary
