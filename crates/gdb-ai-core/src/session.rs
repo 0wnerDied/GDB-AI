@@ -1349,8 +1349,8 @@ impl SessionWorker {
                     let _ = response.send(Err(error));
                     return false;
                 }
-                self.cleanup_stale_values(deadline).await;
                 let _ = response.send(self.execute_until(command, deadline).await);
+                self.cleanup_one_stale_value().await;
             }
             WorkerRequest::Transaction {
                 before,
@@ -1367,7 +1367,6 @@ impl SessionWorker {
                     let _ = response.send(Err(error));
                     return false;
                 }
-                self.cleanup_stale_values(deadline).await;
                 let mut setup = Ok(());
                 for command in before {
                     if let Err(error) = self.execute_until(command, deadline).await {
@@ -1405,6 +1404,7 @@ impl SessionWorker {
                 } else {
                     let _ = response.send(result);
                 }
+                self.cleanup_one_stale_value().await;
             }
             WorkerRequest::SafeEvaluate {
                 command,
@@ -1419,8 +1419,8 @@ impl SessionWorker {
                     let _ = response.send(Err(error));
                     return false;
                 }
-                self.cleanup_stale_values(deadline).await;
                 let _ = response.send(self.execute_safe(command, deadline).await);
+                self.cleanup_one_stale_value().await;
             }
             WorkerRequest::RecordEvent { event, response } => {
                 let _ = response.send(self.apply_event(event));
@@ -1447,6 +1447,7 @@ impl SessionWorker {
                     Err(error) => Err(error),
                 };
                 let _ = response.send(result);
+                self.cleanup_one_stale_value().await;
             }
             WorkerRequest::RegisterValue { binding, response } => {
                 let result = if self.values.len() >= 1_024 {
@@ -1708,22 +1709,33 @@ impl SessionWorker {
         Ok(())
     }
 
-    async fn cleanup_stale_values(&mut self, deadline: tokio::time::Instant) {
-        if !self.reducer.state().inferiors.values().any(|inferior| {
-            matches!(
-                inferior.status,
-                InferiorStatus::Stopped | InferiorStatus::Core
-            )
-        }) {
+    async fn cleanup_one_stale_value(&mut self) {
+        // 2026-08-28: Deleting every stale variable object before a business
+        // command consumed that request's deadline. Clean one object only
+        // after responding, so maintenance cannot delay the current result.
+        if !self.timed_out_tokens.is_empty()
+            || !self.reducer.state().inferiors.values().any(|inferior| {
+                matches!(
+                    inferior.status,
+                    InferiorStatus::Stopped | InferiorStatus::Core
+                )
+            })
+        {
             return;
         }
-        for backend_name in std::mem::take(&mut self.stale_backend_values) {
-            let Ok(command) =
-                MiCommand::new("-var-delete").and_then(|command| command.bare(backend_name))
-            else {
-                continue;
-            };
-            let _ = self.execute_until(command, deadline).await;
+        let Some(backend_name) = self.stale_backend_values.pop() else {
+            return;
+        };
+        let Ok(command) =
+            MiCommand::new("-var-delete").and_then(|command| command.bare(backend_name.clone()))
+        else {
+            return;
+        };
+        let deadline = command_deadline(Duration::from_millis(250));
+        if let Err(error) = self.execute_until(command, deadline).await
+            && matches!(error.code, ErrorCode::Timeout | ErrorCode::GdbUnresponsive)
+        {
+            self.stale_backend_values.push(backend_name);
         }
     }
 
@@ -2865,6 +2877,89 @@ mod tests {
             MiResult::find_str(restored.record.results(), "value"),
             Some("on")
         );
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_value_cleanup_does_not_consume_the_business_deadline() {
+        if std::process::Command::new("gdb")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let mut config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        config.server.command_timeout_ms = 200;
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let session = SessionHandle::start(
+            Arc::new(config),
+            Profile::RawAdmin,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+        session
+            .record_event(DomainEvent::InferiorAdded {
+                backend_id: "i1".into(),
+                pid: Some(1),
+            })
+            .await
+            .unwrap();
+        session
+            .record_event(DomainEvent::TargetStopped {
+                backend_inferior: Some("i1".into()),
+                backend_thread: None,
+                reason: "breakpoint-hit".into(),
+                reason_detail: None,
+                frame: None,
+            })
+            .await
+            .unwrap();
+        let stop_id = session.state().stop_id.unwrap();
+        for index in 0..1_024 {
+            session
+                .register_value(ValueBinding {
+                    value_id: crate::domain::ValueId(format!("val_{stop_id}_{index}")),
+                    backend_name: format!("missing_{index}"),
+                    stop_id: stop_id.clone(),
+                    expression: "0".into(),
+                })
+                .await
+                .unwrap();
+        }
+        session
+            .record_event(DomainEvent::TargetRunning {
+                backend_inferiors: vec!["i1".into()],
+            })
+            .await
+            .unwrap();
+        session
+            .record_event(DomainEvent::TargetStopped {
+                backend_inferior: Some("i1".into()),
+                backend_thread: None,
+                reason: "breakpoint-hit".into(),
+                reason_detail: None,
+                frame: None,
+            })
+            .await
+            .unwrap();
+
+        session
+            .command(MiCommand::new("-gdb-version").unwrap())
+            .await
+            .unwrap();
         session.close().await.unwrap();
     }
 
