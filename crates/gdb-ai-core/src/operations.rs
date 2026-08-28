@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_mi::{MiRecord, MiResult, MiValue};
@@ -10,8 +15,12 @@ use ulid::Ulid;
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{DomainEvent, StopId},
-    gateway::{Caller, Gateway, SessionEntry},
+    domain::{
+        BreakpointLocationState, DomainEvent, FrameId, FrameSummary, LeaseId, OperationId,
+        OperationRecord, OperationStatus, SessionId, SignalPolicyState, StopId, TargetOrigin,
+        TrackingDefinition, TrackingId, ValueBinding, ValueId, WriteLease,
+    },
+    gateway::{Caller, Gateway, SessionEntry, now_unix_ms, same_principal},
     policy::{Profile, validate_console_command},
     protocol::ApiRequest,
     session::{CommandReply, OutputRing, SessionHandle, WaitUntil},
@@ -25,58 +34,70 @@ impl Gateway {
     ) -> Result<Value> {
         match request.method.as_str() {
             "session.create" => self.session_create(request, caller).await,
-            "session.get" => Ok(serde_json::to_value(
-                self.entry(required_session(request)?).await?.handle.state(),
-            )?),
-            "session.list" => self.session_list().await,
+            "session.get" => self.session_get(request).await,
+            "session.list" => self.session_list(caller).await,
             "session.close" => self.session_close(request).await,
-            "session.acquire_write_lease" | "session.release_write_lease" => {
-                deferred("multi-user write leases")
+            "session.acquire_write_lease" => {
+                self.session_acquire_write_lease(request, caller).await
             }
+            "session.release_write_lease" => self.session_release_write_lease(request).await,
+            "session.attempt_recovery" => self.session_attempt_recovery(request).await,
             "session.capabilities" => Ok(serde_json::to_value(
                 self.entry(required_session(request)?)
                     .await?
                     .handle
                     .capabilities(),
             )?),
+            "session.providers" => self.session_providers(request).await,
+            "session.transcript" => self.session_transcript(request).await,
+            "session.event" => self.session_event(request).await,
             "target.launch" => self.target_launch(request).await,
-            "target.attach"
-            | "target.connect_remote"
-            | "target.open_core"
-            | "target.detach"
-            | "target.restart"
-            | "target.kill" => deferred("non-local-launch target lifecycle"),
+            "target.attach" => self.target_attach(request).await,
+            "target.connect_remote" => self.target_connect_remote(request).await,
+            "target.open_core" => self.target_open_core(request).await,
+            "target.detach" => self.target_detach(request).await,
+            "target.restart" => self.target_restart(request).await,
+            "target.kill" => self.target_kill(request).await,
             "execution.control" => self.execution_control(request).await,
             "execution.wait" => self.execution_wait(request).await,
             "breakpoint.create" => self.breakpoint_create(request).await,
             "breakpoint.update" => self.breakpoint_update(request).await,
             "breakpoint.delete" => self.breakpoint_delete(request).await,
-            "breakpoint.list" => self.simple_command(request, "-break-list").await,
+            "breakpoint.list" => self.breakpoint_list(request).await,
             "inspection.get" => self.inspection_get(request).await,
             "inspection.snapshot" => self.inspection_snapshot(request).await,
-            "inspection.diff" => deferred("tracked snapshot diff"),
+            "inspection.diff" => self.inspection_diff(request).await,
+            "inspection.batch" => self.inspection_batch(request).await,
+            "inspection.snapshot_get" => self.inspection_snapshot_get(request).await,
             "value.evaluate" => self.value_evaluate(request).await,
-            "value.create" | "value.children" | "value.update" | "value.release" => {
-                deferred("persistent MI variable objects")
-            }
+            "value.create" => self.value_create(request).await,
+            "value.children" => self.value_children(request).await,
+            "value.update" => self.value_update(request).await,
+            "value.release" => self.value_release(request).await,
             "memory.read" => self.memory_read(request).await,
-            "memory.write" | "memory.search" | "memory.compare" => {
-                deferred("memory mutation and search")
-            }
+            "memory.write" => self.memory_write(request).await,
+            "memory.search" => self.memory_search(request).await,
+            "memory.compare" => self.memory_compare(request).await,
             "register.read" => self.register_read(request).await,
-            "register.write" => deferred("register mutation"),
+            "register.write" => self.register_write(request).await,
             "disassembly.read" => self.disassembly_read(request).await,
             "inferior_io.read" => self.io_read(request).await,
             "inferior_io.write" => self.io_write(request).await,
             "inferior_io.close_stdin" => self.io_close_stdin(request).await,
             "inferior_io.resize" => self.io_resize(request).await,
-            "tracking.add_expression"
-            | "tracking.add_memory"
-            | "tracking.remove"
-            | "tracking.list" => deferred("tracked state"),
-            "artifact.get" => self.artifact_get(request).await,
+            "tracking.add_expression" => self.tracking_add_expression(request).await,
+            "tracking.add_memory" => self.tracking_add_memory(request).await,
+            "tracking.remove" => self.tracking_remove(request).await,
+            "tracking.list" => self.tracking_list(request).await,
+            "signal.get" => self.signal_get(request).await,
+            "signal.update" => self.signal_update(request).await,
+            "agent.hypothesis_check" => self.agent_hypothesis_check(request).await,
+            "agent.probe" | "agent.experiment" => self.agent_probe(request).await,
+            "kernel.inspect" => self.kernel_inspect(request).await,
+            "kernel.monitor" => self.kernel_monitor(request).await,
+            "artifact.get" => self.artifact_get(request, caller).await,
             "events.wait" => self.events_wait(request).await,
-            "raw.mi" => deferred("raw MI exposure"),
+            "raw.mi" => self.raw_mi(request).await,
             "raw.console" => self.raw_console(request).await,
             _ => Err(Error::new(ErrorCode::NotFound, "unknown canonical method")),
         }
@@ -101,48 +122,253 @@ impl Gateway {
                 "selecting a non-default profile requires an administrative caller",
             ));
         }
-        let handle = SessionHandle::start(self.config.clone(), profile, self.store.clone()).await?;
+        let handle = SessionHandle::start(
+            self.config.clone(),
+            profile,
+            self.store.clone(),
+            self.metrics.clone(),
+        )
+        .await?;
         let id = handle.id().clone();
+        let lease = WriteLease {
+            lease_id: LeaseId::new(),
+            session_id: id.clone(),
+            owner: caller.identity.clone(),
+            expires_at_unix_ms: now_unix_ms()
+                .saturating_add(self.config.server.write_lease_ms.max(1)),
+            generation: 1,
+        };
+        if let Err(error) = self
+            .store
+            .set_session_owner(&id, &caller.identity)
+            .and_then(|()| self.store.upsert_lease(&lease))
+        {
+            let _ = handle.close().await;
+            return Err(error);
+        }
         let entry = Arc::new(SessionEntry {
             handle,
             owner: caller.identity.clone(),
             mutation: tokio::sync::Mutex::new(()),
+            out_of_band_mutation: tokio::sync::Mutex::new(()),
+            lease: tokio::sync::Mutex::new(Some(lease.clone())),
+            lease_generation: std::sync::atomic::AtomicU64::new(1),
         });
         self.sessions
             .write()
             .await
             .insert(id.0.clone(), entry.clone());
+        entry
+            .handle
+            .record_api(serde_json::to_value(request)?)
+            .await?;
         Ok(json!({
             "session_id": id,
             "resource": format!("gdbai://session/{}/status", id.0),
             "state": entry.handle.state(),
             "backend": entry.handle.capabilities().backend,
             "profile": profile,
+            "write_lease": lease,
             "capabilities": entry.handle.capabilities(),
         }))
     }
 
-    async fn session_list(&self) -> Result<Value> {
+    async fn session_acquire_write_lease(
+        &self,
+        request: &ApiRequest,
+        caller: &Caller,
+    ) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let now = now_unix_ms();
+        let mut current = entry.lease.lock().await;
+        let force =
+            request.parameters.get("force").and_then(Value::as_bool) == Some(true) && caller.admin;
+        if current
+            .as_ref()
+            .is_some_and(|lease| !lease.is_expired(now) && lease.owner != caller.identity && !force)
+        {
+            return Err(Error::new(
+                ErrorCode::Conflict,
+                "another caller holds the write lease",
+            ));
+        }
+        let generation = entry.lease_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let lease = WriteLease {
+            lease_id: LeaseId::new(),
+            session_id: entry.handle.id().clone(),
+            owner: caller.identity.clone(),
+            expires_at_unix_ms: now.saturating_add(self.config.server.write_lease_ms.max(1)),
+            generation,
+        };
+        self.store.upsert_lease(&lease)?;
+        current.replace(lease.clone());
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "write_lease_acquired".into(),
+            })
+            .await?;
+        Ok(serde_json::to_value(lease)?)
+    }
+
+    async fn session_release_write_lease(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let released = entry
+            .lease
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "write lease not found"))?;
+        self.store.delete_lease(entry.handle.id())?;
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "write_lease_released".into(),
+            })
+            .await?;
+        Ok(json!({ "released": released.lease_id }))
+    }
+
+    async fn session_attempt_recovery(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        self.reconcile_session(&entry, true).await
+    }
+
+    async fn session_list(&self, caller: &Caller) -> Result<Value> {
         let entries = self
             .sessions
             .read()
             .await
             .values()
+            .filter(|entry| caller.admin || same_principal(&entry.owner, &caller.identity))
             .cloned()
             .collect::<Vec<_>>();
-        Ok(Value::Array(
-            entries
-                .into_iter()
-                .map(|entry| serde_json::to_value(entry.handle.state()))
-                .collect::<std::result::Result<_, _>>()?,
-        ))
+        let mut states = self
+            .store
+            .list_session_owners()?
+            .into_iter()
+            .filter(|(_, owner)| {
+                caller.admin
+                    || owner
+                        .as_deref()
+                        .is_some_and(|owner| same_principal(owner, &caller.identity))
+            })
+            .map(|(state, _)| (state.session_id.0.clone(), state))
+            .collect::<BTreeMap<_, _>>();
+        for entry in entries {
+            let state = entry.handle.state();
+            states.insert(state.session_id.0.clone(), state);
+        }
+        Ok(serde_json::to_value(
+            states.into_values().collect::<Vec<_>>(),
+        )?)
+    }
+
+    async fn session_get(&self, request: &ApiRequest) -> Result<Value> {
+        let session_id = SessionId::parse(required_session(request)?)?;
+        if let Ok(entry) = self.entry(&session_id.0).await {
+            return Ok(serde_json::to_value(entry.handle.state())?);
+        }
+        self.store
+            .get_session(&session_id)?
+            .map(serde_json::to_value)
+            .transpose()?
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "session not found"))
+    }
+
+    async fn session_providers(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        Ok(serde_json::to_value(crate::providers::descriptors(
+            &entry.handle.state(),
+            &entry.handle.capabilities(),
+            self.config.security.kernel_enabled,
+        ))?)
+    }
+
+    async fn session_transcript(&self, request: &ApiRequest) -> Result<Value> {
+        use std::io::{Read as _, Seek as _};
+
+        let session_id = SessionId::parse(required_session(request)?)?;
+        let journal_path = self.session_journal_path(&session_id).await?;
+        let offset = request
+            .parameters
+            .get("offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let max_bytes = request
+            .parameters
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(64 * 1024)
+            .clamp(1, 64 * 1024) as usize;
+        let mut file = std::fs::File::open(journal_path)?;
+        let length = file.metadata()?.len();
+        let offset = offset.min(length);
+        file.seek(std::io::SeekFrom::Start(offset))?;
+        let mut bytes = vec![0; max_bytes.min((length - offset) as usize)];
+        file.read_exact(&mut bytes)?;
+        let text = std::str::from_utf8(&bytes).ok();
+        Ok(json!({
+            "offset": offset,
+            "next_offset": offset + bytes.len() as u64,
+            "total_bytes": length,
+            "text": text,
+            "data_base64": BASE64.encode(&bytes),
+            "truncated": offset + (bytes.len() as u64) < length
+        }))
+    }
+
+    async fn session_event(&self, request: &ApiRequest) -> Result<Value> {
+        use std::io::BufRead as _;
+
+        let session_id = SessionId::parse(required_session(request)?)?;
+        let wanted = unsigned(&request.parameters, "event_seq")?;
+        if wanted == 0 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "event_seq must be positive",
+            ));
+        }
+        let path = self.session_journal_path(&session_id).await?;
+        for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
+            let entry: crate::journal::JournalEntry = serde_json::from_str(&line?)?;
+            if entry.seq == wanted {
+                return Ok(serde_json::to_value(entry)?);
+            }
+            if entry.seq > wanted {
+                break;
+            }
+        }
+        Err(Error::new(ErrorCode::NotFound, "journal event not found"))
+    }
+
+    async fn session_journal_path(&self, session_id: &SessionId) -> Result<std::path::PathBuf> {
+        // 2026-08-28: Transcript and event reads previously required a live
+        // worker, making retained failure evidence inaccessible after close.
+        match self.entry(&session_id.0).await {
+            Ok(entry) => Ok(entry.handle.journal_path().clone()),
+            Err(_) if self.store.get_session(session_id)?.is_some() => Ok(self
+                .config
+                .persistence
+                .sessions
+                .join(&session_id.0)
+                .join("journal.jsonl")),
+            Err(error) => Err(error),
+        }
     }
 
     async fn session_close(&self, request: &ApiRequest) -> Result<Value> {
         let id = required_session(request)?.to_owned();
         let entry = self.entry(&id).await?;
-        entry.handle.close().await?;
+        if let Err(error) = entry.handle.close().await {
+            // 2026-08-28: A failed worker closes its request channel, so close
+            // must still release registry and lease state after GDB death.
+            if entry.handle.state().lifecycle != crate::domain::SessionLifecycle::Failed {
+                return Err(error);
+            }
+        }
         let state = entry.handle.state();
+        self.store.delete_lease(entry.handle.id())?;
         self.sessions.write().await.remove(&id);
         Ok(json!({ "closed": true, "state": state }))
     }
@@ -160,6 +386,7 @@ impl Gateway {
             stop: String,
             follow_fork: String,
             detach_on_fork: bool,
+            follow_exec: String,
             wait: Option<WaitSpec>,
         }
         impl Default for Parameters {
@@ -174,6 +401,7 @@ impl Gateway {
                     stop: "entry".into(),
                     follow_fork: "parent".into(),
                     detach_on_fork: true,
+                    follow_exec: "same-inferior".into(),
                     wait: None,
                 }
             }
@@ -192,6 +420,7 @@ impl Gateway {
             ));
         }
         validate_environment(&parameters.environment)?;
+        validate_argv(&parameters.argv)?;
         let program = self.workspace_path(&parameters.program, false)?;
         let default_cwd = program
             .parent()
@@ -205,12 +434,26 @@ impl Gateway {
                 "follow_fork must be parent or child",
             ));
         }
+        if parameters.follow_exec != "same-inferior" {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "follow_exec must be same-inferior",
+            ));
+        }
+        if let Some(wait) = &parameters.wait {
+            wait.validate()?;
+        }
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
         let mut setup = vec![
             MiCommand::new("-file-exec-and-symbols")?
                 .string(program.as_os_str().as_encoded_bytes()),
             MiCommand::new("-environment-cd")?.string(cwd.as_os_str().as_encoded_bytes()),
+            // 2026-08-28: Clearing GDB's own environment did not clear the
+            // inferior environment. Enforce environment_mode=clean explicitly.
+            MiCommand::new("-interpreter-exec")?
+                .bare("console")?
+                .string("unset environment"),
         ];
         let mut arguments = MiCommand::new("-exec-arguments")?;
         for argument in parameters.argv {
@@ -250,24 +493,244 @@ impl Gateway {
                 "off"
             },
         )?);
-        let mut run = MiCommand::new("-exec-run")?;
-        if parameters.stop == "entry" {
-            run = run.bare("--start")?;
-        } else if parameters.stop != "none" {
+        setup.push(
+            MiCommand::new("-gdb-set")?
+                .bare("follow-exec-mode")?
+                .bare("same")?,
+        );
+        // 2026-08-28: -exec-run --start asks an interactive question when a
+        // stripped binary has no main symbol. Controlled starti stops at the
+        // executable's first instruction without requiring symbols.
+        let run = match parameters.stop.as_str() {
+            "entry" => MiCommand::new("-interpreter-exec")?
+                .bare("console")?
+                .string("starti"),
+            "none" => MiCommand::new("-exec-run")?,
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "stop must be entry or none",
+                ));
+            }
+        };
+        let reply = entry.handle.transaction(setup, run, Vec::new()).await?;
+        entry
+            .handle
+            .record_event(DomainEvent::TargetConfigured {
+                origin: TargetOrigin::Local,
+            })
+            .await?;
+        let state = wait_if_requested(&entry.handle, parameters.wait, Some(&baseline)).await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({ "command": reply, "state": state, "capabilities": capabilities }))
+    }
+
+    async fn target_attach(&self, request: &ApiRequest) -> Result<Value> {
+        let pid = unsigned(&request.parameters, "pid")?;
+        let wait = wait_spec(&request.parameters)?.unwrap_or(WaitSpec {
+            until: "snapshot".into(),
+            timeout_ms: self.config.server.wait_timeout_ms,
+        });
+        if !self.config.security.attach_allowlist.contains(&pid) {
             return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                "stop must be entry or none",
+                ErrorCode::PolicyDenied,
+                "PID is not in security.attach_allowlist",
             ));
         }
-        let reply = entry.handle.transaction(setup, run, Vec::new()).await?;
-        let state = wait_if_requested(&entry.handle, parameters.wait, Some(&baseline)).await?;
+        validate_attach_target(pid)?;
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        if let Some(executable) = request.parameters.get("executable").and_then(Value::as_str) {
+            let executable = self.workspace_path(executable, false)?;
+            entry
+                .handle
+                .command(
+                    MiCommand::new("-file-exec-and-symbols")?
+                        .string(executable.as_os_str().as_encoded_bytes()),
+                )
+                .await?;
+        }
+        let reply = entry
+            .handle
+            .command(MiCommand::new("-target-attach")?.bare(pid.to_string())?)
+            .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::TargetConfigured {
+                origin: TargetOrigin::Attach,
+            })
+            .await?;
+        let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({ "command": reply, "state": state, "capabilities": capabilities }))
+    }
+
+    async fn target_connect_remote(&self, request: &ApiRequest) -> Result<Value> {
+        let mode = request
+            .parameters
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("remote");
+        if !matches!(mode, "remote" | "extended-remote") {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "remote mode must be remote or extended-remote",
+            ));
+        }
+        let endpoint = remote_endpoint(&request.parameters)?;
+        let wait = wait_spec(&request.parameters)?;
+        if !self.config.security.remote_allowlist.contains(&endpoint) {
+            return Err(Error::new(
+                ErrorCode::PolicyDenied,
+                "endpoint is not in security.remote_allowlist",
+            ));
+        }
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        if let Some(executable) = request.parameters.get("executable").and_then(Value::as_str) {
+            let executable = self.workspace_path(executable, false)?;
+            entry
+                .handle
+                .command(
+                    MiCommand::new("-file-exec-and-symbols")?
+                        .string(executable.as_os_str().as_encoded_bytes()),
+                )
+                .await?;
+        }
+        let reply = entry
+            .handle
+            .command(
+                MiCommand::new("-target-select")?
+                    .bare(mode)?
+                    // 2026-08-28: GDB retained MI string quotes in remote
+                    // endpoint parsing. SocketAddr normalization makes bare
+                    // encoding safe and avoids a quoted service name.
+                    .bare(&endpoint)?,
+            )
+            .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::TargetConfigured {
+                origin: TargetOrigin::Remote,
+            })
+            .await?;
+        let state = wait_if_requested(&entry.handle, wait, Some(&baseline)).await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({ "command": reply, "state": state, "capabilities": capabilities }))
+    }
+
+    async fn target_open_core(&self, request: &ApiRequest) -> Result<Value> {
+        let executable = self.workspace_path(&string(&request.parameters, "executable")?, false)?;
+        let core = self.workspace_path(&string(&request.parameters, "core")?, false)?;
+        let entry = self.entry(required_session(request)?).await?;
+        let reply = entry
+            .handle
+            .transaction(
+                vec![
+                    MiCommand::new("-file-exec-and-symbols")?
+                        .string(executable.as_os_str().as_encoded_bytes()),
+                ],
+                MiCommand::new("-target-select")?
+                    .bare("core")?
+                    .string(core.as_os_str().as_encoded_bytes()),
+                Vec::new(),
+            )
+            .await?;
+        // 2026-08-28: Loading a core does not reliably emit *stopped. Build
+        // the immutable stop context explicitly so core inspection is usable.
+        let frame_reply = entry
+            .handle
+            .command(MiCommand::new("-stack-info-frame")?)
+            .await?;
+        let backend_id = entry
+            .handle
+            .state()
+            .inferiors
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "i1".into());
+        entry
+            .handle
+            .record_event(DomainEvent::TargetStopped {
+                backend_inferior: Some(backend_id.clone()),
+                backend_thread: None,
+                reason: "core".into(),
+                frame: frame_summary(&frame_reply.record),
+            })
+            .await?;
+        let stop_id = entry.handle.state().stop_id.clone().unwrap();
+        entry
+            .handle
+            .record_event(DomainEvent::SnapshotReady {
+                stop_id,
+                partial: true,
+            })
+            .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::CoreOpened { backend_id })
+            .await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({
+            "command": reply,
+            "state": entry.handle.state(),
+            "capabilities": capabilities
+        }))
+    }
+
+    async fn target_detach(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let reply = entry
+            .handle
+            .command(MiCommand::new("-target-detach")?)
+            .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::TargetDetached)
+            .await?;
+        Ok(json!({ "command": reply, "state": entry.handle.state() }))
+    }
+
+    async fn target_restart(&self, request: &ApiRequest) -> Result<Value> {
+        let wait = wait_spec(&request.parameters)?;
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        let mut command = MiCommand::new("-exec-run")?;
+        if bool_value(&request.parameters, "stop_at_entry", true) {
+            command = command.bare("--start")?;
+        }
+        let reply = entry.handle.command(command).await?;
+        let state = wait_if_requested(&entry.handle, wait, Some(&baseline)).await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({ "command": reply, "state": state, "capabilities": capabilities }))
+    }
+
+    async fn target_kill(&self, request: &ApiRequest) -> Result<Value> {
+        let wait = wait_spec(&request.parameters)?;
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        let reply = entry.handle.command(MiCommand::new("-exec-abort")?).await?;
+        let state = wait_if_requested(&entry.handle, wait, Some(&baseline)).await?;
         Ok(json!({ "command": reply, "state": state }))
     }
 
     async fn execution_control(&self, request: &ApiRequest) -> Result<Value> {
         let action = string(&request.parameters, "action")?;
+        let wait = wait_spec(&request.parameters)?;
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
+        let mut operation = OperationRecord {
+            operation_id: OperationId::new(),
+            session_id: entry.handle.id().clone(),
+            kind: format!("execution.{action}"),
+            status: OperationStatus::Accepted,
+            created_revision: state.revision,
+            accepted_event_seq: None,
+            completed_event_seq: None,
+            error: None,
+        };
+        self.store.upsert_operation(&operation)?;
         let mut command = match action.as_str() {
             "continue" => MiCommand::new("-exec-continue")?,
             "interrupt" => MiCommand::new("-exec-interrupt")?,
@@ -287,22 +750,97 @@ impl Gateway {
             }
         };
         command = context_options(command, &request.parameters, &state)?;
-        let reply = entry.handle.command(command).await?;
-        let state =
-            wait_if_requested(&entry.handle, wait_spec(&request.parameters)?, Some(&state)).await?;
-        Ok(
-            json!({ "operation_id": format!("op_{}", Ulid::new()), "command": reply, "state": state }),
-        )
+        let reply = match entry.handle.command(command).await {
+            Ok(reply) => reply,
+            Err(error) => {
+                operation.status = OperationStatus::Failed;
+                operation.error = Some(error.to_string());
+                operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                self.store.upsert_operation(&operation)?;
+                return Err(error);
+            }
+        };
+        operation.accepted_event_seq = Some(reply.evidence_seq);
+        if let Some(wait) = wait {
+            operation.status = OperationStatus::WaitingForState;
+            self.store.upsert_operation(&operation)?;
+            match apply_wait(&entry.handle, wait, Some(&state)).await {
+                Ok(state) => {
+                    operation.status = OperationStatus::Completed;
+                    operation.completed_event_seq = Some(state.event_seq);
+                    self.store.upsert_operation(&operation)?;
+                    Ok(json!({
+                        "operation_id": operation.operation_id,
+                        "wait_status": "COMPLETED",
+                        "command": reply,
+                        "state": state
+                    }))
+                }
+                Err(error) if error.code == ErrorCode::Timeout => {
+                    let state = entry.handle.state();
+                    operation.status = OperationStatus::TimedOut;
+                    operation.completed_event_seq = Some(state.event_seq);
+                    self.store.upsert_operation(&operation)?;
+                    Ok(json!({
+                        "operation_id": operation.operation_id,
+                        "wait_status": "TIMEOUT",
+                        "target_state": state,
+                        "can_interrupt": true,
+                        "command": reply
+                    }))
+                }
+                Err(error) => {
+                    operation.status = OperationStatus::Failed;
+                    operation.error = Some(error.to_string());
+                    operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                    self.store.upsert_operation(&operation)?;
+                    Err(error)
+                }
+            }
+        } else {
+            operation.status = OperationStatus::Completed;
+            operation.completed_event_seq = Some(entry.handle.state().event_seq);
+            self.store.upsert_operation(&operation)?;
+            Ok(json!({
+                "operation_id": operation.operation_id,
+                "wait_status": "ACCEPTED",
+                "command": reply,
+                "state": entry.handle.state()
+            }))
+        }
     }
 
     async fn execution_wait(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
+        let mut operation = request
+            .parameters
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .map(|operation_id| {
+                self.store
+                    .get_operation(operation_id)?
+                    .ok_or_else(|| Error::new(ErrorCode::NotFound, "operation not found"))
+            })
+            .transpose()?;
+        if operation
+            .as_ref()
+            .is_some_and(|operation| operation.session_id != *entry.handle.id())
+        {
+            return Err(Error::new(
+                ErrorCode::NotFound,
+                "operation does not belong to this session",
+            ));
+        }
         let wait = wait_spec(&request.parameters)?.ok_or_else(|| {
             Error::new(ErrorCode::InvalidArgument, "wait parameters are required")
         })?;
-        Ok(serde_json::to_value(
-            apply_wait(&entry.handle, wait, None).await?,
-        )?)
+        let state = apply_wait(&entry.handle, wait, None).await?;
+        if let Some(operation) = &mut operation {
+            operation.status = OperationStatus::Completed;
+            operation.completed_event_seq = Some(state.event_seq);
+            self.store.upsert_operation(operation)?;
+        }
+        Ok(json!({ "operation": operation, "state": state }))
     }
 
     async fn breakpoint_create(&self, request: &ApiRequest) -> Result<Value> {
@@ -312,7 +850,7 @@ impl Gateway {
             .get("kind")
             .and_then(Value::as_str)
             .unwrap_or("software");
-        let location = breakpoint_location(&request.parameters)?;
+        let mut needs_location = true;
         let mut command = if matches!(kind, "watchpoint" | "read_watchpoint" | "access_watchpoint")
         {
             let mut command = MiCommand::new("-break-watch")?;
@@ -322,12 +860,41 @@ impl Gateway {
                 command = command.bare("-a")?;
             }
             command
+        } else if kind == "catchpoint" {
+            needs_location = false;
+            let catch = string(&request.parameters, "catch")?;
+            MiCommand::new(match catch.as_str() {
+                "throw" => "-catch-throw",
+                "catch" => "-catch-catch",
+                "exec" => "-catch-exec",
+                "fork" => "-catch-fork",
+                "vfork" => "-catch-vfork",
+                "syscall" => "-catch-syscall",
+                "load" => "-catch-load",
+                "unload" => "-catch-unload",
+                _ => {
+                    return Err(Error::new(
+                        ErrorCode::InvalidArgument,
+                        "unsupported catchpoint kind",
+                    ));
+                }
+            })?
         } else {
+            if !matches!(kind, "software" | "hardware" | "temporary" | "instruction") {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "unsupported breakpoint kind",
+                ));
+            }
             let mut command = MiCommand::new("-break-insert")?;
-            if bool_value(&request.parameters, "temporary", false) {
+            if kind == "temporary" || bool_value(&request.parameters, "temporary", false) {
                 command = command.bare("-t")?;
             }
-            if kind == "hardware" || bool_value(&request.parameters, "hardware", false) {
+            let hardware = request.parameters.get("hardware");
+            if kind == "hardware"
+                || hardware.and_then(Value::as_bool) == Some(true)
+                || hardware.and_then(Value::as_str) == Some("required")
+            {
                 command = command.bare("-h")?;
             }
             if bool_value(&request.parameters, "pending", true) {
@@ -345,8 +912,16 @@ impl Gateway {
             }
             command
         };
-        command = command.string(location);
+        command = breakpoint_scope(command, &request.parameters, &entry.handle.state())?;
+        if needs_location {
+            command = command.string(self.breakpoint_location(&request.parameters)?);
+        }
         let reply = entry.handle.command(command).await?;
+        if let Some(fields) =
+            MiResult::find(reply.record.results(), "bkpt").and_then(MiValue::results)
+        {
+            synchronize_breakpoint(&entry.handle, fields).await?;
+        }
         Ok(json!({ "command": reply, "breakpoints": entry.handle.state().breakpoints }))
     }
 
@@ -396,18 +971,39 @@ impl Gateway {
                 "breakpoint.update requires enabled, condition, or ignore_count",
             ));
         };
-        Ok(json!({ "command": reply }))
+        let list = entry.handle.command(MiCommand::new("-break-list")?).await?;
+        reconcile_breakpoints(&entry.handle, &list.record).await?;
+        Ok(json!({
+            "command": reply,
+            "breakpoints": entry.handle.state().breakpoints,
+            "evidence_seq": list.evidence_seq
+        }))
     }
 
     async fn breakpoint_delete(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
         let number = breakpoint_number(&entry, &request.parameters)?;
-        command_value(
-            entry
-                .handle
-                .command(MiCommand::new("-break-delete")?.bare(number)?)
-                .await?,
-        )
+        let reply = entry
+            .handle
+            .command(MiCommand::new("-break-delete")?.bare(number)?)
+            .await?;
+        let list = entry.handle.command(MiCommand::new("-break-list")?).await?;
+        reconcile_breakpoints(&entry.handle, &list.record).await?;
+        Ok(json!({
+            "command": reply,
+            "breakpoints": entry.handle.state().breakpoints,
+            "evidence_seq": list.evidence_seq
+        }))
+    }
+
+    async fn breakpoint_list(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let reply = entry.handle.command(MiCommand::new("-break-list")?).await?;
+        reconcile_breakpoints(&entry.handle, &reply.record).await?;
+        Ok(json!({
+            "breakpoints": entry.handle.state().breakpoints,
+            "evidence_seq": reply.evidence_seq
+        }))
     }
 
     async fn inspection_get(&self, request: &ApiRequest) -> Result<Value> {
@@ -417,64 +1013,151 @@ impl Gateway {
         match view.as_str() {
             "stop_context" | "target" => Ok(serde_json::to_value(state)?),
             "capabilities" => Ok(serde_json::to_value(entry.handle.capabilities())?),
+            "providers" => self.session_providers(request).await,
+            "crash" => {
+                let mut snapshot = self.inspection_snapshot(request).await?;
+                snapshot["crash_signature"] =
+                    Value::String(crate::providers::crash_signature(&entry.handle.state()));
+                snapshot["source"] = json!({
+                    "provider": "userland-security",
+                    "version": "1.0.0",
+                    "mechanism": "bounded-stop-snapshot"
+                });
+                Ok(snapshot)
+            }
             "threads" => {
-                self.inspection_command(&entry, request, "-thread-info", vec![])
-                    .await
+                let reply = self
+                    .inspection_command(&entry, request, "-thread-info", vec![])
+                    .await?;
+                Ok(json!({
+                    "stop_id": state.stop_id,
+                    "threads": normalized_threads(&reply.record, &state),
+                    "evidence_seq": reply.evidence_seq
+                }))
             }
             "stack" => {
                 let limit =
                     bounded_limit(&request.parameters, 16, self.config.limits.stack_frames)?;
-                self.inspection_command(
-                    &entry,
-                    request,
-                    "-stack-list-frames",
-                    vec![("bare", "0".into()), ("bare", (limit - 1).to_string())],
-                )
-                .await
+                let offset = request
+                    .parameters
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .min(u32::MAX as u64) as usize;
+                let end = offset.saturating_add(limit - 1);
+                let reply = self
+                    .inspection_command(
+                        &entry,
+                        request,
+                        "-stack-list-frames",
+                        vec![("bare", offset.to_string()), ("bare", end.to_string())],
+                    )
+                    .await?;
+                let frames = normalized_frames(&reply.record, &state, &request.parameters);
+                let continuation = (frames.len() == limit).then(|| {
+                    format!(
+                        "stack:{}:{}",
+                        state.stop_id.as_ref().unwrap(),
+                        offset + frames.len()
+                    )
+                });
+                Ok(json!({
+                    "stop_id": state.stop_id,
+                    "offset": offset,
+                    "limit": limit,
+                    "frames": frames,
+                    "continuation": continuation,
+                    "evidence_seq": reply.evidence_seq
+                }))
             }
             "frame" => {
-                self.inspection_command(&entry, request, "-stack-info-frame", vec![])
-                    .await
+                let reply = self
+                    .inspection_command(&entry, request, "-stack-info-frame", vec![])
+                    .await?;
+                Ok(json!({
+                    "stop_id": state.stop_id,
+                    "frame": frame_summary(&reply.record),
+                    "evidence_seq": reply.evidence_seq
+                }))
             }
             "locals" => {
-                self.inspection_command(
-                    &entry,
-                    request,
-                    "-stack-list-variables",
-                    vec![("bare", "--simple-values".into())],
-                )
-                .await
+                let reply = self
+                    .inspection_command(
+                        &entry,
+                        request,
+                        "-stack-list-variables",
+                        vec![("bare", "--simple-values".into())],
+                    )
+                    .await?;
+                Ok(json!({
+                    "stop_id": state.stop_id,
+                    "variables": normalized_variables(&reply.record, "variables"),
+                    "evidence_seq": reply.evidence_seq
+                }))
             }
             "arguments" => {
                 let limit =
                     bounded_limit(&request.parameters, 16, self.config.limits.stack_frames)?;
-                self.inspection_command(
-                    &entry,
-                    request,
-                    "-stack-list-arguments",
-                    vec![
-                        ("bare", "--simple-values".into()),
-                        ("bare", "0".into()),
-                        ("bare", (limit - 1).to_string()),
-                    ],
-                )
-                .await
+                let offset = request
+                    .parameters
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .min(u32::MAX as u64) as usize;
+                let end = offset.saturating_add(limit - 1);
+                let reply = self
+                    .inspection_command(
+                        &entry,
+                        request,
+                        "-stack-list-arguments",
+                        vec![
+                            ("bare", "--simple-values".into()),
+                            ("bare", offset.to_string()),
+                            ("bare", end.to_string()),
+                        ],
+                    )
+                    .await?;
+                Ok(json!({
+                    "stop_id": state.stop_id,
+                    "offset": offset,
+                    "limit": limit,
+                    "arguments": normalized_arguments(&reply.record),
+                    "evidence_seq": reply.evidence_seq
+                }))
             }
             "registers" => self.register_read(request).await,
             "modules" => {
-                self.inspection_command(&entry, request, "-file-list-shared-libraries", vec![])
-                    .await
+                let reply = self
+                    .inspection_command(&entry, request, "-file-list-shared-libraries", vec![])
+                    .await?;
+                Ok(json!({
+                    "modules": normalized_modules(&reply.record),
+                    "evidence_seq": reply.evidence_seq
+                }))
             }
-            "breakpoints" => self.simple_command(request, "-break-list").await,
+            "breakpoints" => {
+                let reply = entry.handle.command(MiCommand::new("-break-list")?).await?;
+                reconcile_breakpoints(&entry.handle, &reply.record).await?;
+                Ok(json!({
+                    "breakpoints": entry.handle.state().breakpoints,
+                    "evidence_seq": reply.evidence_seq
+                }))
+            }
             "source" => {
-                self.inspection_command(&entry, request, "-file-list-exec-source-files", vec![])
-                    .await
+                if request.parameters.get("path").is_some() {
+                    self.source_excerpt(request)
+                } else {
+                    let reply = self
+                        .inspection_command(&entry, request, "-file-list-exec-source-files", vec![])
+                        .await?;
+                    Ok(json!({
+                        "files": normalized_source_files(&reply.record),
+                        "evidence_seq": reply.evidence_seq
+                    }))
+                }
             }
             "mappings" => mappings(&state),
-            "signals" => Err(Error::new(
-                ErrorCode::CapabilityMissing,
-                "structured signal inspection requires the trusted GDB extension",
-            )),
+            "signals" => Ok(serde_json::to_value(state.signal_policies)?),
             _ => Err(Error::new(
                 ErrorCode::InvalidArgument,
                 "unsupported inspection view",
@@ -488,7 +1171,7 @@ impl Gateway {
         request: &ApiRequest,
         name: &str,
         arguments: Vec<(&str, String)>,
-    ) -> Result<Value> {
+    ) -> Result<CommandReply> {
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
         let mut command = MiCommand::new(name)?;
@@ -500,7 +1183,7 @@ impl Gateway {
                 command.string(argument)
             };
         }
-        command_value(entry.handle.command(command).await?)
+        entry.handle.command(command).await
     }
 
     async fn inspection_snapshot(&self, request: &ApiRequest) -> Result<Value> {
@@ -524,6 +1207,14 @@ impl Gateway {
                 ));
             }
         };
+        // 2026-08-28: Publishing SnapshotStarted before profile validation
+        // left the current snapshot permanently BUILDING on invalid input.
+        entry
+            .handle
+            .record_event(DomainEvent::SnapshotStarted {
+                stop_id: state.stop_id.clone().unwrap(),
+            })
+            .await?;
         let mut warnings = Vec::new();
         let stack = optional_command(
             &entry.handle,
@@ -537,7 +1228,11 @@ impl Gateway {
             "stack",
             &mut warnings,
         )
-        .await;
+        .await
+        .map(|reply| normalized_frames(&reply.record, &state, &request.parameters))
+        .map(serde_json::to_value)
+        .transpose()?
+        .unwrap_or(Value::Null);
         let locals = if profile == "minimal" {
             Value::Null
         } else {
@@ -553,62 +1248,329 @@ impl Gateway {
                 &mut warnings,
             )
             .await
+            .map(|reply| normalized_variables(&reply.record, "variables"))
+            .map(serde_json::to_value)
+            .transpose()?
+            .unwrap_or(Value::Null)
         };
-        let registers = if profile == "minimal" {
+        let arguments = if profile == "minimal" {
             Value::Null
         } else {
             optional_command(
                 &entry.handle,
                 context_options(
-                    MiCommand::new("-data-list-register-values")?,
+                    MiCommand::new("-stack-list-arguments")?,
                     &request.parameters,
                     &state,
                 )?
-                .bare("x")?,
-                "registers",
+                .bare("--simple-values")?
+                .bare("0")?
+                .bare((frames - 1).to_string())?,
+                "arguments",
                 &mut warnings,
             )
             .await
+            .map(|reply| normalized_arguments(&reply.record))
+            .map(serde_json::to_value)
+            .transpose()?
+            .unwrap_or(Value::Null)
+        };
+        let registers = if profile == "minimal" {
+            Value::Null
+        } else {
+            match self.register_read(request).await {
+                Ok(registers) => registers,
+                Err(error) => {
+                    warnings.push(json!({
+                        "code": "REGISTERS_UNAVAILABLE",
+                        "message": error.to_string()
+                    }));
+                    Value::Null
+                }
+            }
         };
         let disassembly = if matches!(profile, "brief" | "standard" | "deep") {
-            optional_command(
-                &entry.handle,
-                MiCommand::new("-data-disassemble")?
-                    .bare("-a")?
-                    .string("$pc")
-                    .bare("--")?
-                    .bare("5")?,
-                "disassembly",
-                &mut warnings,
-            )
-            .await
+            match self.disassembly_read(request).await {
+                Ok(disassembly) => disassembly,
+                Err(error) => {
+                    warnings.push(json!({
+                        "code": "DISASSEMBLY_UNAVAILABLE",
+                        "message": error.to_string()
+                    }));
+                    Value::Null
+                }
+            }
         } else {
             Value::Null
         };
+        let (tracked, changes) = match self
+            .capture_tracking(&entry, request, &state, &mut warnings)
+            .await
+        {
+            Ok(tracking) => tracking,
+            Err(error) => {
+                warnings.push(json!({
+                    "code": "TRACKING_UNAVAILABLE",
+                    "message": error.to_string()
+                }));
+                (BTreeMap::new(), BTreeMap::new())
+            }
+        };
         let partial = !warnings.is_empty();
-        if let Some(stop_id) = &state.stop_id {
-            entry
-                .handle
-                .record_event(DomainEvent::SnapshotReady {
-                    stop_id: stop_id.clone(),
-                    partial,
-                })
-                .await?;
-        }
-        Ok(json!({
-            "snapshot_id": state.snapshot.as_ref().map(|snapshot| &snapshot.snapshot_id),
-            "stop_id": state.stop_id,
-            "revision": state.revision,
+        let stop_id = state.stop_id.clone().unwrap();
+        entry
+            .handle
+            .record_event(DomainEvent::SnapshotReady {
+                stop_id: stop_id.clone(),
+                partial,
+            })
+            .await?;
+        self.metrics.snapshot(partial);
+        let current = entry.handle.state();
+        let snapshot_id = format!("snap_{stop_id}");
+        let snapshot = json!({
+            "snapshot_id": &snapshot_id,
+            "stop_id": &stop_id,
+            "revision": current.revision,
             "profile": profile,
             "reason": state.stop_reason,
             "stack": stack,
             "locals": locals,
+            "arguments": arguments,
             "registers": registers,
             "disassembly": disassembly,
+            "tracked": tracked,
+            "changes": changes,
             "warnings": warnings,
             "partial": partial,
-            "evidence": [{"kind": "mi-event", "uri": format!("gdbai://session/{}/event/{}", entry.handle.id(), entry.handle.state().event_seq)}]
+            "evidence": [{"kind": "mi-event", "uri": format!("gdbai://session/{}/event/{}", entry.handle.id(), current.event_seq)}]
+        });
+        if let Err(error) = entry
+            .handle
+            .store_snapshot(snapshot_id, snapshot.clone())
+            .await
+        {
+            entry
+                .handle
+                .record_event(DomainEvent::SnapshotFailed { stop_id })
+                .await?;
+            return Err(error);
+        }
+        Ok(snapshot)
+    }
+
+    async fn inspection_diff(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let before_id = string(&request.parameters, "before_snapshot_id")?;
+        let after_id = string(&request.parameters, "after_snapshot_id")?;
+        let before = entry.handle.snapshot(before_id.clone()).await?;
+        let after = entry.handle.snapshot(after_id.clone()).await?;
+        let mut changes = BTreeMap::new();
+        for field in ["reason", "stack", "locals", "registers", "tracked"] {
+            let old = before.get(field).cloned().unwrap_or(Value::Null);
+            let new = after.get(field).cloned().unwrap_or(Value::Null);
+            if old != new {
+                changes.insert(field, json!({ "before": old, "after": new }));
+            }
+        }
+        Ok(json!({
+            "before_snapshot_id": before_id,
+            "after_snapshot_id": after_id,
+            "changes": changes,
+            "partial": before.get("partial") == Some(&Value::Bool(true))
+                || after.get("partial") == Some(&Value::Bool(true))
         }))
+    }
+
+    async fn inspection_snapshot_get(&self, request: &ApiRequest) -> Result<Value> {
+        let session_id = SessionId::parse(required_session(request)?)?;
+        let snapshot_id = string(&request.parameters, "snapshot_id")?;
+        if let Ok(entry) = self.entry(&session_id.0).await {
+            return entry.handle.snapshot(snapshot_id).await;
+        }
+        // 2026-08-28: Historical snapshots remain authoritative SQLite
+        // evidence after the live worker has been removed from the registry.
+        self.store
+            .get_snapshot(&session_id, &snapshot_id)?
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "snapshot not found"))
+    }
+
+    async fn inspection_batch(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        require_stopped_context(&request.parameters, &baseline)?;
+        let requests = request
+            .parameters
+            .get("requests")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "batch requests are required"))?;
+        if requests.is_empty() || requests.len() > 16 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "batch accepts 1 to 16 reads",
+            ));
+        }
+        let mut results = BTreeMap::new();
+        for item in requests {
+            let name = string(item, "name")?;
+            if results.contains_key(&name) {
+                return Err(Error::new(
+                    ErrorCode::Conflict,
+                    "batch request names must be unique",
+                ));
+            }
+            let mut parameters = item.clone();
+            parameters["stop_id"] = Value::String(baseline.stop_id.as_ref().unwrap().0.clone());
+            let subrequest = ApiRequest {
+                api_version: request.api_version.clone(),
+                request_id: format!("{}:{name}", request.request_id),
+                session_id: request.session_id.clone(),
+                method: "inspection.get".into(),
+                expected_revision: None,
+                idempotency_key: None,
+                parameters,
+            };
+            let result = self.inspection_get(&subrequest).await?;
+            if entry.handle.state().stop_id != baseline.stop_id {
+                return Err(Error::new(
+                    ErrorCode::StaleContext,
+                    "target stop changed during same_stop batch",
+                ));
+            }
+            results.insert(name, result);
+        }
+        Ok(json!({
+            "stop_id": baseline.stop_id,
+            "revision": entry.handle.state().revision,
+            "results": results
+        }))
+    }
+
+    async fn capture_tracking(
+        &self,
+        entry: &SessionEntry,
+        request: &ApiRequest,
+        state: &crate::domain::SessionState,
+        warnings: &mut Vec<Value>,
+    ) -> Result<(BTreeMap<String, Value>, BTreeMap<String, Value>)> {
+        let mut observations = BTreeMap::new();
+        let mut presented = BTreeMap::new();
+        for definition in entry.handle.tracking().await? {
+            let tracking_id = definition.id().0.clone();
+            let observation = match definition {
+                TrackingDefinition::Expression {
+                    expression,
+                    max_value_bytes,
+                    ..
+                } => {
+                    let command = context_options(
+                        MiCommand::new("-data-evaluate-expression")?.string(&expression),
+                        &request.parameters,
+                        state,
+                    )?;
+                    match safe_evaluate_command(&entry.handle, command).await {
+                        Ok(reply) => {
+                            let value = result_text(&reply.record, "value").unwrap_or_default();
+                            if value.len() > max_value_bytes {
+                                let uri = self.put_artifact(
+                                    Some(entry.handle.id()),
+                                    value.as_bytes(),
+                                    "target-value",
+                                )?;
+                                json!({
+                                    "expression": expression,
+                                    "sha256": format!("{:x}", Sha256::digest(value.as_bytes())),
+                                    "preview": value.chars().take(max_value_bytes.min(256)).collect::<String>(),
+                                    "artifact": uri,
+                                    "truncated": true
+                                })
+                            } else {
+                                json!({ "expression": expression, "value": value })
+                            }
+                        }
+                        Err(error) => {
+                            warnings.push(json!({
+                                "code": "TRACKED_EXPRESSION_UNAVAILABLE",
+                                "tracking_id": tracking_id,
+                                "message": error.to_string()
+                            }));
+                            continue;
+                        }
+                    }
+                }
+                TrackingDefinition::Memory {
+                    address_expression,
+                    length,
+                    ..
+                } => {
+                    let command = context_options(
+                        MiCommand::new("-data-evaluate-expression")?.string(&address_expression),
+                        &request.parameters,
+                        state,
+                    )?;
+                    let address = match safe_evaluate_command(&entry.handle, command).await {
+                        Ok(reply) => result_text(&reply.record, "value")
+                            .ok_or_else(|| {
+                                Error::new(
+                                    ErrorCode::GdbError,
+                                    "tracked address expression returned no value",
+                                )
+                            })
+                            .and_then(|value| parse_address(&value)),
+                        Err(error) => Err(error),
+                    };
+                    let bytes = match address {
+                        Ok(address) => {
+                            read_memory_bytes(&entry.handle, address, length, true).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match bytes {
+                        Ok((bytes, evidence_seq)) => json!({
+                            "address_expression": address_expression,
+                            "length": bytes.len(),
+                            "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                            "data_base64": BASE64.encode(&bytes),
+                            "evidence_seq": evidence_seq
+                        }),
+                        Err(error) => {
+                            warnings.push(json!({
+                                "code": "TRACKED_MEMORY_UNAVAILABLE",
+                                "tracking_id": tracking_id,
+                                "message": error.to_string()
+                            }));
+                            continue;
+                        }
+                    }
+                }
+            };
+            // 2026-08-28: Tracked memory was copied into snapshots and SQLite
+            // as base64. Keep bytes only in bounded worker history and artifacts.
+            let presentation = match observation
+                .get("data_base64")
+                .and_then(Value::as_str)
+                .and_then(|encoded| BASE64.decode(encoded).ok())
+            {
+                Some(bytes) if bytes.len() > self.config.limits.inline_memory_bytes => {
+                    let uri =
+                        self.put_artifact(Some(entry.handle.id()), &bytes, "tracked-memory")?;
+                    json!({
+                        "address_expression": observation.get("address_expression"),
+                        "length": observation.get("length"),
+                        "sha256": observation.get("sha256"),
+                        "preview_hex": hex_encode(&bytes[..bytes.len().min(64)]),
+                        "artifact": uri,
+                        "truncated": true,
+                        "evidence_seq": observation.get("evidence_seq")
+                    })
+                }
+                _ => observation.clone(),
+            };
+            observations.insert(tracking_id.clone(), observation);
+            presented.insert(tracking_id, presentation);
+        }
+        let changes = entry.handle.record_tracking(observations).await?;
+        Ok((presented, changes))
     }
 
     async fn value_evaluate(&self, request: &ApiRequest) -> Result<Value> {
@@ -616,12 +1578,7 @@ impl Gateway {
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
         let expression = string(&request.parameters, "expression")?;
-        if expression.len() > 4_096 || expression.contains('\0') {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                "expression exceeds 4096 bytes or contains NUL",
-            ));
-        }
+        validate_expression(&expression)?;
         if request
             .parameters
             .get("side_effects")
@@ -639,36 +1596,133 @@ impl Gateway {
             &request.parameters,
             &state,
         )?;
-        let off = |setting: &str| -> Result<MiCommand> {
-            MiCommand::new("-gdb-set")?.bare(setting)?.bare("off")
-        };
-        let on = |setting: &str| -> Result<MiCommand> {
-            MiCommand::new("-gdb-set")?.bare(setting)?.bare("on")
-        };
-        // Keep policy changes and evaluation in one worker transaction so no
-        // unrelated command can observe or weaken the temporary restrictions.
-        let reply = entry
-            .handle
-            .transaction(
-                vec![
-                    off("may-call-functions")?,
-                    off("may-write-memory")?,
-                    off("may-write-registers")?,
-                ],
-                evaluate,
-                vec![
-                    on("may-write-registers")?,
-                    on("may-write-memory")?,
-                    off("may-call-functions")?,
-                ],
-            )
-            .await?;
+        let reply = safe_evaluate_command(&entry.handle, evaluate).await?;
         Ok(json!({
             "stop_id": state.stop_id,
             "value": result_text(&reply.record, "value"),
             "command": reply,
             "side_effects": "denied"
         }))
+    }
+
+    async fn value_create(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
+        let expression = string(&request.parameters, "expression")?;
+        validate_expression(&expression)?;
+        let stop_id = state.stop_id.clone().unwrap();
+        let value_id = ValueId::for_stop(&stop_id);
+        let backend_name = format!("gdbai_{}", Ulid::new());
+        let command = context_options(MiCommand::new("-var-create")?, &request.parameters, &state)?
+            .bare(&backend_name)?
+            .bare("*")?
+            .string(&expression);
+        let reply = safe_evaluate_command(&entry.handle, command).await?;
+        let binding = ValueBinding {
+            value_id: value_id.clone(),
+            backend_name: backend_name.clone(),
+            stop_id: stop_id.clone(),
+            expression: expression.clone(),
+        };
+        if let Err(error) = entry.handle.register_value(binding).await {
+            let _ = entry
+                .handle
+                .command(MiCommand::new("-var-delete")?.bare(backend_name)?)
+                .await;
+            return Err(error);
+        }
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "value_created".into(),
+            })
+            .await?;
+        Ok(json!({
+            "value_id": value_id,
+            "stop_id": stop_id,
+            "expression": expression,
+            "value": result_text(&reply.record, "value"),
+            "type": result_text(&reply.record, "type"),
+            "children_count": result_text(&reply.record, "numchild")
+                .and_then(|value| value.parse::<u64>().ok()),
+            "has_children": result_text(&reply.record, "numchild")
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|count| count > 0),
+            "command": reply
+        }))
+    }
+
+    async fn value_children(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        let binding = current_value_binding(&entry, request, &state).await?;
+        let offset = request
+            .parameters
+            .get("offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let limit = bounded_limit(&request.parameters, 100, self.config.limits.value_children)?;
+        let end = offset.saturating_add(limit);
+        let reply = entry
+            .handle
+            .command(
+                MiCommand::new("-var-list-children")?
+                    .bare("--simple-values")?
+                    .bare(&binding.backend_name)?
+                    .bare(offset.to_string())?
+                    .bare(end.to_string())?,
+            )
+            .await?;
+        let has_more = result_text(&reply.record, "has_more") == Some("1".into());
+        Ok(json!({
+            "value_id": binding.value_id,
+            "stop_id": binding.stop_id,
+            "offset": offset,
+            "limit": limit,
+            "result": reply,
+            "continuation": has_more.then(|| format!("{}:{}", binding.value_id, end))
+        }))
+    }
+
+    async fn value_update(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        let binding = current_value_binding(&entry, request, &state).await?;
+        let reply = entry
+            .handle
+            .command(
+                MiCommand::new("-var-update")?
+                    .bare("--simple-values")?
+                    .bare(&binding.backend_name)?,
+            )
+            .await?;
+        Ok(json!({
+            "value_id": binding.value_id,
+            "stop_id": binding.stop_id,
+            "result": reply
+        }))
+    }
+
+    async fn value_release(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        let binding = current_value_binding(&entry, request, &state).await?;
+        let reply = entry
+            .handle
+            .command(MiCommand::new("-var-delete")?.bare(&binding.backend_name)?)
+            .await?;
+        entry
+            .handle
+            .remove_value(binding.value_id.0.clone())
+            .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "value_released".into(),
+            })
+            .await?;
+        Ok(json!({ "released": binding.value_id, "command": reply }))
     }
 
     async fn memory_read(&self, request: &ApiRequest) -> Result<Value> {
@@ -678,6 +1732,8 @@ impl Gateway {
         let address_text = string(&request.parameters, "address")?;
         let address = crate::domain::Address::parse(&address_text)?;
         let length = unsigned(&request.parameters, "length")? as usize;
+        // 2026-08-28: The public read limit was accidentally capped to one
+        // backend chunk, making the configured 16 MiB logical limit unusable.
         if length == 0 || length > self.config.limits.memory_read_bytes {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
@@ -687,15 +1743,13 @@ impl Gateway {
                 ),
             ));
         }
-        let reply = entry
-            .handle
-            .command(
-                MiCommand::new("-data-read-memory-bytes")?
-                    .bare(address.as_str())?
-                    .bare(length.to_string())?,
-            )
-            .await?;
-        let bytes = memory_contents(&reply.record)?;
+        let (bytes, evidence_seq) = read_memory_bytes(
+            &entry.handle,
+            parse_address(address.as_str())?,
+            length,
+            bool_value(&request.parameters, "allow_partial", false),
+        )
+        .await?;
         let partial = bytes.len() != length;
         if partial && !bool_value(&request.parameters, "allow_partial", false) {
             return Err(Error::new(
@@ -705,7 +1759,7 @@ impl Gateway {
         }
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
         if bytes.len() > self.config.limits.inline_memory_bytes {
-            let uri = self.artifacts.put(&bytes)?;
+            let uri = self.put_artifact(Some(entry.handle.id()), &bytes, "target-memory")?;
             Ok(json!({
                 "address": address,
                 "requested_length": length,
@@ -715,7 +1769,7 @@ impl Gateway {
                 "artifact": uri,
                 "partial": partial,
                 "truncated": true,
-                "evidence_seq": reply.evidence_seq
+                "evidence_seq": evidence_seq
             }))
         } else {
             Ok(json!({
@@ -726,9 +1780,123 @@ impl Gateway {
                 "sha256": sha256,
                 "partial": partial,
                 "truncated": false,
-                "evidence_seq": reply.evidence_seq
+                "evidence_seq": evidence_seq
             }))
         }
+    }
+
+    async fn memory_write(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
+        let address = crate::domain::Address::parse(&string(&request.parameters, "address")?)?;
+        let bytes = input_bytes(&request.parameters)?;
+        if bytes.is_empty() || bytes.len() > 64 * 1024 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "memory writes must contain 1 to 65536 bytes",
+            ));
+        }
+        let (before, _) = read_memory_bytes(
+            &entry.handle,
+            parse_address(address.as_str())?,
+            bytes.len(),
+            false,
+        )
+        .await?;
+        require_expected_bytes(&request.parameters, &before)?;
+        let reply = entry
+            .handle
+            .command(
+                MiCommand::new("-data-write-memory-bytes")?
+                    .bare(address.as_str())?
+                    .bare(hex_encode(&bytes))?,
+            )
+            .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::MemoryChanged)
+            .await?;
+        Ok(json!({
+            "address": address,
+            "length": bytes.len(),
+            "before_sha256": format!("{:x}", Sha256::digest(&before)),
+            "after_sha256": format!("{:x}", Sha256::digest(&bytes)),
+            "snapshot_invalidated": true,
+            "command": reply
+        }))
+    }
+
+    async fn memory_compare(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
+        let address = crate::domain::Address::parse(&string(&request.parameters, "address")?)?;
+        let length = unsigned(&request.parameters, "length")? as usize;
+        if length == 0 || length > self.config.limits.memory_read_bytes {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "memory comparison length is outside configured limits",
+            ));
+        }
+        let (bytes, evidence_seq) = read_memory_bytes(
+            &entry.handle,
+            parse_address(address.as_str())?,
+            length,
+            false,
+        )
+        .await?;
+        let matches = expected_bytes_match(&request.parameters, &bytes)?;
+        Ok(json!({
+            "address": address,
+            "length": length,
+            "matches": matches,
+            "sha256": format!("{:x}", Sha256::digest(&bytes)),
+            "evidence_seq": evidence_seq
+        }))
+    }
+
+    async fn memory_search(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
+        let start = crate::domain::Address::parse(&string(&request.parameters, "start")?)?;
+        let length = unsigned(&request.parameters, "length")? as usize;
+        if length == 0 || length > self.config.limits.memory_read_bytes {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "memory search length is outside configured limits",
+            ));
+        }
+        let pattern = search_pattern(&request.parameters)?;
+        let max_results = request
+            .parameters
+            .get("max_results")
+            .and_then(Value::as_u64)
+            .unwrap_or(100)
+            .clamp(1, 1_000) as usize;
+        let start_number = parse_address(start.as_str())?;
+        let (bytes, evidence_seq) =
+            read_memory_bytes(&entry.handle, start_number, length, true).await?;
+        let mut matches = bytes
+            .windows(pattern.len())
+            .enumerate()
+            .filter(|(_, window)| *window == pattern.as_slice())
+            .take(max_results + 1)
+            .map(|(offset, _)| format!("0x{:016x}", start_number + offset as u64))
+            .collect::<Vec<_>>();
+        // 2026-08-28: Exactly max_results matches was incorrectly reported as
+        // truncated. Read one sentinel match before setting the flag.
+        let truncated = matches.len() > max_results;
+        matches.truncate(max_results);
+        Ok(json!({
+            "start": start,
+            "requested_length": length,
+            "searched_length": bytes.len(),
+            "matches": matches,
+            "truncated": truncated,
+            "evidence_seq": evidence_seq
+        }))
     }
 
     async fn register_read(&self, request: &ApiRequest) -> Result<Value> {
@@ -754,19 +1922,12 @@ impl Gateway {
             .unwrap_or_else(|| vec!["pc".into(), "sp".into(), "fp".into(), "return".into()]);
         let mut role_numbers = BTreeMap::new();
         for role in requested_roles {
-            let candidates: &[&str] = match role.as_str() {
-                "pc" => &["rip", "pc"],
-                "sp" => &["rsp", "sp"],
-                "fp" => &["rbp", "x29", "fp"],
-                "return" => &["rax", "x0"],
-                "flags" => &["eflags", "cpsr"],
-                _ => {
-                    return Err(Error::new(
-                        ErrorCode::InvalidArgument,
-                        format!("unknown register role {role}"),
-                    ));
-                }
-            };
+            let candidates = register_role_candidates(&role).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::InvalidArgument,
+                    format!("unknown register role {role}"),
+                )
+            })?;
             if let Some((number, _)) = names
                 .iter()
                 .enumerate()
@@ -774,6 +1935,25 @@ impl Gateway {
             {
                 role_numbers.insert(role, number);
             }
+        }
+        let architecture = if names.iter().any(|name| name == "rip") {
+            "i386:x86-64"
+        } else if names.iter().any(|name| name == "x29") {
+            "aarch64"
+        } else {
+            "unknown"
+        };
+        // 2026-08-28: GDB interprets an empty register-number list as all
+        // registers. Return an explicit empty role map instead of expanding a
+        // missing semantic role into an unbounded backend observation.
+        if role_numbers.is_empty() {
+            return Ok(json!({
+                "stop_id": state.stop_id,
+                "roles": {},
+                "architecture": architecture,
+                "limitations": ["requested register roles are unavailable"],
+                "evidence_seq": names_reply.evidence_seq
+            }));
         }
         let mut command = context_options(
             MiCommand::new("-data-list-register-values")?.bare("x")?,
@@ -795,8 +1975,56 @@ impl Gateway {
         Ok(json!({
             "stop_id": state.stop_id,
             "roles": roles,
-            "architecture": if names.iter().any(|name| name == "rip") { "i386:x86-64" } else if names.iter().any(|name| name == "x29") { "aarch64" } else { "unknown" },
+            "architecture": architecture,
             "evidence_seq": values_reply.evidence_seq
+        }))
+    }
+
+    async fn register_write(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
+        let requested = string(&request.parameters, "register")?;
+        let value = string(&request.parameters, "value")?;
+        let reason = string(&request.parameters, "reason")?;
+        if !valid_integer_literal(&value) {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "register value must be a decimal or hexadecimal integer",
+            ));
+        }
+        let names_reply = entry
+            .handle
+            .command(MiCommand::new("-data-list-register-names")?)
+            .await?;
+        let names = result_string_list(&names_reply.record, "register-names");
+        let register = resolve_register_name(&requested, &names)?;
+        let read = |expression: String| {
+            context_options(
+                MiCommand::new("-data-evaluate-expression")?.string(expression),
+                &request.parameters,
+                &state,
+            )
+        };
+        let before = entry.handle.command(read(format!("${register}"))?).await?;
+        let write = entry
+            .handle
+            .command(read(format!("${register}={value}"))?)
+            .await?;
+        let after = entry.handle.command(read(format!("${register}"))?).await?;
+        entry
+            .handle
+            .record_event(DomainEvent::RegisterChanged {
+                register: register.clone(),
+            })
+            .await?;
+        Ok(json!({
+            "register": register,
+            "before": result_text(&before.record, "value"),
+            "after": result_text(&after.record, "value"),
+            "reason": reason,
+            "snapshot_invalidated": true,
+            "command": write
         }))
     }
 
@@ -804,7 +2032,7 @@ impl Gateway {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
-        let (start, end) = if let Some(range) = request.parameters.get("range") {
+        let (start, end, current) = if let Some(range) = request.parameters.get("range") {
             let start = crate::domain::Address::parse(&string(range, "start")?)?;
             let end = crate::domain::Address::parse(&string(range, "end")?)?;
             let start_number = parse_address(start.as_str())?;
@@ -815,7 +2043,7 @@ impl Gateway {
                     "disassembly range must be positive and at most 64 KiB",
                 ));
             }
-            (start_number, end_number)
+            (start_number, end_number, None)
         } else {
             let around = request
                 .parameters
@@ -849,10 +2077,17 @@ impl Gateway {
             (
                 address.saturating_sub(before * 16),
                 address.saturating_add(after * 16 + 16),
+                Some(address),
             )
         };
         let include_source = bool_value(&request.parameters, "include_source", true);
-        let mode = if include_source { "3" } else { "2" };
+        let include_bytes = bool_value(&request.parameters, "include_bytes", true);
+        let mode = match (include_source, include_bytes) {
+            (false, false) => "0",
+            (true, false) => "1",
+            (false, true) => "2",
+            (true, true) => "3",
+        };
         let reply = entry
             .handle
             .command(
@@ -865,9 +2100,19 @@ impl Gateway {
                     .bare(mode)?,
             )
             .await?;
+        let architecture = entry
+            .handle
+            .command(MiCommand::new("-gdb-show")?.bare("architecture")?)
+            .await
+            .ok()
+            .and_then(|reply| result_text(&reply.record, "value"));
+        let instructions = disassembly_instructions(&reply.record, current);
         Ok(json!({
+            "architecture": architecture,
+            "syntax": "target-default",
             "range": {"start": format!("0x{start:016x}"), "end": format!("0x{end:016x}")},
-            "result": reply,
+            "instructions": instructions,
+            "evidence_seq": reply.evidence_seq,
             "bounded": true
         }))
     }
@@ -892,6 +2137,7 @@ impl Gateway {
             .unwrap_or("pty")
         {
             "pty" => OutputRing::Inferior,
+            "target" => OutputRing::Target,
             "console" => OutputRing::Console,
             "log" => OutputRing::Log,
             _ => {
@@ -924,6 +2170,12 @@ impl Gateway {
             ));
         }
         entry.handle.write_inferior(bytes.clone()).await?;
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "inferior_input".into(),
+            })
+            .await?;
         Ok(json!({ "written": bytes.len() }))
     }
 
@@ -932,6 +2184,12 @@ impl Gateway {
         // A PTY is a terminal, not a pipe. VEOF is the portable terminal EOF
         // signal while retaining the master for output reads.
         entry.handle.write_inferior(vec![0x04]).await?;
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "inferior_stdin_closed".into(),
+            })
+            .await?;
         Ok(json!({ "closed": true, "mechanism": "pty-veof" }))
     }
 
@@ -949,22 +2207,595 @@ impl Gateway {
             .handle
             .resize_inferior(rows as u16, columns as u16)
             .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "inferior_terminal_resized".into(),
+            })
+            .await?;
         Ok(json!({ "rows": rows, "columns": columns }))
     }
 
-    async fn artifact_get(&self, request: &ApiRequest) -> Result<Value> {
+    async fn tracking_add_expression(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let expression = string(&request.parameters, "expression")?;
+        validate_expression(&expression)?;
+        let max_value_bytes = request
+            .parameters
+            .get("max_value_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(4_096) as usize;
+        if max_value_bytes == 0 || max_value_bytes > 1024 * 1024 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "max_value_bytes must be between 1 and 1048576",
+            ));
+        }
+        let definition = TrackingDefinition::Expression {
+            tracking_id: TrackingId::new(),
+            expression,
+            max_value_bytes,
+        };
+        entry.handle.add_tracking(definition.clone()).await?;
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "tracking_added".into(),
+            })
+            .await?;
+        Ok(serde_json::to_value(definition)?)
+    }
+
+    async fn tracking_add_memory(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let address_expression = string(&request.parameters, "address_expression")?;
+        validate_expression(&address_expression)?;
+        let length = unsigned(&request.parameters, "length")? as usize;
+        if length == 0 || length > self.config.limits.memory_read_bytes {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "tracked memory length is outside configured limits",
+            ));
+        }
+        let max_history = request
+            .parameters
+            .get("max_history")
+            .and_then(Value::as_u64)
+            .unwrap_or(32)
+            .clamp(1, 256) as usize;
+        let definition = TrackingDefinition::Memory {
+            tracking_id: TrackingId::new(),
+            address_expression,
+            length,
+            max_history,
+        };
+        entry.handle.add_tracking(definition.clone()).await?;
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "tracking_added".into(),
+            })
+            .await?;
+        Ok(serde_json::to_value(definition)?)
+    }
+
+    async fn tracking_remove(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let tracking_id = string(&request.parameters, "tracking_id")?;
+        let removed = entry.handle.remove_tracking(tracking_id).await?;
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "tracking_removed".into(),
+            })
+            .await?;
+        Ok(json!({ "removed": removed }))
+    }
+
+    async fn tracking_list(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        Ok(serde_json::to_value(entry.handle.tracking().await?)?)
+    }
+
+    async fn signal_get(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        Ok(serde_json::to_value(entry.handle.state().signal_policies)?)
+    }
+
+    async fn signal_update(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let policies = request
+            .parameters
+            .get("signals")
+            .and_then(Value::as_object)
+            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "signals object is required"))?;
+        if policies.is_empty() || policies.len() > 64 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "signals must contain 1 to 64 entries",
+            ));
+        }
+        let extension = entry.handle.capabilities().supports("custom_extension");
+        let mut applied = BTreeMap::new();
+        for (signal, value) in policies {
+            if !valid_signal_name(signal) {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    format!("invalid signal name {signal}"),
+                ));
+            }
+            let policy: SignalPolicyState = serde_json::from_value(value.clone())
+                .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))?;
+            let command = if extension {
+                MiCommand::new("-gdb-ai-signal-policy")?
+                    .bare(signal)?
+                    .bare(policy.stop.to_string())?
+                    .bare(policy.print.to_string())?
+                    .bare(policy.pass.to_string())?
+            } else {
+                MiCommand::new("-interpreter-exec")?
+                    .bare("console")?
+                    .string(format!(
+                        "handle {signal} {} {} {}",
+                        if policy.stop { "stop" } else { "nostop" },
+                        if policy.print { "print" } else { "noprint" },
+                        if policy.pass { "pass" } else { "nopass" }
+                    ))
+            };
+            entry.handle.command(command).await?;
+            entry
+                .handle
+                .record_event(DomainEvent::SignalPolicyChanged {
+                    signal: signal.clone(),
+                    policy: policy.clone(),
+                })
+                .await?;
+            applied.insert(signal.clone(), policy);
+        }
+        Ok(
+            json!({ "signals": applied, "mechanism": if extension { "gdb-python-mi" } else { "controlled-console" } }),
+        )
+    }
+
+    async fn agent_hypothesis_check(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
+        let expression = string(&request.parameters, "expression")?;
+        validate_expression(&expression)?;
+        let expected = string(&request.parameters, "expected")?;
+        let operator = request
+            .parameters
+            .get("operator")
+            .and_then(Value::as_str)
+            .unwrap_or("equals");
+        let command = context_options(
+            MiCommand::new("-data-evaluate-expression")?.string(&expression),
+            &request.parameters,
+            &state,
+        )?;
+        let reply = safe_evaluate_command(&entry.handle, command).await?;
+        let actual = result_text(&reply.record, "value").unwrap_or_default();
+        let confirmed = compare_observation(&actual, operator, &expected)?;
+        Ok(json!({
+            "claim": request.parameters.get("claim"),
+            "expression": expression,
+            "operator": operator,
+            "expected": expected,
+            "actual": actual,
+            "verdict": if confirmed { "confirmed" } else { "refuted" },
+            "stop_id": state.stop_id,
+            "evidence": [{
+                "kind": "mi-result",
+                "uri": format!("gdbai://session/{}/event/{}", entry.handle.id(), reply.evidence_seq)
+            }]
+        }))
+    }
+
+    async fn agent_probe(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let initial = entry.handle.state();
+        require_stopped_context(&request.parameters, &initial)?;
+        let budget: ObservationBudget = request
+            .parameters
+            .get("budget")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))?
+            .unwrap_or_default();
+        budget.validate(&self.config)?;
+        let max_hits = request
+            .parameters
+            .get("max_hits")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, 100) as usize;
+        let stop_policy = request
+            .parameters
+            .get("stop_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("on_condition");
+        if !matches!(stop_policy, "on_condition" | "continue_after_capture") {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "stop_policy must be on_condition or continue_after_capture",
+            ));
+        }
+        let mut insert = MiCommand::new("-break-insert")?.bare("-f")?;
+        if let Some(condition) = request.parameters.get("condition").and_then(Value::as_str) {
+            validate_expression(condition)?;
+            insert = insert.bare("-c")?.string(condition);
+        }
+        insert = insert.string(self.breakpoint_location(&request.parameters)?);
+        let inserted = entry.handle.command(insert).await?;
+        let backend_number = breakpoint_number_from_record(&inserted.record)?;
+        let mut operation = OperationRecord {
+            operation_id: OperationId::new(),
+            session_id: entry.handle.id().clone(),
+            kind: request.method.clone(),
+            status: OperationStatus::WaitingForState,
+            created_revision: initial.revision,
+            accepted_event_seq: Some(inserted.evidence_seq),
+            completed_event_seq: None,
+            error: None,
+        };
+        self.store.upsert_operation(&operation)?;
+        let started = tokio::time::Instant::now();
+        let mut captures = Vec::new();
+        let mut calls = 1usize;
+        // 2026-08-28: Applying the wall budget only to stop waits let capture
+        // commands exceed it repeatedly. Bound the complete experiment body.
+        let run_result: Result<Value> =
+            match tokio::time::timeout(Duration::from_millis(budget.wall_time_ms), async {
+                for hit in 1..=max_hits {
+                    if calls >= budget.max_calls {
+                        return Err(Error::new(
+                            ErrorCode::OutputLimit,
+                            "probe exhausted its debugger-call budget",
+                        ));
+                    }
+                    let baseline = entry.handle.state();
+                    entry
+                        .handle
+                        .command(MiCommand::new("-exec-continue")?)
+                        .await?;
+                    calls += 1;
+                    let elapsed = started.elapsed();
+                    let remaining = Duration::from_millis(budget.wall_time_ms)
+                        .checked_sub(elapsed)
+                        .ok_or_else(|| Error::new(ErrorCode::Timeout, "probe timed out"))?;
+                    let stopped = entry
+                        .handle
+                        .wait_after(WaitUntil::Snapshot, remaining, &baseline)
+                        .await?;
+                    let capture = self
+                        .capture_probe_observation(request, &entry, &stopped, &budget, &mut calls)
+                        .await?;
+                    captures.push(json!({ "hit": hit, "observation": capture }));
+                    if stop_policy == "on_condition" || hit == max_hits {
+                        break;
+                    }
+                }
+                let serialized = serde_json::to_vec(&captures)?;
+                if serialized.len() > budget.max_context_bytes {
+                    let uri = self.put_artifact(
+                        Some(entry.handle.id()),
+                        &serialized,
+                        "probe-observations",
+                    )?;
+                    Ok(json!({
+                        "captures": [],
+                        "artifact": uri,
+                        "capture_count": captures.len(),
+                        "truncated": true
+                    }))
+                } else {
+                    Ok(json!({
+                        "captures": captures,
+                        "capture_count": captures.len(),
+                        "truncated": false
+                    }))
+                }
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(Error::new(ErrorCode::Timeout, "probe timed out")),
+            };
+        let cleanup = entry
+            .handle
+            .command(MiCommand::new("-break-delete")?.bare(&backend_number)?)
+            .await;
+        match run_result {
+            Ok(mut result) => {
+                let cleanup_error = cleanup.err();
+                // 2026-08-28: continue_after_capture stopped after the final
+                // hit. Resume only after the temporary breakpoint is removed.
+                if stop_policy == "continue_after_capture" && cleanup_error.is_none() {
+                    match entry
+                        .handle
+                        .command(MiCommand::new("-exec-continue")?)
+                        .await
+                    {
+                        Ok(resume) => {
+                            result["continued"] = Value::Bool(true);
+                            result["resume_evidence_seq"] = Value::from(resume.evidence_seq);
+                        }
+                        Err(error) => {
+                            operation.status = OperationStatus::Failed;
+                            operation.error = Some(error.to_string());
+                            operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                            self.store.upsert_operation(&operation)?;
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    result["continued"] = Value::Bool(false);
+                }
+                operation.status = OperationStatus::Completed;
+                operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                self.store.upsert_operation(&operation)?;
+                result["operation"] = serde_json::to_value(operation)?;
+                result["breakpoint"] = Value::String(backend_number);
+                if let Some(error) = cleanup_error {
+                    result["cleanup_warning"] = Value::String(error.to_string());
+                    result["partial"] = Value::Bool(true);
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                operation.status = if error.code == ErrorCode::Timeout {
+                    OperationStatus::TimedOut
+                } else {
+                    OperationStatus::Failed
+                };
+                operation.error = Some(error.to_string());
+                operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                self.store.upsert_operation(&operation)?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn capture_probe_observation(
+        &self,
+        request: &ApiRequest,
+        entry: &SessionEntry,
+        state: &crate::domain::SessionState,
+        budget: &ObservationBudget,
+        calls: &mut usize,
+    ) -> Result<Value> {
+        let capture = request
+            .parameters
+            .get("capture")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| vec![json!({"stack": {"limit": 4}})]);
+        if capture.len() > budget.max_values {
+            return Err(Error::new(
+                ErrorCode::OutputLimit,
+                "probe capture plan exceeds max_values",
+            ));
+        }
+        let mut observations = Vec::new();
+        for item in capture {
+            if *calls >= budget.max_calls {
+                return Err(Error::new(
+                    ErrorCode::OutputLimit,
+                    "probe exhausted its debugger-call budget",
+                ));
+            }
+            if let Some(expression) = item.get("expression").and_then(Value::as_str) {
+                validate_expression(expression)?;
+                let command = context_options(
+                    MiCommand::new("-data-evaluate-expression")?.string(expression),
+                    &json!({"stop_id": state.stop_id}),
+                    state,
+                )?;
+                let reply = safe_evaluate_command(&entry.handle, command).await?;
+                *calls += 1;
+                observations.push(json!({
+                    "expression": expression,
+                    "value": result_text(&reply.record, "value"),
+                    "evidence_seq": reply.evidence_seq
+                }));
+            } else if let Some(stack) = item.get("stack") {
+                let limit = stack
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(4)
+                    .clamp(1, budget.max_frames as u64) as usize;
+                let reply = entry
+                    .handle
+                    .command(
+                        MiCommand::new("-stack-list-frames")?
+                            .bare("0")?
+                            .bare((limit - 1).to_string())?,
+                    )
+                    .await?;
+                *calls += 1;
+                observations.push(json!({ "stack": reply }));
+            } else {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "capture items require expression or stack",
+                ));
+            }
+        }
+        Ok(json!({
+            "stop_id": state.stop_id,
+            "reason": state.stop_reason,
+            "observations": observations
+        }))
+    }
+
+    async fn kernel_inspect(&self, request: &ApiRequest) -> Result<Value> {
+        if !self.config.security.kernel_enabled {
+            return Err(Error::new(
+                ErrorCode::CapabilityMissing,
+                "Linux kernel provider is disabled",
+            ));
+        }
+        let entry = self.entry(required_session(request)?).await?;
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
+        let view = string(&request.parameters, "view")?;
+        match view.as_str() {
+            "current_task" | "init_task" => {
+                let expression = if view == "current_task" {
+                    "current"
+                } else {
+                    "init_task"
+                };
+                let command = context_options(
+                    MiCommand::new("-data-evaluate-expression")?.string(expression),
+                    &request.parameters,
+                    &state,
+                )?;
+                let reply = safe_evaluate_command(&entry.handle, command).await?;
+                Ok(json!({
+                    "view": view,
+                    "value": result_text(&reply.record, "value"),
+                    "stop_id": state.stop_id,
+                    "source": {"provider": "linux-kernel", "mechanism": "gdb-expression"},
+                    "evidence_seq": reply.evidence_seq
+                }))
+            }
+            "stack" => {
+                let mut subrequest = request.clone();
+                subrequest.method = "inspection.get".into();
+                subrequest.parameters["view"] = Value::String("stack".into());
+                self.inspection_get(&subrequest).await
+            }
+            "panic" => {
+                let mut subrequest = request.clone();
+                subrequest.method = "inspection.snapshot".into();
+                subrequest.parameters["profile"] = Value::String("standard".into());
+                self.inspection_snapshot(&subrequest).await
+            }
+            _ => Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "kernel view must be current_task, init_task, stack, or panic",
+            )),
+        }
+    }
+
+    async fn kernel_monitor(&self, request: &ApiRequest) -> Result<Value> {
+        if !self.config.security.kernel_enabled {
+            return Err(Error::new(
+                ErrorCode::CapabilityMissing,
+                "Linux kernel provider is disabled",
+            ));
+        }
+        let monitor = string(&request.parameters, "command")?;
+        if monitor.len() > 4_096
+            || monitor
+                .bytes()
+                .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "monitor command is empty, oversized, or multiline",
+            ));
+        }
+        let verb = first_word(&monitor);
+        if !self
+            .config
+            .security
+            .monitor_allowlist
+            .iter()
+            .any(|allowed| allowed == verb)
+        {
+            return Err(Error::new(
+                ErrorCode::PolicyDenied,
+                "monitor command is not allowlisted",
+            ));
+        }
+        self.metrics.raw_command();
+        let entry = self.entry(required_session(request)?).await?;
+        entry
+            .handle
+            .record_event(DomainEvent::ConsistencyTainted {
+                reason: format!("target monitor command executed: {verb}"),
+            })
+            .await?;
+        let reply = entry
+            .handle
+            .command(
+                MiCommand::new("-interpreter-exec")?
+                    .bare("console")?
+                    .string(format!("monitor {monitor}")),
+            )
+            .await?;
+        let reconciliation = self.reconcile_session(&entry, false).await?;
+        Ok(json!({
+            "command": reply,
+            "state_after": entry.handle.state(),
+            "reconciliation": reconciliation
+        }))
+    }
+
+    async fn artifact_get(&self, request: &ApiRequest, caller: &Caller) -> Result<Value> {
         let uri = string(&request.parameters, "uri")?;
+        // 2026-08-28: Content-addressed URIs are identifiers, not bearer
+        // credentials. Enforce the creating session's ownership on every read.
+        let metadata = self
+            .store
+            .artifact(&uri)?
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "artifact not found"))?;
+        let sessions = self.store.artifact_sessions(&uri)?;
+        let mut owned = false;
+        for session_id in &sessions {
+            let session_id = SessionId::parse(session_id)?;
+            if self
+                .store
+                .session_owner(&session_id)?
+                .is_some_and(|owner| same_principal(&owner, &caller.identity))
+            {
+                owned = true;
+                break;
+            }
+        }
+        if !caller.admin && !owned {
+            let message = if sessions.is_empty() {
+                "global artifacts require administrative access"
+            } else {
+                "artifact belongs to another session owner"
+            };
+            return Err(Error::new(ErrorCode::PolicyDenied, message));
+        }
+        let offset = request
+            .parameters
+            .get("offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let inline_maximum = (self.config.limits.tool_response_bytes / 4).clamp(1, 64 * 1024);
         let max_bytes = request
             .parameters
             .get("max_bytes")
             .and_then(Value::as_u64)
-            .unwrap_or(self.config.limits.tool_response_bytes as u64)
-            .min(self.config.limits.tool_response_bytes as u64) as usize;
-        let bytes = self.artifacts.get(&uri, max_bytes)?;
+            .unwrap_or(inline_maximum as u64)
+            .min(inline_maximum as u64) as usize;
+        if max_bytes == 0 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "artifact max_bytes must be positive",
+            ));
+        }
+        // 2026-08-28: Inlining a complete large artifact caused the outer
+        // response limiter to replace it with another artifact. Page raw bytes
+        // below the envelope budget instead.
+        let (bytes, total_bytes) = self.artifacts.get_range(&uri, offset, max_bytes)?;
+        let next_offset = offset + bytes.len() as u64;
         Ok(json!({
             "uri": uri,
-            "size": bytes.len(),
-            "data_base64": BASE64.encode(bytes)
+            "size": total_bytes,
+            "sensitivity": metadata.sensitivity,
+            "offset": offset,
+            "next_offset": next_offset,
+            "data_base64": BASE64.encode(bytes),
+            "truncated": next_offset < total_bytes
         }))
     }
 
@@ -983,8 +2814,13 @@ impl Gateway {
             .parameters
             .get("timeout_ms")
             .and_then(Value::as_u64)
-            .unwrap_or(5_000)
-            .max(1);
+            .unwrap_or(5_000);
+        if timeout_ms == 0 || timeout_ms > 300_000 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "event timeout must be between 1 and 300000 ms",
+            ));
+        }
         let mut events = entry.handle.subscribe();
         let event = tokio::time::timeout(Duration::from_millis(timeout_ms), events.recv())
             .await
@@ -994,9 +2830,23 @@ impl Gateway {
     }
 
     async fn raw_console(&self, request: &ApiRequest) -> Result<Value> {
+        self.metrics.raw_command();
         let command_text = string(&request.parameters, "command")?;
         validate_console_command(&command_text)?;
         let entry = self.entry(required_session(request)?).await?;
+        let timeout = request
+            .parameters
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(2_000);
+        if timeout == 0 || timeout > 60_000 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "raw command timeout must be between 1 and 60000 ms",
+            ));
+        }
+        // 2026-08-28: Invalid raw arguments used to taint state before any
+        // command was sent. Record the effect only after validation succeeds.
         entry
             .handle
             .record_event(DomainEvent::ConsistencyTainted {
@@ -1006,12 +2856,6 @@ impl Gateway {
                 ),
             })
             .await?;
-        let timeout = request
-            .parameters
-            .get("timeout_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(2_000)
-            .max(1);
         let reply = entry
             .handle
             .command_with_timeout(
@@ -1021,19 +2865,193 @@ impl Gateway {
                 Duration::from_millis(timeout),
             )
             .await?;
+        let reconciliation = self.reconcile_session(&entry, false).await?;
         Ok(json!({
             "command": reply,
             "state_after": entry.handle.state(),
-            "reconciliation": {
-                "status": "tainted",
-                "message": "unknown CLI effects cannot be proven fully reconciled"
-            }
+            "reconciliation": reconciliation
         }))
     }
 
-    async fn simple_command(&self, request: &ApiRequest, name: &str) -> Result<Value> {
+    async fn raw_mi(&self, request: &ApiRequest) -> Result<Value> {
+        self.metrics.raw_command();
+        let name = string(&request.parameters, "command")?;
+        if raw_mi_is_denied(&name) {
+            return Err(Error::new(
+                ErrorCode::PolicyDenied,
+                "raw MI command bypasses a protected host or target boundary",
+            ));
+        }
+        let managed = raw_mi_is_managed(&name);
         let entry = self.entry(required_session(request)?).await?;
-        command_value(entry.handle.command(MiCommand::new(name)?).await?)
+        let mut command = MiCommand::new(name.clone())?;
+        let arguments = request
+            .parameters
+            .get("arguments")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if arguments.len() > 64 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "raw MI accepts at most 64 arguments",
+            ));
+        }
+        let mut argument_bytes = 0usize;
+        for argument in arguments {
+            let (kind, value) = if let Some(value) = argument.as_str() {
+                ("string", value.to_owned())
+            } else {
+                (
+                    argument
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("string"),
+                    string(&argument, "value")?,
+                )
+            };
+            argument_bytes = argument_bytes.saturating_add(value.len());
+            if argument_bytes > 16 * 1024 {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "raw MI arguments exceed 16384 bytes",
+                ));
+            }
+            command = match kind {
+                "bare" => command.bare(value)?,
+                "string" => command.string(value),
+                _ => {
+                    return Err(Error::new(
+                        ErrorCode::InvalidArgument,
+                        "raw MI argument kind must be bare or string",
+                    ));
+                }
+            };
+        }
+        let timeout = request
+            .parameters
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(2_000);
+        if timeout == 0 || timeout > 60_000 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "raw command timeout must be between 1 and 60000 ms",
+            ));
+        }
+        entry
+            .handle
+            .record_event(if managed {
+                DomainEvent::ConsistencyDirty {
+                    reason: format!("managed raw MI command executed: {name}"),
+                }
+            } else {
+                DomainEvent::ConsistencyTainted {
+                    reason: format!("unknown raw MI command executed: {name}"),
+                }
+            })
+            .await?;
+        let reply = entry
+            .handle
+            .command_with_timeout(command, Duration::from_millis(timeout))
+            .await?;
+        let reconciliation = self.reconcile_session(&entry, managed).await?;
+        Ok(json!({
+            "command": reply,
+            "state_after": entry.handle.state(),
+            "reconciliation": reconciliation
+        }))
+    }
+
+    pub(crate) async fn reconcile_session(
+        &self,
+        entry: &SessionEntry,
+        restore_clean: bool,
+    ) -> Result<Value> {
+        self.metrics.reconciliation();
+        let can_restore = restore_clean
+            && entry.handle.state().consistency != crate::domain::Consistency::Tainted;
+        if can_restore {
+            entry
+                .handle
+                .record_event(DomainEvent::ConsistencyReconciling)
+                .await?;
+        }
+        let mut warnings = Vec::new();
+        let groups = reconciliation_command(
+            &entry.handle,
+            MiCommand::new("-list-thread-groups")?
+                .bare("--recurse")?
+                .bare("1")?,
+            "thread groups",
+            &mut warnings,
+        )
+        .await;
+        let threads = reconciliation_command(
+            &entry.handle,
+            MiCommand::new("-thread-info")?,
+            "threads",
+            &mut warnings,
+        )
+        .await;
+        let breakpoints = reconciliation_command(
+            &entry.handle,
+            MiCommand::new("-break-list")?,
+            "breakpoints",
+            &mut warnings,
+        )
+        .await;
+        let libraries = reconciliation_command(
+            &entry.handle,
+            MiCommand::new("-file-list-shared-libraries")?,
+            "shared libraries",
+            &mut warnings,
+        )
+        .await;
+
+        if let Some(reply) = &groups {
+            reconcile_inferiors(&entry.handle, &reply.record).await?;
+        }
+        if let Some(reply) = &threads {
+            reconcile_threads(&entry.handle, &reply.record).await?;
+        }
+        if let Some(reply) = &breakpoints {
+            reconcile_breakpoints(&entry.handle, &reply.record).await?;
+        }
+        if let Some(reply) = &libraries {
+            reconcile_libraries(&entry.handle, &reply.record).await?;
+        }
+        let capabilities = match entry.handle.refresh_target_capabilities().await {
+            Ok(capabilities) => Some(capabilities),
+            Err(error) => {
+                warnings.push(format!("target features: {error}"));
+                None
+            }
+        };
+        if can_restore && (groups.is_none() || threads.is_none() || breakpoints.is_none()) {
+            entry
+                .handle
+                .record_event(DomainEvent::ConsistencyLost {
+                    reason: "reconciliation could not recover required registries".into(),
+                })
+                .await?;
+            return Err(Error::new(
+                ErrorCode::ConsistencyLost,
+                "reconciliation could not recover required registries",
+            ));
+        }
+        entry
+            .handle
+            .record_event(DomainEvent::ConsistencyRestored {
+                warnings: warnings.clone(),
+            })
+            .await?;
+        Ok(json!({
+            "status": if can_restore { "clean" } else { "tainted" },
+            "warnings": warnings,
+            "capabilities": capabilities,
+            "managed_surface": ["inferiors", "threads", "breakpoints", "libraries", "target_features"]
+        }))
     }
 
     pub(crate) fn workspace_path(
@@ -1071,13 +3089,166 @@ impl Gateway {
         }
         Ok(path)
     }
+
+    fn source_excerpt(&self, request: &ApiRequest) -> Result<Value> {
+        let requested = std::path::PathBuf::from(string(&request.parameters, "path")?);
+        let mapped = self
+            .config
+            .security
+            .source_map
+            .iter()
+            .find_map(|mapping| {
+                requested
+                    .strip_prefix(&mapping.from)
+                    .ok()
+                    .map(|suffix| mapping.to.join(suffix))
+            })
+            .unwrap_or(requested);
+        let path = self.workspace_path(&mapped.to_string_lossy(), false)?;
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.len() > 1024 * 1024 {
+            return Err(Error::new(
+                ErrorCode::OutputLimit,
+                "source file exceeds 1 MiB",
+            ));
+        }
+        let source = std::fs::read_to_string(&path).map_err(|_| {
+            Error::new(ErrorCode::InvalidArgument, "source file is not valid UTF-8")
+        })?;
+        let lines = source.lines().collect::<Vec<_>>();
+        let center = request
+            .parameters
+            .get("line")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, lines.len().max(1) as u64) as usize;
+        let before = request
+            .parameters
+            .get("before_lines")
+            .and_then(Value::as_u64)
+            .unwrap_or(5)
+            .min(100) as usize;
+        let after = request
+            .parameters
+            .get("after_lines")
+            .and_then(Value::as_u64)
+            .unwrap_or(10)
+            .min(100) as usize;
+        let start = center.saturating_sub(before + 1);
+        let end = center.saturating_add(after).min(lines.len());
+        let excerpt = lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, text)| json!({ "line": start + offset + 1, "text": text }))
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "path": path,
+            "start_line": start + 1,
+            "end_line": end,
+            "lines": excerpt,
+            "partial": start > 0 || end < lines.len(),
+            "source": {"provider": "linux-userland", "mechanism": "workspace-file"}
+        }))
+    }
+
+    fn breakpoint_location(&self, parameters: &Value) -> Result<String> {
+        let location = parameters.get("location").unwrap_or(parameters);
+        if let Some(source) = location.get("source") {
+            // 2026-08-28: Source breakpoints previously bypassed workspace
+            // canonicalization even though every other target path was checked.
+            let path = self.workspace_path(&string(source, "path")?, false)?;
+            return Ok(format!(
+                "{}:{}",
+                path.to_string_lossy(),
+                unsigned(source, "line")?
+            ));
+        }
+        breakpoint_location(parameters)
+    }
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WaitSpec {
     until: String,
     #[serde(default = "default_wait_ms")]
     timeout_ms: u64,
+}
+
+impl WaitSpec {
+    fn validate(&self) -> Result<()> {
+        // 2026-08-28: Wait validation once ran after the associated control
+        // command, so invalid input could resume or kill a target before erroring.
+        if !matches!(
+            self.until.as_str(),
+            "accepted" | "running" | "stopped" | "snapshot" | "exited"
+        ) {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "unknown wait condition",
+            ));
+        }
+        if self.timeout_ms == 0 || self.timeout_ms > 300_000 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "wait timeout must be between 1 and 300000 ms",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+struct ObservationBudget {
+    max_calls: usize,
+    max_frames: usize,
+    max_values: usize,
+    max_memory_bytes: usize,
+    max_instructions: usize,
+    max_context_bytes: usize,
+    wall_time_ms: u64,
+}
+
+impl Default for ObservationBudget {
+    fn default() -> Self {
+        Self {
+            max_calls: 32,
+            max_frames: 16,
+            max_values: 16,
+            max_memory_bytes: 64 * 1024,
+            max_instructions: 64,
+            max_context_bytes: 64 * 1024,
+            wall_time_ms: 10_000,
+        }
+    }
+}
+
+impl ObservationBudget {
+    fn validate(&self, config: &crate::config::Config) -> Result<()> {
+        if self.max_calls == 0
+            || self.max_calls > 256
+            || self.max_frames == 0
+            || self.max_frames > config.limits.stack_frames
+            || self.max_values == 0
+            || self.max_values > 1_000
+            || self.max_memory_bytes == 0
+            || self.max_memory_bytes > config.limits.memory_read_bytes
+            || self.max_instructions == 0
+            || self.max_instructions > 1_024
+            || self.max_context_bytes == 0
+            || self.max_context_bytes > config.limits.tool_response_bytes
+            || self.wall_time_ms == 0
+            || self.wall_time_ms > 60_000
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "observation budget is outside configured limits",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn default_wait_ms() -> u64 {
@@ -1085,12 +3256,16 @@ fn default_wait_ms() -> u64 {
 }
 
 fn wait_spec(parameters: &Value) -> Result<Option<WaitSpec>> {
-    parameters
+    let wait: Option<WaitSpec> = parameters
         .get("wait")
         .cloned()
         .map(serde_json::from_value)
         .transpose()
-        .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))
+        .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))?;
+    if let Some(wait) = &wait {
+        wait.validate()?;
+    }
+    Ok(wait)
 }
 
 async fn wait_if_requested(
@@ -1109,6 +3284,7 @@ async fn apply_wait(
     wait: WaitSpec,
     baseline: Option<&crate::domain::SessionState>,
 ) -> Result<crate::domain::SessionState> {
+    wait.validate()?;
     let until = match wait.until.as_str() {
         "accepted" => return Ok(handle.state()),
         "running" => WaitUntil::Running,
@@ -1122,7 +3298,7 @@ async fn apply_wait(
             ));
         }
     };
-    let timeout = Duration::from_millis(wait.timeout_ms.max(1));
+    let timeout = Duration::from_millis(wait.timeout_ms);
     match baseline {
         Some(baseline) => handle.wait_after(until, timeout, baseline).await,
         None => handle.wait(until, timeout).await,
@@ -1202,6 +3378,21 @@ fn validate_environment(environment: &BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+fn validate_argv(arguments: &[String]) -> Result<()> {
+    if arguments.len() > 256
+        || arguments
+            .iter()
+            .any(|argument| argument.len() > 64 * 1024 || argument.contains('\0'))
+    {
+        Err(Error::new(
+            ErrorCode::OutputLimit,
+            "argv exceeds 256 entries or 64 KiB per argument",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn context_options(
     mut command: MiCommand,
     parameters: &Value,
@@ -1276,13 +3467,6 @@ fn breakpoint_location(parameters: &Value) -> Result<String> {
     if let Some(expression) = location.get("expression").and_then(Value::as_str) {
         return Ok(expression.to_owned());
     }
-    if let Some(source) = location.get("source") {
-        return Ok(format!(
-            "{}:{}",
-            string(source, "path")?,
-            unsigned(source, "line")?
-        ));
-    }
     if let Some(module) = location.get("module_offset") {
         return Ok(format!(
             "{}+{}",
@@ -1294,6 +3478,41 @@ fn breakpoint_location(parameters: &Value) -> Result<String> {
         ErrorCode::InvalidArgument,
         "breakpoint location is required",
     ))
+}
+
+fn breakpoint_scope(
+    mut command: MiCommand,
+    parameters: &Value,
+    state: &crate::domain::SessionState,
+) -> Result<MiCommand> {
+    let thread = parameters.get("thread_id").and_then(Value::as_str);
+    let inferior = parameters.get("inferior_id").and_then(Value::as_str);
+    if (thread.is_some() || inferior.is_some()) && command.name != "-break-insert" {
+        return Err(Error::new(
+            ErrorCode::CapabilityMissing,
+            "this GDB target only supports scoped software or hardware breakpoints",
+        ));
+    }
+    if let Some(thread_id) = thread {
+        let backend_thread = state
+            .inferiors
+            .values()
+            .flat_map(|inferior| inferior.threads.values())
+            .find(|thread| thread.id.0 == thread_id)
+            .map(|thread| thread.backend_id.clone())
+            .ok_or_else(|| Error::new(ErrorCode::StaleContext, "thread handle is not current"))?;
+        command = command.bare("-p")?.bare(backend_thread)?;
+    }
+    if let Some(inferior_id) = inferior {
+        let backend_inferior = state
+            .inferiors
+            .values()
+            .find(|inferior| inferior.id.0 == inferior_id)
+            .map(|inferior| inferior.backend_id.clone())
+            .ok_or_else(|| Error::new(ErrorCode::StaleContext, "inferior handle is not current"))?;
+        command = command.bare("--thread-group")?.bare(backend_inferior)?;
+    }
+    Ok(command)
 }
 
 fn breakpoint_number(entry: &SessionEntry, parameters: &Value) -> Result<String> {
@@ -1311,8 +3530,12 @@ fn breakpoint_number(entry: &SessionEntry, parameters: &Value) -> Result<String>
         .ok_or_else(|| Error::new(ErrorCode::NotFound, "breakpoint not found"))
 }
 
-fn command_value(reply: CommandReply) -> Result<Value> {
-    Ok(serde_json::to_value(reply)?)
+fn breakpoint_number_from_record(record: &MiRecord) -> Result<String> {
+    MiResult::find(record.results(), "bkpt")
+        .and_then(MiValue::results)
+        .and_then(|fields| MiResult::find_str(fields, "number"))
+        .map(str::to_owned)
+        .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB returned no breakpoint number"))
 }
 
 async fn optional_command(
@@ -1320,30 +3543,338 @@ async fn optional_command(
     command: MiCommand,
     name: &str,
     warnings: &mut Vec<Value>,
-) -> Value {
+) -> Option<CommandReply> {
     match handle.command(command).await {
-        Ok(reply) => serde_json::to_value(reply).unwrap_or(Value::Null),
+        Ok(reply) => Some(reply),
         Err(error) => {
             warnings.push(json!({ "code": format!("{}_UNAVAILABLE", name.to_uppercase()), "message": error.to_string() }));
-            Value::Null
+            None
         }
     }
 }
 
-fn mappings(state: &crate::domain::SessionState) -> Result<Value> {
-    let pid = state
+async fn reconciliation_command(
+    handle: &SessionHandle,
+    command: MiCommand,
+    name: &str,
+    warnings: &mut Vec<String>,
+) -> Option<CommandReply> {
+    match handle.command(command).await {
+        Ok(reply) => Some(reply),
+        Err(error) => {
+            warnings.push(format!("{name}: {error}"));
+            None
+        }
+    }
+}
+
+async fn reconcile_inferiors(handle: &SessionHandle, record: &MiRecord) -> Result<()> {
+    let Some(groups) = MiResult::find(record.results(), "groups") else {
+        return Ok(());
+    };
+    let observed = aggregate_items(groups, "group")
+        .into_iter()
+        .filter_map(|fields| {
+            Some((
+                MiResult::find_str(fields, "id")?.to_owned(),
+                MiResult::find_str(fields, "pid").and_then(|pid| pid.parse().ok()),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let existing = handle.state().inferiors.keys().cloned().collect::<Vec<_>>();
+    for (backend_id, pid) in &observed {
+        handle
+            .record_event(DomainEvent::InferiorAdded {
+                backend_id: backend_id.clone(),
+                pid: *pid,
+            })
+            .await?;
+    }
+    for backend_id in existing {
+        if !observed.contains_key(&backend_id) {
+            handle
+                .record_event(DomainEvent::InferiorRemoved { backend_id })
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn reconcile_threads(handle: &SessionHandle, record: &MiRecord) -> Result<()> {
+    let Some(threads) = MiResult::find(record.results(), "threads") else {
+        return Ok(());
+    };
+    let fallback_group = handle
+        .state()
+        .inferiors
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "i1".into());
+    let observed = aggregate_items(threads, "thread")
+        .into_iter()
+        .filter_map(|fields| {
+            Some((
+                MiResult::find_str(fields, "id")?.to_owned(),
+                MiResult::find_str(fields, "group-id")
+                    .unwrap_or(&fallback_group)
+                    .to_owned(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let existing = handle
+        .state()
         .inferiors
         .values()
-        .find_map(|inferior| inferior.pid)
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::CapabilityMissing,
-                "current target does not expose a local PID",
-            )
-        })?;
+        .flat_map(|inferior| {
+            inferior
+                .threads
+                .keys()
+                .cloned()
+                .map(|thread| (thread, inferior.backend_id.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for (backend_thread, backend_inferior) in &observed {
+        handle
+            .record_event(DomainEvent::ThreadCreated {
+                backend_inferior: backend_inferior.clone(),
+                backend_thread: backend_thread.clone(),
+            })
+            .await?;
+    }
+    for (backend_thread, backend_inferior) in existing {
+        if !observed.contains_key(&backend_thread) {
+            handle
+                .record_event(DomainEvent::ThreadExited {
+                    backend_inferior: Some(backend_inferior),
+                    backend_thread,
+                })
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn reconcile_breakpoints(handle: &SessionHandle, record: &MiRecord) -> Result<()> {
+    let Some(table) =
+        MiResult::find(record.results(), "BreakpointTable").and_then(MiValue::results)
+    else {
+        return Ok(());
+    };
+    let Some(body) = MiResult::find(table, "body") else {
+        return Ok(());
+    };
+    let observed = aggregate_items(body, "bkpt")
+        .into_iter()
+        .filter_map(|fields| {
+            let number = MiResult::find_str(fields, "number")?.to_owned();
+            let enabled = MiResult::find_str(fields, "enabled").is_none_or(|value| value == "y");
+            let pending = MiResult::find_str(fields, "pending").is_some_and(|value| value == "y")
+                || MiResult::find_str(fields, "addr") == Some("<PENDING>");
+            Some((number, (enabled, pending)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let existing = handle
+        .state()
+        .breakpoints
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for fields in aggregate_items(body, "bkpt") {
+        synchronize_breakpoint(handle, fields).await?;
+    }
+    for backend_number in existing {
+        if !observed.contains_key(&backend_number) {
+            handle
+                .record_event(DomainEvent::BreakpointDeleted { backend_number })
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn synchronize_breakpoint(handle: &SessionHandle, fields: &[MiResult]) -> Result<()> {
+    let Some(backend_number) = MiResult::find_str(fields, "number").map(str::to_owned) else {
+        return Ok(());
+    };
+    let enabled = MiResult::find_str(fields, "enabled").is_none_or(|value| value == "y");
+    let pending = MiResult::find_str(fields, "pending").is_some_and(|value| value == "y")
+        || MiResult::find_str(fields, "addr") == Some("<PENDING>");
+    let previous = handle.state().breakpoints.get(&backend_number).cloned();
+    // 2026-08-28: Breakpoint reads relied on optional notifications and then
+    // emitted unconditional modifications, leaving stale registries or
+    // advancing revisions on every list. Synchronize only observed changes.
+    if previous
+        .as_ref()
+        .is_none_or(|breakpoint| breakpoint.enabled != enabled || breakpoint.pending != pending)
+    {
+        let event = if previous.is_some() {
+            DomainEvent::BreakpointModified {
+                backend_number: backend_number.clone(),
+                enabled,
+                pending,
+            }
+        } else {
+            DomainEvent::BreakpointCreated {
+                backend_number: backend_number.clone(),
+                enabled,
+                pending,
+            }
+        };
+        handle.record_event(event).await?;
+    }
+    let state = handle.state();
+    let existing = state
+        .breakpoints
+        .get(&backend_number)
+        .map(|breakpoint| breakpoint.locations.clone())
+        .unwrap_or_default();
+    let public_id = state
+        .breakpoints
+        .get(&backend_number)
+        .map(|breakpoint| breakpoint.id.0.clone())
+        .unwrap_or_else(|| format!("bp_{}", backend_number.replace('.', "_")));
+    let location_fields = MiResult::find(fields, "locations")
+        .map(|locations| aggregate_items(locations, "location"))
+        .unwrap_or_default();
+    let location_fields = if location_fields.is_empty() && !pending {
+        vec![fields]
+    } else {
+        location_fields
+    };
+    let locations = location_fields
+        .into_iter()
+        .enumerate()
+        .map(|(index, location)| {
+            let number = MiResult::find_str(location, "number")
+                .unwrap_or(&backend_number)
+                .to_owned();
+            BreakpointLocationState {
+                id: existing
+                    .iter()
+                    .find(|existing| existing.backend_number == number)
+                    .map(|existing| existing.id.clone())
+                    .unwrap_or_else(|| {
+                        format!("bpl_{public_id}_{}_{}", state.event_seq, index + 1)
+                    }),
+                backend_number: number,
+                address: MiResult::find_str(location, "addr")
+                    .filter(|address| *address != "<PENDING>")
+                    .map(str::to_owned),
+                function: MiResult::find_str(location, "func").map(str::to_owned),
+            }
+        })
+        .collect();
+    if existing != locations {
+        handle
+            .record_event(DomainEvent::BreakpointLocations {
+                backend_number,
+                locations,
+            })
+            .await
+    } else {
+        Ok(())
+    }
+}
+
+async fn reconcile_libraries(handle: &SessionHandle, record: &MiRecord) -> Result<()> {
+    let Some(libraries) = MiResult::find(record.results(), "shared-libraries") else {
+        return Ok(());
+    };
+    let observed = aggregate_items(libraries, "library")
+        .into_iter()
+        .filter_map(|fields| {
+            let id = MiResult::find_str(fields, "id")
+                .or_else(|| MiResult::find_str(fields, "target-name"))?
+                .to_owned();
+            Some((id, fields))
+        })
+        .collect::<Vec<_>>();
+    let observed_ids = observed
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<BTreeSet<_>>();
+    let existing = handle.state().modules.keys().cloned().collect::<Vec<_>>();
+    for (id, fields) in observed {
+        handle
+            .record_event(DomainEvent::LibraryLoaded {
+                id,
+                target_name: MiResult::find_str(fields, "target-name").map(str::to_owned),
+                host_name: MiResult::find_str(fields, "host-name").map(str::to_owned),
+                symbols_loaded: MiResult::find_str(fields, "symbols-loaded")
+                    .map(|value| value == "1"),
+            })
+            .await?;
+    }
+    for id in existing {
+        if !observed_ids.contains(&id) {
+            handle
+                .record_event(DomainEvent::LibraryUnloaded { id })
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn safe_evaluate_command(handle: &SessionHandle, command: MiCommand) -> Result<CommandReply> {
+    handle.safe_evaluate(command).await
+}
+
+fn validate_expression(expression: &str) -> Result<()> {
+    if expression.is_empty() || expression.len() > 4_096 || expression.contains('\0') {
+        Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "expression must contain 1 to 4096 bytes and no NUL",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn current_value_binding(
+    entry: &SessionEntry,
+    request: &ApiRequest,
+    state: &crate::domain::SessionState,
+) -> Result<ValueBinding> {
+    require_stopped_context(&request.parameters, state)?;
+    let binding = entry
+        .handle
+        .value_binding(string(&request.parameters, "value_id")?)
+        .await?;
+    state.require_stop(&binding.stop_id)?;
+    Ok(binding)
+}
+
+fn mappings(state: &crate::domain::SessionState) -> Result<Value> {
+    // 2026-08-28: A remote PID can collide with an unrelated host PID. Never
+    // consult host /proc unless the reducer recorded a local target origin.
+    if !matches!(
+        state.target_origin,
+        TargetOrigin::Local | TargetOrigin::Attach
+    ) {
+        return Ok(json!({
+            "mappings": [],
+            "partial": true,
+            "limitations": ["target origin does not permit host /proc access"],
+            "source": {"provider": "remote", "mechanism": "unavailable"}
+        }));
+    }
+    let Some(pid) = state.inferiors.values().find_map(|inferior| inferior.pid) else {
+        return Ok(json!({
+            "mappings": [],
+            "partial": true,
+            "limitations": ["target does not expose a local /proc memory map"],
+            "source": {"provider": "remote", "mechanism": "unavailable"}
+        }));
+    };
     let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
     let ranges: Vec<Value> = maps.lines().filter_map(parse_proc_map).collect();
-    Ok(json!({ "mappings": ranges, "partial": false, "source": "linux-proc" }))
+    Ok(json!({
+        "mappings": ranges,
+        "partial": false,
+        "source": {"provider": "linux-userland", "mechanism": "proc-maps"}
+    }))
 }
 
 fn parse_proc_map(line: &str) -> Option<Value> {
@@ -1365,6 +3896,244 @@ fn parse_proc_map(line: &str) -> Option<Value> {
 
 fn result_text(record: &MiRecord, name: &str) -> Option<String> {
     MiResult::find_str(record.results(), name).map(str::to_owned)
+}
+
+fn frame_summary(record: &MiRecord) -> Option<FrameSummary> {
+    let fields = MiResult::find(record.results(), "frame")?.results()?;
+    Some(frame_summary_fields(fields))
+}
+
+fn frame_summary_fields(fields: &[MiResult]) -> FrameSummary {
+    FrameSummary {
+        level: MiResult::find_str(fields, "level")
+            .and_then(|level| level.parse().ok())
+            .unwrap_or(0),
+        address: MiResult::find_str(fields, "addr").map(str::to_owned),
+        function: MiResult::find_str(fields, "func").map(str::to_owned),
+        source: MiResult::find_str(fields, "fullname")
+            .or_else(|| MiResult::find_str(fields, "file"))
+            .map(str::to_owned),
+        line: MiResult::find_str(fields, "line").and_then(|line| line.parse().ok()),
+    }
+}
+
+fn normalized_threads(record: &MiRecord, state: &crate::domain::SessionState) -> Vec<Value> {
+    let Some(threads) = MiResult::find(record.results(), "threads") else {
+        return Vec::new();
+    };
+    aggregate_items(threads, "thread")
+        .into_iter()
+        .filter_map(|fields| {
+            let backend_id = MiResult::find_str(fields, "id")?;
+            let thread = state
+                .inferiors
+                .values()
+                .flat_map(|inferior| inferior.threads.values())
+                .find(|thread| thread.backend_id == backend_id);
+            Some(json!({
+                "thread_id": thread.map(|thread| &thread.id),
+                "backend_id": backend_id,
+                "inferior_id": state.inferiors.values()
+                    .find(|inferior| inferior.threads.contains_key(backend_id))
+                    .map(|inferior| &inferior.id),
+                "state": MiResult::find_str(fields, "state"),
+                "name": MiResult::find_str(fields, "name"),
+                "frame": MiResult::find(fields, "frame")
+                    .and_then(MiValue::results)
+                    .map(frame_summary_fields)
+            }))
+        })
+        .collect()
+}
+
+fn normalized_frames(
+    record: &MiRecord,
+    state: &crate::domain::SessionState,
+    parameters: &Value,
+) -> Vec<Value> {
+    let Some(stack) = MiResult::find(record.results(), "stack") else {
+        return Vec::new();
+    };
+    let thread = parameters
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .and_then(|thread_id| {
+            state
+                .inferiors
+                .values()
+                .flat_map(|inferior| inferior.threads.values())
+                .find(|thread| thread.id.0 == thread_id)
+        })
+        .or_else(|| {
+            state
+                .inferiors
+                .values()
+                .flat_map(|inferior| inferior.threads.values())
+                .find(|thread| !thread.running)
+        });
+    aggregate_items(stack, "frame")
+        .into_iter()
+        .map(|fields| {
+            let frame = frame_summary_fields(fields);
+            let frame_id = thread.and_then(|thread| {
+                state
+                    .stop_id
+                    .as_ref()
+                    .map(|stop| FrameId::new(&thread.id, stop, frame.level))
+            });
+            json!({
+                "frame_id": frame_id,
+                "level": frame.level,
+                "address": frame.address,
+                "function": frame.function,
+                "source": frame.source.map(|path| json!({"path": path, "line": frame.line}))
+            })
+        })
+        .collect()
+}
+
+fn normalized_variables(record: &MiRecord, name: &str) -> Vec<Value> {
+    let Some(variables) = MiResult::find(record.results(), name) else {
+        return Vec::new();
+    };
+    aggregate_items(variables, "variable")
+        .into_iter()
+        .map(|fields| {
+            json!({
+                "name": MiResult::find_str(fields, "name"),
+                "type": MiResult::find_str(fields, "type"),
+                "value": MiResult::find_str(fields, "value")
+                    .map(|value| value.chars().take(16 * 1024).collect::<String>()),
+                "dynamic": MiResult::find_str(fields, "dynamic") == Some("1")
+            })
+        })
+        .collect()
+}
+
+fn normalized_arguments(record: &MiRecord) -> Vec<Value> {
+    let Some(frames) = MiResult::find(record.results(), "stack-args") else {
+        return Vec::new();
+    };
+    aggregate_items(frames, "frame")
+        .into_iter()
+        .map(|fields| {
+            let arguments = MiResult::find(fields, "args")
+                .map(|args| {
+                    aggregate_items(args, "arg")
+                        .into_iter()
+                        .map(|fields| {
+                            json!({
+                                "name": MiResult::find_str(fields, "name"),
+                                "type": MiResult::find_str(fields, "type"),
+                                "value": MiResult::find_str(fields, "value")
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            json!({
+                "level": MiResult::find_str(fields, "level")
+                    .and_then(|level| level.parse::<u64>().ok()),
+                "arguments": arguments
+            })
+        })
+        .collect()
+}
+
+fn normalized_modules(record: &MiRecord) -> Vec<Value> {
+    let Some(modules) = MiResult::find(record.results(), "shared-libraries") else {
+        return Vec::new();
+    };
+    aggregate_items(modules, "library")
+        .into_iter()
+        .map(|fields| {
+            json!({
+                "module_id": MiResult::find_str(fields, "id")
+                    .or_else(|| MiResult::find_str(fields, "target-name")),
+                "target_name": MiResult::find_str(fields, "target-name"),
+                "host_name": MiResult::find_str(fields, "host-name"),
+                "from": MiResult::find_str(fields, "from"),
+                "to": MiResult::find_str(fields, "to"),
+                "symbols_loaded": MiResult::find_str(fields, "symbols-loaded")
+                    .map(|loaded| loaded == "1")
+            })
+        })
+        .collect()
+}
+
+fn normalized_source_files(record: &MiRecord) -> Vec<Value> {
+    let Some(files) = MiResult::find(record.results(), "files") else {
+        return Vec::new();
+    };
+    aggregate_items(files, "file")
+        .into_iter()
+        .map(|fields| {
+            json!({
+                "file": MiResult::find_str(fields, "file"),
+                "fullname": MiResult::find_str(fields, "fullname"),
+                "debug_fully_read": MiResult::find_str(fields, "debug-fully-read")
+                    .map(|read| read == "true")
+            })
+        })
+        .collect()
+}
+
+fn disassembly_instructions(record: &MiRecord, current: Option<u64>) -> Vec<Value> {
+    let mut instructions = Vec::new();
+    for result in record.results() {
+        collect_instructions(&result.value, None, None, current, &mut instructions);
+    }
+    instructions
+}
+
+fn collect_instructions(
+    value: &MiValue,
+    inherited_file: Option<&str>,
+    inherited_line: Option<u64>,
+    current: Option<u64>,
+    output: &mut Vec<Value>,
+) {
+    match value {
+        MiValue::Tuple(results) | MiValue::ResultList(results) => {
+            let file = MiResult::find_str(results, "fullname")
+                .or_else(|| MiResult::find_str(results, "file"))
+                .or(inherited_file);
+            let line = MiResult::find_str(results, "line")
+                .and_then(|line| line.parse().ok())
+                .or(inherited_line);
+            if let (Some(address), Some(instruction)) = (
+                MiResult::find_str(results, "address"),
+                MiResult::find_str(results, "inst"),
+            ) {
+                let address_number = parse_address(address).ok();
+                let (mnemonic, operands) = instruction
+                    .split_once(char::is_whitespace)
+                    .map_or((instruction, ""), |(mnemonic, operands)| {
+                        (mnemonic, operands.trim())
+                    });
+                output.push(json!({
+                    "address": address,
+                    "offset": MiResult::find_str(results, "offset")
+                        .and_then(|offset| offset.parse::<i64>().ok()),
+                    "bytes": MiResult::find_str(results, "opcodes"),
+                    "mnemonic": mnemonic,
+                    "operands": operands,
+                    "function": MiResult::find_str(results, "func-name"),
+                    "source": file.map(|file| json!({"path": file, "line": line})),
+                    "current": address_number.is_some() && address_number == current
+                }));
+            }
+            for result in results {
+                collect_instructions(&result.value, file, line, current, output);
+            }
+        }
+        MiValue::ValueList(values) => {
+            for value in values {
+                collect_instructions(value, inherited_file, inherited_line, current, output);
+            }
+        }
+        MiValue::Const(_) => {}
+    }
 }
 
 fn result_string_list(record: &MiRecord, name: &str) -> Vec<String> {
@@ -1406,6 +4175,130 @@ fn memory_contents(record: &MiRecord) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+// 2026-08-28: A single 16 MiB read expands beyond the MI record limit as
+// hexadecimal text. Keep backend records bounded while preserving one API read.
+async fn read_memory_bytes(
+    handle: &SessionHandle,
+    start: u64,
+    length: usize,
+    allow_partial: bool,
+) -> Result<(Vec<u8>, u64)> {
+    const CHUNK_BYTES: usize = 64 * 1024;
+
+    let mut bytes = Vec::with_capacity(length);
+    let mut evidence_seq = handle.state().event_seq;
+    while bytes.len() < length {
+        let chunk = (length - bytes.len()).min(CHUNK_BYTES);
+        let address = start.checked_add(bytes.len() as u64).ok_or_else(|| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "memory range overflows address space",
+            )
+        })?;
+        let reply = match handle
+            .command(
+                MiCommand::new("-data-read-memory-bytes")?
+                    .bare(format!("0x{address:x}"))?
+                    .bare(chunk.to_string())?,
+            )
+            .await
+        {
+            Ok(reply) => reply,
+            Err(_) if allow_partial && !bytes.is_empty() => break,
+            Err(error) => return Err(error),
+        };
+        evidence_seq = reply.evidence_seq;
+        let part = memory_contents(&reply.record)?;
+        let part_len = part.len();
+        bytes.extend(part);
+        if part_len < chunk {
+            break;
+        }
+    }
+    Ok((bytes, evidence_seq))
+}
+
+fn require_expected_bytes(parameters: &Value, actual: &[u8]) -> Result<()> {
+    if expected_bytes_match(parameters, actual)? {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorCode::MemoryPreconditionFailed,
+            "memory no longer matches the expected value",
+        ))
+    }
+}
+
+fn expected_bytes_match(parameters: &Value, actual: &[u8]) -> Result<bool> {
+    let expected = parameters.get("expected").ok_or_else(|| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            "expected bytes or sha256 are required",
+        )
+    })?;
+    if let Some(encoded) = expected.get("bytes_base64").and_then(Value::as_str) {
+        let bytes = BASE64.decode(encoded).map_err(|error| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                format!("invalid expected bytes_base64: {error}"),
+            )
+        })?;
+        return Ok(bytes == actual);
+    }
+    if let Some(expected_hash) = expected.get("sha256").and_then(Value::as_str) {
+        if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "expected sha256 must contain 64 hexadecimal digits",
+            ));
+        }
+        return Ok(format!("{:x}", Sha256::digest(actual)).eq_ignore_ascii_case(expected_hash));
+    }
+    Err(Error::new(
+        ErrorCode::InvalidArgument,
+        "expected must contain bytes_base64 or sha256",
+    ))
+}
+
+fn search_pattern(parameters: &Value) -> Result<Vec<u8>> {
+    let pattern = parameters.get("pattern").ok_or_else(|| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            "memory search pattern is required",
+        )
+    })?;
+    let bytes = if let Some(hex) = pattern.get("hex").and_then(Value::as_str) {
+        hex_decode(hex).map_err(|_| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "memory search hex pattern is invalid",
+            )
+        })?
+    } else if let Some(encoded) = pattern.get("data_base64").and_then(Value::as_str) {
+        BASE64.decode(encoded).map_err(|error| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                format!("invalid memory search data_base64: {error}"),
+            )
+        })?
+    } else if let Some(text) = pattern.get("text").and_then(Value::as_str) {
+        text.as_bytes().to_vec()
+    } else {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "pattern must contain hex, data_base64, or text",
+        ));
+    };
+    if bytes.is_empty() || bytes.len() > 64 * 1024 {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "memory search pattern must contain 1 to 65536 bytes",
+        ));
+    }
+    Ok(bytes)
+}
+
 fn register_values(record: &MiRecord) -> BTreeMap<usize, Value> {
     let Some(values) = MiResult::find(record.results(), "register-values") else {
         return BTreeMap::new();
@@ -1418,6 +4311,104 @@ fn register_values(record: &MiRecord) -> BTreeMap<usize, Value> {
             Some((number, Value::String(value.to_owned())))
         })
         .collect()
+}
+
+fn register_role_candidates(role: &str) -> Option<&'static [&'static str]> {
+    Some(match role {
+        "pc" => &["rip", "pc"],
+        "sp" => &["rsp", "sp"],
+        "fp" => &["rbp", "x29", "fp"],
+        "return" => &["rax", "x0"],
+        "flags" => &["eflags", "cpsr"],
+        "syscall_number" => &["orig_rax", "x8"],
+        "syscall_return" => &["rax", "x0"],
+        "tls" => &["fs_base", "tpidr_el0"],
+        "argument_0" => &["rdi", "x0"],
+        "argument_1" => &["rsi", "x1"],
+        "argument_2" => &["rdx", "x2"],
+        "argument_3" => &["rcx", "x3"],
+        "argument_4" => &["r8", "x4"],
+        "argument_5" => &["r9", "x5"],
+        "argument_6" => &["x6"],
+        "argument_7" => &["x7"],
+        _ => return None,
+    })
+}
+
+fn resolve_register_name(requested: &str, names: &[String]) -> Result<String> {
+    if names.iter().any(|name| name == requested) {
+        return Ok(requested.to_owned());
+    }
+    let candidates = register_role_candidates(requested).ok_or_else(|| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            format!("unknown register or role {requested}"),
+        )
+    })?;
+    names
+        .iter()
+        .find(|name| candidates.contains(&name.as_str()))
+        .cloned()
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::CapabilityMissing,
+                format!("target has no register for role {requested}"),
+            )
+        })
+}
+
+fn valid_integer_literal(value: &str) -> bool {
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    if let Some(hex) = unsigned.strip_prefix("0x") {
+        !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    } else {
+        !unsigned.is_empty() && unsigned.bytes().all(|byte| byte.is_ascii_digit())
+    }
+}
+
+fn valid_signal_name(signal: &str) -> bool {
+    signal.strip_prefix("SIG").is_some_and(|name| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    })
+}
+
+fn compare_observation(actual: &str, operator: &str, expected: &str) -> Result<bool> {
+    match operator {
+        "equals" => Ok(actual == expected),
+        "not_equals" => Ok(actual != expected),
+        "contains" => Ok(actual.contains(expected)),
+        "greater_than" | "less_than" => {
+            let actual = parse_observed_integer(actual)?;
+            let expected = parse_observed_integer(expected)?;
+            Ok(if operator == "greater_than" {
+                actual > expected
+            } else {
+                actual < expected
+            })
+        }
+        _ => Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "operator must be equals, not_equals, contains, greater_than, or less_than",
+        )),
+    }
+}
+
+fn parse_observed_integer(value: &str) -> Result<i128> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix("0x") {
+        i128::from_str_radix(hex, 16)
+    } else {
+        value.parse()
+    }
+    .map_err(|_| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            format!("observation is not an integer: {value}"),
+        )
+    })
 }
 
 fn hex_decode(value: &str) -> Result<Vec<u8>> {
@@ -1483,13 +4474,100 @@ fn input_bytes(parameters: &Value) -> Result<Vec<u8>> {
     ))
 }
 
+fn remote_endpoint(parameters: &Value) -> Result<String> {
+    let endpoint = parameters
+        .get("endpoint")
+        .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "endpoint is required"))?;
+    let text = if let Some(endpoint) = endpoint.as_str() {
+        endpoint.to_owned()
+    } else {
+        let host = string(endpoint, "host")?;
+        let port = unsigned(endpoint, "port")?;
+        if port == 0 || port > u16::MAX as u64 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "remote port must be between 1 and 65535",
+            ));
+        }
+        if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        }
+    };
+    text.parse::<std::net::SocketAddr>()
+        .map(|endpoint| endpoint.to_string())
+        .map_err(|_| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "remote endpoint must use a pinned IP address and port",
+            )
+        })
+}
+
+fn validate_attach_target(pid: u64) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let process = std::fs::metadata(format!("/proc/{pid}"))?;
+    // SAFETY: geteuid has no preconditions and reads process credentials.
+    let current_uid = unsafe { libc::geteuid() };
+    if process.uid() != current_uid {
+        return Err(Error::new(
+            ErrorCode::PolicyDenied,
+            "attach target belongs to another Unix user",
+        ));
+    }
+    let current_namespace = std::fs::metadata("/proc/self/ns/pid")?;
+    let target_namespace = std::fs::metadata(format!("/proc/{pid}/ns/pid"))?;
+    if current_namespace.dev() != target_namespace.dev()
+        || current_namespace.ino() != target_namespace.ino()
+    {
+        return Err(Error::new(
+            ErrorCode::PolicyDenied,
+            "attach target belongs to another PID namespace",
+        ));
+    }
+    Ok(())
+}
+
 fn first_word(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or("unknown")
 }
 
-fn deferred(feature: &str) -> Result<Value> {
-    Err(Error::new(
-        ErrorCode::Unsupported,
-        format!("{feature} is a North-star feature, not part of the Rust vertical slice"),
-    ))
+fn raw_mi_is_managed(command: &str) -> bool {
+    [
+        "-break-",
+        "-exec-",
+        "-gdb-show",
+        "-list-thread-groups",
+        "-list-target-features",
+        "-file-list-shared-libraries",
+        "-stack-list-",
+        "-stack-select-frame",
+        "-thread-info",
+        "-thread-select",
+    ]
+    .iter()
+    .any(|prefix| command.starts_with(prefix))
+}
+
+// 2026-08-28: Raw MI previously bypassed workspace, attach, remote endpoint,
+// and safe-startup policy. Protected setup operations use their semantic APIs.
+fn raw_mi_is_denied(command: &str) -> bool {
+    matches!(
+        command,
+        "-interpreter-exec"
+            | "-gdb-exit"
+            | "-gdb-set"
+            | "-target-select"
+            | "-target-attach"
+            | "-target-file-get"
+            | "-target-file-put"
+            | "-target-file-delete"
+            | "-file-exec-and-symbols"
+            | "-file-exec-file"
+            | "-file-symbol-file"
+            | "-environment-cd"
+            | "-inferior-tty-set"
+    )
 }

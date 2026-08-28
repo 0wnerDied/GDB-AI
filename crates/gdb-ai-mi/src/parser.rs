@@ -165,8 +165,7 @@ impl Parser<'_> {
         let start = self.offset;
         while self.peek().is_some_and(|byte| byte != b',') {
             let byte = self.peek().unwrap();
-            if byte.is_ascii_whitespace() || matches!(byte, b'{' | b'}' | b'[' | b']' | b'=' | b'"')
-            {
+            if !identifier_byte(byte) {
                 return self.unexpected("result or async class");
             }
             self.offset += 1;
@@ -189,8 +188,7 @@ impl Parser<'_> {
             if byte == b'=' {
                 break;
             }
-            if matches!(byte, b',' | b'{' | b'}' | b'[' | b']' | b'"') || byte.is_ascii_whitespace()
-            {
+            if !identifier_byte(byte) {
                 return self.unexpected("result name followed by =");
             }
             self.offset += 1;
@@ -400,6 +398,10 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
+fn identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +486,6 @@ mod tests {
         assert!(parse_record(b"^done garbage", MiLimits::default()).is_err());
         assert!(parse_record(b"^done,x=\"unterminated", MiLimits::default()).is_err());
         assert!(parse_record(b"^done,x=[a=\"1\",\"mixed\"]", MiLimits::default()).is_err());
+        assert!(parse_record(b"^\xff", MiLimits::default()).is_err());
     }
 }

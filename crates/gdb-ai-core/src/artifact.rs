@@ -1,4 +1,10 @@
-use std::{fs::OpenOptions, io::Write, path::PathBuf};
+use std::{
+    fs::OpenOptions,
+    io::{Read, Seek, Write},
+    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -13,18 +19,38 @@ impl ArtifactStore {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(root.join("sha256"))?;
-        Ok(Self { root })
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(root.join("sha256"), std::fs::Permissions::from_mode(0o700))?;
+        Ok(Self {
+            root: std::fs::canonicalize(root)?,
+        })
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<String> {
         let digest = format!("{:x}", Sha256::digest(bytes));
         let path = self.root.join("sha256").join(&digest);
-        match OpenOptions::new().create_new(true).write(true).open(path) {
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
             Ok(mut file) => {
                 file.write_all(bytes)?;
                 file.sync_all()?;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // 2026-08-28: Treating any existing digest path as valid let a
+                // symlink or pre-created corrupt file escape content addressing.
+                let existing = read_artifact_file(&path, bytes.len())?;
+                if existing != bytes {
+                    return Err(Error::new(
+                        ErrorCode::Internal,
+                        "artifact digest path contains unexpected data",
+                    ));
+                }
+            }
             Err(error) => return Err(error.into()),
         }
         Ok(format!("gdbai://artifact/sha256:{digest}"))
@@ -37,15 +63,90 @@ impl ArtifactStore {
                 digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
             .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "invalid artifact URI"))?;
-        let bytes = std::fs::read(self.root.join("sha256").join(digest))?;
-        if bytes.len() > max_bytes {
+        let path = self.root.join("sha256").join(digest);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::new(
+                ErrorCode::Internal,
+                "artifact path is not a regular file",
+            ));
+        }
+        if metadata.len() > max_bytes as u64 {
             return Err(Error::new(
                 ErrorCode::OutputLimit,
-                format!("artifact is {} bytes; limit is {max_bytes}", bytes.len()),
+                format!("artifact is {} bytes; limit is {max_bytes}", metadata.len()),
+            ));
+        }
+        let bytes = read_artifact_file(&path, max_bytes)?;
+        if format!("{:x}", Sha256::digest(&bytes)) != digest {
+            return Err(Error::new(
+                ErrorCode::Internal,
+                "artifact content does not match its digest",
             ));
         }
         Ok(bytes)
     }
+
+    pub fn get_range(&self, uri: &str, offset: u64, max_bytes: usize) -> Result<(Vec<u8>, u64)> {
+        let digest = uri
+            .strip_prefix("gdbai://artifact/sha256:")
+            .filter(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "invalid artifact URI"))?;
+        let path = self.root.join("sha256").join(digest);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || offset > metadata.len() {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "artifact offset is outside the file",
+            ));
+        }
+
+        // Verify the complete content before returning a page so a partial
+        // read cannot hide corruption behind a valid content-addressed URI.
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let length = file.read(&mut buffer)?;
+            if length == 0 {
+                break;
+            }
+            hasher.update(&buffer[..length]);
+        }
+        if format!("{:x}", hasher.finalize()) != digest {
+            return Err(Error::new(
+                ErrorCode::Internal,
+                "artifact content does not match its digest",
+            ));
+        }
+        file.seek(std::io::SeekFrom::Start(offset))?;
+        let length = (metadata.len() - offset).min(max_bytes as u64) as usize;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes)?;
+        Ok((bytes, metadata.len()))
+    }
+}
+
+fn read_artifact_file(path: &std::path::Path, maximum: usize) -> Result<Vec<u8>> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > maximum as u64 {
+        return Err(Error::new(
+            ErrorCode::OutputLimit,
+            "artifact exceeds the permitted size",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -61,6 +162,7 @@ mod tests {
         let uri = store.put(b"evidence").unwrap();
         assert_eq!(store.put(b"evidence").unwrap(), uri);
         assert_eq!(store.get(&uri, 8).unwrap(), b"evidence");
+        assert_eq!(store.get_range(&uri, 2, 3).unwrap(), (b"ide".to_vec(), 8));
         assert!(matches!(
             store.get(&uri, 7),
             Err(Error {
@@ -68,5 +170,15 @@ mod tests {
                 ..
             })
         ));
+
+        let outside = directory.path().join("outside");
+        std::fs::write(&outside, b"escape").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"escape"));
+        std::os::unix::fs::symlink(&outside, store.root.join("sha256").join(&digest)).unwrap();
+        assert!(
+            store
+                .get(&format!("gdbai://artifact/sha256:{digest}"), 64)
+                .is_err()
+        );
     }
 }

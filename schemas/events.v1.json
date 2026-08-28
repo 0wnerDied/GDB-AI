@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.gdb-ai.dev/events.v1.json",
+  "title": "GDB/MI normalized event",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "session_closing", "session_closed", "backend_started",
+        "backend_exited", "target_running", "target_stopped",
+        "inferior_added", "inferior_removed", "inferior_exited",
+        "thread_created", "thread_exited", "breakpoint_created",
+        "breakpoint_modified", "breakpoint_deleted", "breakpoint_locations",
+        "library_loaded",
+        "library_unloaded", "memory_changed", "register_changed",
+        "controller_changed", "signal_policy_changed", "snapshot_started",
+        "snapshot_ready", "snapshot_failed", "consistency_dirty",
+        "consistency_reconciling", "consistency_tainted",
+        "consistency_restored", "consistency_lost",
+        "target_disconnected", "target_detached", "core_opened",
+        "target_configured", "output",
+        "unknown_backend_event"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

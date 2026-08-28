@@ -2,7 +2,7 @@ use std::{path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Result, policy::Profile};
+use crate::{Error, ErrorCode, Result, policy::Profile};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -38,14 +38,65 @@ impl Default for Config {
 
 impl Config {
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
-        match path {
-            Some(path) => Ok(
-                toml::from_str(&std::fs::read_to_string(path)?).map_err(|error| {
-                    crate::Error::new(crate::ErrorCode::InvalidArgument, error.to_string())
-                })?,
-            ),
-            None => Ok(Self::default()),
+        let config = match path {
+            Some(path) => toml::from_str(&std::fs::read_to_string(path)?).map_err(|error| {
+                crate::Error::new(crate::ErrorCode::InvalidArgument, error.to_string())
+            })?,
+            None => Self::default(),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let timeouts_valid = self.server.command_timeout_ms > 0
+            && self.server.command_timeout_ms <= 300_000
+            && self.server.wait_timeout_ms > 0
+            && self.server.wait_timeout_ms <= 300_000
+            && self.server.write_lease_ms > 0;
+        let limits_valid = self.server.max_sessions > 0
+            && self.server.max_sessions <= 1_024
+            && self.limits.mi_record_bytes >= 1_024
+            && self.limits.mi_depth > 0
+            && self.limits.tool_response_bytes >= 1_024
+            && self.limits.inline_memory_bytes > 0
+            && self.limits.inline_memory_bytes <= self.limits.memory_read_bytes
+            && self.limits.memory_read_bytes > 0
+            && self.limits.inferior_output_ring_bytes > 0
+            && self.limits.console_output_ring_bytes > 0
+            && self.limits.stack_frames > 0
+            && self.limits.value_children > 0
+            && self.limits.value_depth > 0
+            && self.limits.session_artifact_bytes > 0
+            && self.limits.process_memory_bytes > 0
+            && self.limits.process_cpu_seconds > 0
+            && self.limits.process_open_files >= 32;
+        if !timeouts_valid || !limits_valid || self.security.workspace_roots.is_empty() {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "configuration contains an invalid timeout, limit, or empty workspace policy",
+            ));
         }
+        if self
+            .security
+            .remote_allowlist
+            .iter()
+            .any(|endpoint| endpoint.parse::<std::net::SocketAddr>().is_err())
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "remote_allowlist entries must be pinned IP addresses and ports",
+            ));
+        }
+        if let Some(hash) = &self.gdb.python_extension_sha256
+            && (hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "python_extension_sha256 must contain 64 hexadecimal digits",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -55,6 +106,10 @@ pub struct ServerConfig {
     pub max_sessions: usize,
     pub command_timeout_ms: u64,
     pub wait_timeout_ms: u64,
+    pub write_lease_ms: u64,
+    pub unix_socket: Option<PathBuf>,
+    pub requests_per_second: u64,
+    pub request_burst: u64,
 }
 
 impl Default for ServerConfig {
@@ -63,6 +118,10 @@ impl Default for ServerConfig {
             max_sessions: 8,
             command_timeout_ms: 5_000,
             wait_timeout_ms: 5_000,
+            write_lease_ms: 30_000,
+            unix_socket: None,
+            requests_per_second: 100,
+            request_burst: 200,
         }
     }
 }
@@ -74,6 +133,7 @@ pub struct GdbConfig {
     pub preferred_mi: String,
     pub fallback_mi: String,
     pub python_extension: Option<PathBuf>,
+    pub python_extension_sha256: Option<String>,
 }
 
 impl Default for GdbConfig {
@@ -83,6 +143,7 @@ impl Default for GdbConfig {
             preferred_mi: "mi4".into(),
             fallback_mi: "mi3".into(),
             python_extension: None,
+            python_extension_sha256: None,
         }
     }
 }
@@ -101,6 +162,10 @@ pub struct Limits {
     pub value_children: usize,
     pub value_depth: usize,
     pub session_artifact_bytes: usize,
+    pub process_memory_bytes: u64,
+    pub process_cpu_seconds: u64,
+    pub process_open_files: u64,
+    pub process_count: u64,
 }
 
 impl Default for Limits {
@@ -117,6 +182,10 @@ impl Default for Limits {
             value_children: 1_000,
             value_depth: 8,
             session_artifact_bytes: 512 * 1024 * 1024,
+            process_memory_bytes: 2 * 1024 * 1024 * 1024,
+            process_cpu_seconds: 3_600,
+            process_open_files: 1_024,
+            process_count: 0,
         }
     }
 }
@@ -139,6 +208,25 @@ pub struct SecurityConfig {
     pub workspace_roots: Vec<PathBuf>,
     pub remote_allowlist: Vec<String>,
     pub attach_allowlist: Vec<u64>,
+    pub source_map: Vec<SourceMap>,
+    pub sandbox: SandboxMode,
+    pub kernel_enabled: bool,
+    pub monitor_allowlist: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxMode {
+    #[default]
+    Auto,
+    Required,
+    Disabled,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceMap {
+    pub from: PathBuf,
+    pub to: PathBuf,
 }
 
 impl Default for SecurityConfig {
@@ -148,6 +236,10 @@ impl Default for SecurityConfig {
             workspace_roots: vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))],
             remote_allowlist: Vec::new(),
             attach_allowlist: Vec::new(),
+            source_map: Vec::new(),
+            sandbox: SandboxMode::Auto,
+            kernel_enabled: false,
+            monitor_allowlist: Vec::new(),
         }
     }
 }

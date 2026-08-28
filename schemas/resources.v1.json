@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.gdb-ai.dev/resources.v1.json",
+  "title": "GDB/MI resource URI",
+  "oneOf": [
+    {"type": "string", "pattern": "^gdbai://artifact/sha256:[0-9a-f]{64}$"},
+    {"type": "string", "pattern": "^gdbai://session/sess_[A-Za-z0-9_-]{1,256}/(status|capabilities|events|transcript|breakpoints)$"},
+    {"type": "string", "pattern": "^gdbai://session/sess_[A-Za-z0-9_-]{1,256}/snapshot/[^/]+$"},
+    {"type": "string", "pattern": "^gdbai://session/sess_[A-Za-z0-9_-]{1,256}/event/[1-9][0-9]*$"},
+    {"type": "string", "pattern": "^gdbai://session/sess_[A-Za-z0-9_-]{1,256}/inferior/[^/]+/output$"}
+  ]
+}

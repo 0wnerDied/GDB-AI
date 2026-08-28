@@ -17,6 +17,7 @@ pub enum Profile {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Effect {
     Read,
+    VolatileTargetRead,
     Control,
     TargetMutation,
     HostMutation,
@@ -25,6 +26,22 @@ pub enum Effect {
 }
 
 impl Profile {
+    pub fn authorize_method(self, method: &str, effect: Effect) -> Result<()> {
+        // 2026-08-28: Read-only profiles could create sessions but could not
+        // acquire a lease, open a core, or close their own session.
+        if matches!(
+            method,
+            "session.create"
+                | "session.close"
+                | "session.acquire_write_lease"
+                | "session.release_write_lease"
+        ) || (self == Self::OfflineCore && method == "target.open_core")
+        {
+            return Ok(());
+        }
+        self.authorize(effect)
+    }
+
     pub fn authorize(self, effect: Effect) -> Result<()> {
         let allowed = match self {
             Self::OfflineCore | Self::LiveObserver => effect == Effect::Read,
@@ -32,7 +49,10 @@ impl Profile {
             Self::LabMutation => {
                 matches!(
                     effect,
-                    Effect::Read | Effect::Control | Effect::TargetMutation
+                    Effect::Read
+                        | Effect::VolatileTargetRead
+                        | Effect::Control
+                        | Effect::TargetMutation
                 )
             }
             Self::RawAdmin => true,
@@ -54,6 +74,9 @@ pub fn effect_for_method(method: &str) -> Option<Effect> {
             if method.starts_with("session.get")
                 || method.starts_with("session.list")
                 || method == "session.capabilities"
+                || method == "session.providers"
+                || method == "session.transcript"
+                || method == "session.event"
                 || method.starts_with("inspection.")
                 || method == "value.evaluate"
                 || method == "value.children"
@@ -67,6 +90,9 @@ pub fn effect_for_method(method: &str) -> Option<Effect> {
                 || method == "execution.wait"
                 || method == "tracking.list"
                 || method == "breakpoint.list"
+                || method == "signal.get"
+                || method == "agent.hypothesis_check"
+                || method == "kernel.inspect"
                 || method == "artifact.get"
                 || method == "events.wait" =>
         {
@@ -79,12 +105,15 @@ pub fn effect_for_method(method: &str) -> Option<Effect> {
         | "inferior_io.write"
         | "inferior_io.close_stdin"
         | "inferior_io.resize" => Effect::TargetMutation,
-        "raw.mi" | "raw.console" => Effect::Raw,
+        "raw.mi" | "raw.console" | "kernel.monitor" => Effect::Raw,
         method
             if method.starts_with("target.")
                 || method.starts_with("execution.")
                 || method.starts_with("breakpoint.")
                 || method.starts_with("tracking.")
+                || method == "signal.update"
+                || method == "agent.probe"
+                || method == "agent.experiment"
                 || method == "value.create"
                 || method == "value.release" =>
         {
@@ -93,41 +122,70 @@ pub fn effect_for_method(method: &str) -> Option<Effect> {
         "session.create"
         | "session.close"
         | "session.acquire_write_lease"
-        | "session.release_write_lease" => Effect::Control,
+        | "session.release_write_lease"
+        | "session.attempt_recovery" => Effect::Control,
         _ => return None,
     })
 }
 
 pub fn validate_console_command(command: &str) -> Result<()> {
+    // 2026-08-28: Prefix validation alone allowed a newline to append a
+    // second denied CLI command inside one interpreter-exec request.
+    if command.is_empty()
+        || command.len() > 16 * 1024
+        || command
+            .bytes()
+            .any(|byte| matches!(byte, b'\0' | b'\r' | b'\n'))
+    {
+        return Err(Error::new(
+            ErrorCode::PolicyDenied,
+            "raw console command is empty, oversized, or multiline",
+        ));
+    }
     let normalized = command.trim().to_ascii_lowercase();
-    let denied = [
-        "shell",
-        "python",
-        "source",
-        "define",
-        "document",
-        "commands",
-        "if",
-        "while",
-        "end",
-        "interpreter-exec",
-        "maintenance",
-        "monitor",
-        "add-auto-load-safe-path",
-        "set auto-load",
-        "set debuginfod enabled",
-        "set startup-with-shell",
-        "set exec-wrapper",
+    let verb = normalized.split_whitespace().next().unwrap_or_default();
+    // 2026-08-28: GDB accepts abbreviated commands, so a deny-list for
+    // "shell", "python", and "quit" could be bypassed with sh, py, or q.
+    // Raw console remains useful through an explicit host-safe command set.
+    let allowed = [
+        "apropos",
+        "backtrace",
+        "break",
+        "catch",
+        "condition",
+        "continue",
+        "delete",
+        "disable",
+        "disassemble",
+        "down",
+        "enable",
+        "finish",
+        "frame",
+        "help",
+        "ignore",
+        "info",
+        "list",
+        "next",
+        "nexti",
+        "print",
+        "ptype",
+        "rbreak",
+        "run",
+        "show",
+        "step",
+        "stepi",
+        "tbreak",
+        "thread",
+        "until",
+        "up",
+        "watch",
+        "whatis",
+        "x",
     ];
-    if denied.iter().any(|prefix| {
-        normalized == *prefix
-            || normalized
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| suffix.starts_with(char::is_whitespace))
-    }) {
+    if !allowed.contains(&verb) {
         Err(Error::new(
             ErrorCode::PolicyDenied,
-            "raw console command belongs to a denied command class",
+            "raw console command is outside the host-safe allowlist",
         ))
     } else {
         Ok(())
@@ -148,11 +206,30 @@ mod tests {
         );
         assert!(Profile::LabMutation.authorize(Effect::Raw).is_err());
         assert!(Profile::RawAdmin.authorize(Effect::Raw).is_ok());
+        assert!(
+            Profile::OfflineCore
+                .authorize_method("target.open_core", Effect::Control)
+                .is_ok()
+        );
+        assert!(
+            Profile::OfflineCore
+                .authorize_method("breakpoint.create", Effect::Control)
+                .is_err()
+        );
     }
 
     #[test]
     fn console_validation_blocks_host_escape_classes() {
-        for command in ["shell id", " Python ", "set auto-load yes", "monitor reset"] {
+        for command in [
+            "shell id",
+            " Python ",
+            "set auto-load yes",
+            "monitor reset",
+            "show language\nshell id",
+            "sh id",
+            "q",
+            "target remote 127.0.0.1:1234",
+        ] {
             assert!(validate_console_command(command).is_err(), "{command}");
         }
         assert!(validate_console_command("info registers").is_ok());

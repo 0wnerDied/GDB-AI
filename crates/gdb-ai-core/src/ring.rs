@@ -68,6 +68,10 @@ impl ByteRing {
     pub fn end_offset(&self) -> u64 {
         self.end_offset
     }
+
+    pub fn dropped_bytes(&self) -> u64 {
+        self.start_offset
+    }
 }
 
 #[cfg(test)]

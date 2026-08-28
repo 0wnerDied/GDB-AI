@@ -5,6 +5,7 @@ members = [
     "crates/gdb-ai",
 ]
 resolver = "3"
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

@@ -15,7 +15,6 @@ axum.workspace = true
 clap.workspace = true
 gdb-ai-core = { path = "../gdb-ai-core" }
 gdb-ai-mi = { path = "../gdb-ai-mi" }
-schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

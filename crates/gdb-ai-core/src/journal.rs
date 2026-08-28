@@ -1,6 +1,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Write},
+    os::unix::fs::OpenOptionsExt,
     path::Path,
 };
 
@@ -9,9 +10,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Result,
+    Error, ErrorCode, Result,
     domain::{DomainEvent, JournaledEvent},
 };
+
+// 2026-08-28: Replay and inspection once accepted missing journal entries and
+// could present an incomplete evidence chain as valid.
+pub fn require_next_sequence(last: u64, next: u64) -> Result<()> {
+    if next == last + 1 {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "journal sequence must be contiguous and start at 1",
+        ))
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JournalEntry {
@@ -31,11 +45,22 @@ impl Journal {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new().create_new(true).write(true).open(path)?;
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
         Ok(Self {
             writer: BufWriter::new(file),
             next_seq: 1,
         })
+    }
+
+    pub fn append_session_created(&mut self, session_id: &str) -> Result<u64> {
+        self.append(
+            "session.created",
+            serde_json::json!({"session_id": session_id}),
+        )
     }
 
     pub fn append_api(&mut self, request: &Value) -> Result<u64> {
@@ -87,6 +112,13 @@ impl Journal {
         self.append(
             "state.revision",
             serde_json::json!({ "revision": revision, "state": state }),
+        )
+    }
+
+    pub fn append_snapshot(&mut self, snapshot_id: &str, snapshot: &Value) -> Result<u64> {
+        self.append(
+            "snapshot.result",
+            serde_json::json!({ "snapshot_id": snapshot_id, "snapshot": snapshot }),
         )
     }
 

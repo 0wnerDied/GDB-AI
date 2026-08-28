@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.gdb-ai.dev/gdb.ai.v1.json",
+  "title": "GDB/MI canonical request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "request_id", "method", "parameters"],
+  "properties": {
+    "api_version": {"const": "gdb.ai/v1"},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "session_id": {"type": ["string", "null"], "pattern": "^sess_[A-Za-z0-9_-]{1,256}$"},
+    "method": {"type": "string", "minLength": 1, "maxLength": 128},
+    "expected_revision": {"type": ["integer", "null"], "minimum": 0},
+    "idempotency_key": {"type": ["string", "null"], "maxLength": 256},
+    "parameters": {"type": "object"}
+  }
+}

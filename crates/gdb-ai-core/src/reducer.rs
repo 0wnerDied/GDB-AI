@@ -3,7 +3,7 @@ use crate::{
     domain::{
         BackendHealth, BreakpointId, BreakpointState, Consistency, DomainEvent, InferiorId,
         InferiorState, InferiorStatus, JournaledEvent, ModuleState, SessionLifecycle, SessionState,
-        SnapshotRef, SnapshotStatus, StopId, ThreadId, ThreadState,
+        SnapshotRef, SnapshotStatus, StopId, TargetOrigin, ThreadId, ThreadState,
     },
 };
 
@@ -90,6 +90,10 @@ impl StateReducer {
                 let inferior = self.ensure_inferior(backend_id, seq);
                 inferior.status = InferiorStatus::Exited;
                 inferior.exit_code.clone_from(exit_code);
+                // 2026-08-28: Inferior exit left the last stop and snapshot
+                // looking current even though no stop-scoped object survived.
+                self.state.stop_id = None;
+                self.state.snapshot = None;
                 true
             }
             DomainEvent::TargetRunning { backend_inferiors } => {
@@ -219,12 +223,21 @@ impl StateReducer {
                     .get(backend_number)
                     .map(|breakpoint| breakpoint.id.clone())
                     .unwrap_or_else(|| {
+                        // 2026-08-28: GDB reuses deleted breakpoint numbers.
+                        // Include journal generation so public IDs never alias.
                         BreakpointId(format!(
-                            "bp_{}_{}",
+                            "bp_{}_{}_{}",
                             self.state.session_id.0,
+                            self.state.event_seq,
                             backend_number.replace('.', "_")
                         ))
                     });
+                let locations = self
+                    .state
+                    .breakpoints
+                    .get(backend_number)
+                    .map(|breakpoint| breakpoint.locations.clone())
+                    .unwrap_or_default();
                 self.state.breakpoints.insert(
                     backend_number.clone(),
                     BreakpointState {
@@ -232,12 +245,24 @@ impl StateReducer {
                         backend_number: backend_number.clone(),
                         enabled: *enabled,
                         pending: *pending,
+                        locations,
                     },
                 );
                 true
             }
             DomainEvent::BreakpointDeleted { backend_number } => {
                 self.state.breakpoints.remove(backend_number).is_some()
+            }
+            DomainEvent::BreakpointLocations {
+                backend_number,
+                locations,
+            } => {
+                if let Some(breakpoint) = self.state.breakpoints.get_mut(backend_number) {
+                    breakpoint.locations.clone_from(locations);
+                    true
+                } else {
+                    false
+                }
             }
             DomainEvent::LibraryLoaded {
                 id,
@@ -257,7 +282,32 @@ impl StateReducer {
                 true
             }
             DomainEvent::LibraryUnloaded { id } => self.state.modules.remove(id).is_some(),
-            DomainEvent::MemoryChanged => true,
+            // 2026-08-28: Target mutations previously advanced revision but
+            // left a stale snapshot advertised as current.
+            DomainEvent::MemoryChanged | DomainEvent::RegisterChanged { .. } => {
+                self.state.snapshot = None;
+                true
+            }
+            // 2026-08-28: Controller registries and inferior I/O previously
+            // changed without advancing optimistic-concurrency revision.
+            DomainEvent::ControllerChanged { .. } => true,
+            DomainEvent::SignalPolicyChanged { signal, policy } => {
+                self.state
+                    .signal_policies
+                    .insert(signal.clone(), policy.clone());
+                true
+            }
+            DomainEvent::SnapshotStarted { stop_id }
+                if self.state.stop_id.as_ref() == Some(stop_id) =>
+            {
+                self.state.snapshot = Some(SnapshotRef {
+                    snapshot_id: format!("snap_{stop_id}"),
+                    stop_id: stop_id.clone(),
+                    status: SnapshotStatus::Building,
+                    partial: false,
+                });
+                true
+            }
             DomainEvent::SnapshotReady { stop_id, partial }
                 if self.state.stop_id.as_ref() == Some(stop_id) =>
             {
@@ -276,24 +326,47 @@ impl StateReducer {
                 }
                 true
             }
-            DomainEvent::SnapshotReady { .. } | DomainEvent::SnapshotFailed { .. } => false,
+            DomainEvent::SnapshotStarted { .. }
+            | DomainEvent::SnapshotReady { .. }
+            | DomainEvent::SnapshotFailed { .. } => false,
             DomainEvent::ConsistencyDirty { reason } => {
-                self.state.consistency = Consistency::ManagedDirty;
+                // 2026-08-28: A later managed raw command must not erase an
+                // earlier unknown raw effect; TAINTED lasts for the session.
+                if self.state.consistency != Consistency::Tainted {
+                    self.state.consistency = Consistency::ManagedDirty;
+                }
+                self.state.reconciliation_required = true;
                 self.state.limitations.push(reason.clone());
                 true
             }
+            DomainEvent::ConsistencyReconciling => {
+                if self.state.consistency == Consistency::Tainted {
+                    false
+                } else {
+                    self.state.consistency = Consistency::Reconciling;
+                    true
+                }
+            }
             DomainEvent::ConsistencyTainted { reason } => {
                 self.state.consistency = Consistency::Tainted;
+                self.state.reconciliation_required = true;
                 self.state.limitations.push(reason.clone());
                 true
             }
             DomainEvent::ConsistencyRestored { warnings } => {
-                self.state.consistency = Consistency::Clean;
-                self.state.limitations.clone_from(warnings);
-                true
+                self.state.reconciliation_required = false;
+                if self.state.consistency == Consistency::Tainted {
+                    self.state.limitations.extend(warnings.clone());
+                    !warnings.is_empty()
+                } else {
+                    self.state.consistency = Consistency::Clean;
+                    self.state.limitations.clone_from(warnings);
+                    true
+                }
             }
             DomainEvent::ConsistencyLost { reason } => {
                 self.state.consistency = Consistency::Lost;
+                self.state.reconciliation_required = false;
                 self.state.limitations.push(reason.clone());
                 true
             }
@@ -301,10 +374,36 @@ impl StateReducer {
                 for inferior in self.state.inferiors.values_mut() {
                     inferior.status = InferiorStatus::Disconnected;
                 }
+                // 2026-08-28: A disconnected target retained a current stop
+                // and snapshot even though no stop-scoped handle was usable.
+                self.state.stop_id = None;
+                self.state.stop_reason = None;
+                self.state.snapshot = None;
+                true
+            }
+            DomainEvent::TargetDetached => {
+                for inferior in self.state.inferiors.values_mut() {
+                    inferior.status = InferiorStatus::Detached;
+                }
+                self.state.stop_id = None;
+                self.state.snapshot = None;
+                true
+            }
+            DomainEvent::CoreOpened { backend_id } => {
+                let seq = self.state.event_seq;
+                let inferior = self.ensure_inferior(backend_id, seq);
+                inferior.status = InferiorStatus::Core;
+                self.state.target_origin = TargetOrigin::Core;
+                self.state.lifecycle = SessionLifecycle::Active;
+                true
+            }
+            DomainEvent::TargetConfigured { origin } => {
+                self.state.target_origin = *origin;
                 true
             }
             DomainEvent::UnknownBackendEvent { class } => {
                 self.state.consistency = Consistency::Tainted;
+                self.state.reconciliation_required = true;
                 self.state
                     .limitations
                     .push(format!("unknown backend event: {class}"));
@@ -390,6 +489,19 @@ mod tests {
                 ..
             })
         ));
+        apply(
+            &mut reducer,
+            5,
+            DomainEvent::TargetStopped {
+                backend_inferior: Some("i1".into()),
+                backend_thread: Some("1".into()),
+                reason: "signal-received".into(),
+                frame: None,
+            },
+        );
+        apply(&mut reducer, 6, DomainEvent::TargetDisconnected);
+        assert!(reducer.state().stop_id.is_none());
+        assert!(reducer.state().snapshot.is_none());
     }
 
     #[test]
@@ -413,5 +525,25 @@ mod tests {
             reducer.into_state()
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn taint_survives_managed_reconciliation_without_repeating_it() {
+        let mut reducer = StateReducer::new(SessionState::creating(SessionId("sess_x".into())));
+        apply(
+            &mut reducer,
+            1,
+            DomainEvent::ConsistencyTainted {
+                reason: "unknown raw command".into(),
+            },
+        );
+        assert!(reducer.state().reconciliation_required);
+        apply(
+            &mut reducer,
+            2,
+            DomainEvent::ConsistencyRestored { warnings: vec![] },
+        );
+        assert_eq!(reducer.state().consistency, Consistency::Tainted);
+        assert!(!reducer.state().reconciliation_required);
     }
 }

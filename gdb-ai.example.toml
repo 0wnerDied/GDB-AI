@@ -2,11 +2,17 @@
 max_sessions = 8
 command_timeout_ms = 5000
 wait_timeout_ms = 5000
+write_lease_ms = 30000
+# unix_socket = "/run/user/1000/gdb-ai.sock"
+requests_per_second = 100
+request_burst = 200
 
 [gdb]
 path = "/usr/bin/gdb"
 preferred_mi = "mi4"
 fallback_mi = "mi3"
+# python_extension = "/usr/lib/gdb-ai/gdb_ai.py"
+# python_extension_sha256 = "<64 lowercase hexadecimal digits>"
 
 [limits]
 mi_record_bytes = 8388608
@@ -20,6 +26,10 @@ stack_frames = 64
 value_children = 1000
 value_depth = 8
 session_artifact_bytes = 536870912
+process_memory_bytes = 2147483648
+process_cpu_seconds = 3600
+process_open_files = 1024
+process_count = 0 # RLIMIT_NPROC is host-UID-wide; use a cgroup for process quotas.
 
 [artifacts]
 path = ".gdb-ai/artifacts"
@@ -33,3 +43,7 @@ default_profile = "debug_control"
 workspace_roots = ["."]
 remote_allowlist = []
 attach_allowlist = []
+sandbox = "auto"
+kernel_enabled = false
+monitor_allowlist = []
+# source_map = [{ from = "/build/src", to = "/workspace/src" }]

@@ -1,19 +1,22 @@
-use std::{
-    os::fd::OwnedFd,
-    path::{Path, PathBuf},
-    process::Stdio,
-};
-
+use async_trait::async_trait;
 use gdb_ai_mi::{MiFramer, MiLimits, MiRecord, encode_command, parse_record, quote_c_string};
 use nix::{pty::openpty, unistd::ttyname};
 use serde::Serialize;
+use std::{
+    os::fd::OwnedFd,
+    path::{Path, PathBuf},
+    process::{Command as StdCommand, Stdio},
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdin, Command},
     sync::mpsc,
 };
 
-use crate::{Error, ErrorCode, Result, config::GdbConfig};
+use crate::{
+    Error, ErrorCode, Result,
+    config::{GdbConfig, Limits, SandboxMode},
+};
 
 #[derive(Clone, Debug)]
 pub enum MiArgument {
@@ -107,6 +110,14 @@ pub struct BackendDescriptor {
     pub name: &'static str,
     pub mi_version: String,
     pub pty: String,
+    pub sandboxed: bool,
+    pub network_isolated: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SandboxOptions {
+    pub mode: SandboxMode,
+    pub allow_network: bool,
 }
 
 pub struct GdbBackend {
@@ -118,12 +129,26 @@ pub struct GdbBackend {
     descriptor: BackendDescriptor,
 }
 
+#[async_trait]
+pub trait DebugBackend: Send {
+    fn descriptor(&self) -> &BackendDescriptor;
+    fn pty_path(&self) -> &str;
+    async fn send(&mut self, token: u64, command: &MiCommand) -> Result<Vec<u8>>;
+    async fn next_input(&mut self) -> Option<BackendInput>;
+    async fn write_inferior(&mut self, bytes: &[u8]) -> Result<()>;
+    async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()>;
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>>;
+    async fn shutdown(&mut self) -> Result<()>;
+}
+
 impl GdbBackend {
     pub async fn spawn(
         config: &GdbConfig,
         mi_version: &str,
         session_dir: &Path,
-        limits: MiLimits,
+        mi_limits: MiLimits,
+        resource_limits: &Limits,
+        sandbox: SandboxOptions,
     ) -> Result<Self> {
         std::fs::create_dir_all(session_dir)?;
         let pty = openpty(None, None).map_err(|error| {
@@ -137,8 +162,44 @@ impl GdbBackend {
         })?;
         let master = std::fs::File::from(pty.master);
         let writer = master.try_clone()?;
+        let inferior_tmp = session_dir.join("tmp");
+        std::fs::create_dir_all(&inferior_tmp)?;
 
-        let mut command = Command::new(&config.path);
+        let sandboxed = sandbox_available(sandbox.mode)?;
+        let mut command = if sandboxed {
+            let mut command = Command::new("/usr/bin/bwrap");
+            // 2026-08-28: Replacing all of /tmp with the session tmp directory
+            // hid /tmp targets and a session directory located below /tmp.
+            // Bind only the session path and direct temporary writes with TMPDIR.
+            command
+                .arg("--die-with-parent")
+                .arg("--new-session")
+                .arg("--ro-bind")
+                .arg("/")
+                .arg("/")
+                .arg("--bind")
+                .arg(session_dir)
+                .arg(session_dir)
+                .arg("--proc")
+                .arg("/proc")
+                // 2026-08-28: Binding all host devices contradicted the
+                // device-deny policy. Create a minimal /dev and expose only
+                // devpts so the already allocated inferior PTY remains usable.
+                .arg("--dev")
+                .arg("/dev")
+                .arg("--dev-bind")
+                .arg("/dev/pts")
+                .arg("/dev/pts")
+                .arg("--chdir")
+                .arg(session_dir);
+            if !sandbox.allow_network {
+                command.arg("--unshare-net");
+            }
+            command.arg("--").arg(&config.path);
+            command
+        } else {
+            Command::new(&config.path)
+        };
         command
             .arg("-q")
             .arg("-nx")
@@ -157,6 +218,7 @@ impl GdbBackend {
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", session_dir)
+            .env("TMPDIR", &inferior_tmp)
             .env("LANG", "C.UTF-8")
             .env("LC_ALL", "C.UTF-8")
             .env("TERM", "dumb")
@@ -164,6 +226,31 @@ impl GdbBackend {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        let address_space = resource_limits.process_memory_bytes;
+        let cpu_seconds = resource_limits.process_cpu_seconds;
+        let file_bytes = resource_limits.session_artifact_bytes as u64;
+        let open_files = resource_limits.process_open_files;
+        let processes = resource_limits.process_count;
+        // SAFETY: pre_exec runs after fork and before exec. The closure uses
+        // only async-signal-safe libc calls and captured integer values.
+        unsafe {
+            command.pre_exec(move || {
+                set_limit(libc::RLIMIT_AS, address_space)?;
+                set_limit(libc::RLIMIT_CPU, cpu_seconds)?;
+                set_limit(libc::RLIMIT_FSIZE, file_bytes)?;
+                set_limit(libc::RLIMIT_NOFILE, open_files)?;
+                // 2026-08-28: RLIMIT_NPROC is counted for the host UID and
+                // prevented bubblewrap from creating its namespace. Apply it
+                // only when an operator explicitly configures a nonzero value.
+                if processes > 0 {
+                    set_limit(libc::RLIMIT_NPROC, processes)?;
+                }
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         #[cfg(unix)]
         command.process_group(0);
 
@@ -187,7 +274,7 @@ impl GdbBackend {
             .ok_or_else(|| Error::new(ErrorCode::Internal, "GDB stderr pipe missing"))?;
 
         let (sender, input) = mpsc::channel(256);
-        tokio::spawn(read_mi(stdout, sender.clone(), limits));
+        tokio::spawn(read_mi(stdout, sender.clone(), mi_limits));
         tokio::spawn(read_chunks(stderr, sender.clone(), StreamKind::Stderr));
         tokio::spawn(read_chunks(
             tokio::fs::File::from_std(master),
@@ -205,6 +292,8 @@ impl GdbBackend {
                 name: "gdb",
                 mi_version: mi_version.to_owned(),
                 pty: pty_path.to_string_lossy().into_owned(),
+                sandboxed,
+                network_isolated: sandboxed && !sandbox.allow_network,
             },
         })
     }
@@ -283,12 +372,95 @@ impl GdbBackend {
                 .await
                 .is_err()
             {
-                self.child.start_kill()?;
+                // 2026-08-28: Killing only GDB after a shutdown timeout left
+                // locally launched inferiors alive in its process group.
+                if let Some(pid) = self.child.id() {
+                    let _ = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(pid as i32),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                } else {
+                    self.child.start_kill()?;
+                }
                 let _ = self.child.wait().await;
             }
         }
         Ok(())
     }
+}
+
+#[async_trait]
+impl DebugBackend for GdbBackend {
+    fn descriptor(&self) -> &BackendDescriptor {
+        self.descriptor()
+    }
+
+    fn pty_path(&self) -> &str {
+        self.pty_path()
+    }
+
+    async fn send(&mut self, token: u64, command: &MiCommand) -> Result<Vec<u8>> {
+        self.send(token, command).await
+    }
+
+    async fn next_input(&mut self) -> Option<BackendInput> {
+        self.next_input().await
+    }
+
+    async fn write_inferior(&mut self, bytes: &[u8]) -> Result<()> {
+        self.write_inferior(bytes).await
+    }
+
+    async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()> {
+        self.resize_inferior(rows, columns).await
+    }
+
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        self.shutdown().await
+    }
+}
+
+fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> std::io::Result<()> {
+    let limit = libc::rlimit {
+        rlim_cur: value as libc::rlim_t,
+        rlim_max: value as libc::rlim_t,
+    };
+    // SAFETY: setrlimit copies the provided struct during this call.
+    if unsafe { libc::setrlimit(resource, &limit) } == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn sandbox_available(mode: SandboxMode) -> Result<bool> {
+    if mode == SandboxMode::Disabled {
+        return Ok(false);
+    }
+    let available = Path::new("/usr/bin/bwrap").is_file()
+        && StdCommand::new("/usr/bin/bwrap")
+            .args([
+                "--die-with-parent",
+                "--unshare-net",
+                "--ro-bind",
+                "/",
+                "/",
+                "--",
+                "true",
+            ])
+            .status()
+            .is_ok_and(|status| status.success());
+    if !available && mode == SandboxMode::Required {
+        return Err(Error::new(
+            ErrorCode::TargetUnavailable,
+            "required bubblewrap sandbox is unavailable",
+        ));
+    }
+    Ok(available)
 }
 
 enum StreamKind {
@@ -346,7 +518,12 @@ where
         let records = match framer.push(&buffer[..length]) {
             Ok(records) => records,
             Err(error) => {
-                let _ = sender.send(BackendInput::ProtocolError(error.into())).await;
+                let preview = framer.preview(64);
+                let error = Error::from(error).with_details(serde_json::json!({
+                    "preview_hex": hex_preview(&preview),
+                    "preview_bytes": preview.len()
+                }));
+                let _ = sender.send(BackendInput::ProtocolError(error)).await;
                 return;
             }
         };
@@ -358,7 +535,13 @@ where
                     }
                 }
                 Err(error) => {
-                    let _ = sender.send(BackendInput::ProtocolError(error.into())).await;
+                    // 2026-08-28: Parser violations lost the bounded raw
+                    // evidence needed to diagnose malformed GDB output.
+                    let error = Error::from(error).with_details(serde_json::json!({
+                        "preview_hex": hex_preview(&raw[..raw.len().min(64)]),
+                        "record_bytes": raw.len()
+                    }));
+                    let _ = sender.send(BackendInput::ProtocolError(error)).await;
                     return;
                 }
             }
@@ -372,11 +555,25 @@ where
                 let _ = sender.send(BackendInput::Mi { raw, record }).await;
             }
             Err(error) => {
-                let _ = sender.send(BackendInput::ProtocolError(error.into())).await;
+                let error = Error::from(error).with_details(serde_json::json!({
+                    "preview_hex": hex_preview(&raw[..raw.len().min(64)]),
+                    "record_bytes": raw.len()
+                }));
+                let _ = sender.send(BackendInput::ProtocolError(error)).await;
             }
         }
     }
     let _ = sender.send(BackendInput::GdbEof).await;
+}
+
+fn hex_preview(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut preview = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(preview, "{byte:02x}");
+    }
+    preview
 }
 
 pub fn session_directory(root: &Path, session_id: &str) -> PathBuf {

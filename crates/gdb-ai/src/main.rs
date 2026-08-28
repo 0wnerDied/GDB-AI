@@ -1,7 +1,9 @@
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::{
     collections::HashMap,
     error::Error as StdError,
     io,
+    net::SocketAddr,
     path::PathBuf,
     sync::{
         Arc,
@@ -9,7 +11,15 @@ use std::{
     },
 };
 
-use clap::{Parser, Subcommand};
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use clap::{ArgGroup, Parser, Subcommand};
 use gdb_ai_core::{
     config::Config,
     domain::SessionId,
@@ -18,13 +28,15 @@ use gdb_ai_core::{
 };
 use serde_json::{Map, Value, json};
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
-    sync::mpsc,
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    net::{TcpListener, UnixListener},
+    sync::{RwLock, mpsc},
     task::JoinHandle,
 };
 
 const MCP_VERSION: &str = "2025-11-25";
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_PENDING_REQUESTS: usize = 128;
 
 type AnyError = Box<dyn StdError + Send + Sync>;
 type RpcOutput = (Option<String>, Value);
@@ -41,17 +53,36 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(group(
+        ArgGroup::new("transport")
+            .required(true)
+            .args(["stdio", "unix", "http"])
+    ))]
     Serve {
         #[arg(long)]
         stdio: bool,
         #[arg(long)]
+        unix: Option<PathBuf>,
+        #[arg(long)]
+        http: Option<SocketAddr>,
+        #[arg(long)]
         raw_admin: bool,
+        #[arg(long)]
+        auth_token_file: Option<PathBuf>,
     },
     Doctor,
     Replay {
         journal: PathBuf,
         #[arg(long, default_value = "sess_replay")]
         session_id: String,
+    },
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    Transcript {
+        #[command(subcommand)]
+        command: TranscriptCommand,
     },
     Schema {
         #[command(subcommand)]
@@ -65,8 +96,28 @@ enum SchemaCommand {
     Export,
 }
 
+#[derive(Subcommand)]
+enum SessionCommand {
+    List,
+    Inspect { session_id: String },
+    Close { session_id: String },
+}
+
+#[derive(Subcommand)]
+enum TranscriptCommand {
+    Export { session_id: String },
+    Inspect { journal: PathBuf },
+}
+
 #[tokio::main]
 async fn main() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("gdb_ai=info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     if let Err(error) = run().await {
         eprintln!("gdb-ai: {error}");
         std::process::exit(1);
@@ -80,25 +131,42 @@ async fn run() -> Result<(), AnyError> {
         Command::Serve {
             stdio: true,
             raw_admin,
+            ..
         } => serve_stdio(config, raw_admin).await,
-        Command::Serve { stdio: false, .. } => {
-            Err(io::Error::other("the vertical slice supports only `gdb-ai serve --stdio`").into())
-        }
+        Command::Serve {
+            unix: Some(path),
+            raw_admin,
+            ..
+        } => serve_unix(config, path, raw_admin).await,
+        Command::Serve {
+            http: Some(address),
+            raw_admin,
+            auth_token_file,
+            ..
+        } => serve_http(config, address, raw_admin, auth_token_file).await,
+        Command::Serve { .. } => unreachable!("clap requires one transport"),
         Command::Doctor => doctor(config).await,
         Command::Replay {
             journal,
             session_id,
         } => {
-            let report = gdb_ai_core::replay::replay(journal, SessionId(session_id))?;
+            let report = gdb_ai_core::replay::replay(journal, SessionId::parse(session_id)?)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Command::Session { command } => session_cli(config, command).await,
+        Command::Transcript { command } => transcript_cli(config, command),
         Command::Schema {
             command: SchemaCommand::Export,
         } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&schemars::schema_for!(ApiRequest))?
+                serde_json::to_string_pretty(&json!({
+                    "canonical": serde_json::from_str::<Value>(include_str!("../../../schemas/gdb.ai.v1.json"))?,
+                    "events": serde_json::from_str::<Value>(include_str!("../../../schemas/events.v1.json"))?,
+                    "resources": serde_json::from_str::<Value>(include_str!("../../../schemas/resources.v1.json"))?,
+                    "sha256": include_str!("../../../schemas/SHA256SUMS")
+                }))?
             );
             Ok(())
         }
@@ -108,8 +176,14 @@ async fn run() -> Result<(), AnyError> {
                 serde_json::to_string_pretty(&json!({
                     "api_version": API_VERSION,
                     "mcp_protocol_version": MCP_VERSION,
-                    "transports": ["stdio"],
+                    "transports": ["stdio", "unix", "streamable_http", "json_rpc"],
                     "tools": tool_names(false),
+                    "raw_admin_tool": "gdb_raw",
+                    "schemas": [
+                        "schemas/gdb.ai.v1.json",
+                        "schemas/events.v1.json",
+                        "schemas/resources.v1.json"
+                    ],
                 }))?
             );
             Ok(())
@@ -117,7 +191,244 @@ async fn run() -> Result<(), AnyError> {
     }
 }
 
+async fn session_cli(config: Config, command: SessionCommand) -> Result<(), AnyError> {
+    let socket = config.server.unix_socket.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "server.unix_socket is required for session commands",
+        )
+    })?;
+    let mut client = UnixClient::connect(socket).await?;
+    let response = match command {
+        SessionCommand::List => {
+            client
+                .call(ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "cli-list".into(),
+                    session_id: None,
+                    method: "session.list".into(),
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters: json!({}),
+                })
+                .await?
+        }
+        SessionCommand::Inspect { session_id } => {
+            client
+                .call(ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "cli-inspect".into(),
+                    session_id: Some(session_id),
+                    method: "session.get".into(),
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters: json!({}),
+                })
+                .await?
+        }
+        SessionCommand::Close { session_id } => {
+            let inspected = client
+                .call(ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "cli-close-inspect".into(),
+                    session_id: Some(session_id.clone()),
+                    method: "session.get".into(),
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters: json!({}),
+                })
+                .await?;
+            require_api_success(&inspected)?;
+            let acquired = client
+                .call(ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "cli-close-lease".into(),
+                    session_id: Some(session_id.clone()),
+                    method: "session.acquire_write_lease".into(),
+                    expected_revision: inspected.revision,
+                    idempotency_key: None,
+                    parameters: json!({"force": true}),
+                })
+                .await?;
+            require_api_success(&acquired)?;
+            let lease_id = acquired
+                .result
+                .as_ref()
+                .and_then(|value| value.get("lease_id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| io::Error::other("lease response has no lease_id"))?;
+            client
+                .call(ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "cli-close".into(),
+                    session_id: Some(session_id),
+                    method: "session.close".into(),
+                    expected_revision: acquired.revision,
+                    idempotency_key: None,
+                    parameters: json!({"lease_id": lease_id}),
+                })
+                .await?
+        }
+    };
+    require_api_success(&response)?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
+}
+
+fn transcript_cli(config: Config, command: TranscriptCommand) -> Result<(), AnyError> {
+    match command {
+        TranscriptCommand::Export { session_id } => {
+            let session_id = SessionId::parse(session_id)?;
+            let path = config
+                .persistence
+                .sessions
+                .join(session_id.0)
+                .join("journal.jsonl");
+            let mut file = std::fs::File::open(path)?;
+            let mut output = std::io::stdout().lock();
+            std::io::copy(&mut file, &mut output)?;
+        }
+        TranscriptCommand::Inspect { journal } => {
+            use std::io::BufRead as _;
+            let file = std::fs::File::open(journal)?;
+            let mut kinds = std::collections::BTreeMap::<String, u64>::new();
+            let mut entries = 0u64;
+            let mut last_seq = 0u64;
+            for line in std::io::BufReader::new(file).lines() {
+                let entry: gdb_ai_core::journal::JournalEntry = serde_json::from_str(&line?)?;
+                gdb_ai_core::journal::require_next_sequence(last_seq, entry.seq)?;
+                last_seq = entry.seq;
+                entries += 1;
+                *kinds.entry(entry.kind).or_default() += 1;
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "entries": entries,
+                    "last_seq": last_seq,
+                    "kinds": kinds
+                }))?
+            );
+        }
+    }
+    Ok(())
+}
+
+struct UnixClient {
+    input: BufReader<tokio::net::unix::OwnedReadHalf>,
+    output: tokio::net::unix::OwnedWriteHalf,
+    next_id: u64,
+}
+
+impl UnixClient {
+    async fn connect(path: PathBuf) -> Result<Self, AnyError> {
+        let stream = tokio::net::UnixStream::connect(path).await?;
+        let (input, output) = stream.into_split();
+        let mut client = Self {
+            input: BufReader::new(input),
+            output,
+            next_id: 1,
+        };
+        let initialize_id = Value::from(client.next_id);
+        client.next_id += 1;
+        write_rpc(
+            &mut client.output,
+            json!({
+                "jsonrpc": "2.0",
+                "id": initialize_id,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_VERSION,
+                    "clientInfo": {"name": "gdb-ai-cli", "version": env!("CARGO_PKG_VERSION")}
+                }
+            }),
+        )
+        .await?;
+        let response = read_json_line(&mut client.input).await?;
+        if response.get("error").is_some() {
+            return Err(io::Error::other(response.to_string()).into());
+        }
+        write_rpc(
+            &mut client.output,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            }),
+        )
+        .await?;
+        Ok(client)
+    }
+
+    async fn call(&mut self, request: ApiRequest) -> Result<ApiResponse, AnyError> {
+        let id = Value::from(self.next_id);
+        self.next_id += 1;
+        write_rpc(
+            &mut self.output,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "gdb.ai/call",
+                "params": request
+            }),
+        )
+        .await?;
+        let response = read_json_line(&mut self.input).await?;
+        if let Some(error) = response.get("error") {
+            return Err(io::Error::other(error.to_string()).into());
+        }
+        Ok(serde_json::from_value(
+            response.get("result").cloned().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "JSON-RPC response has no result",
+                )
+            })?,
+        )?)
+    }
+}
+
+async fn read_json_line<R>(input: &mut R) -> Result<Value, AnyError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let line = read_line_bounded(input, MAX_MESSAGE_BYTES)
+        .await?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "server closed connection"))?;
+    Ok(serde_json::from_slice(&line)?)
+}
+
+fn require_api_success(response: &ApiResponse) -> Result<(), AnyError> {
+    if let Some(error) = &response.error {
+        Err(io::Error::other(format!("{:?}: {}", error.code, error.message)).into())
+    } else {
+        Ok(())
+    }
+}
+
 async fn doctor(config: Config) -> Result<(), AnyError> {
+    let checks = json!({
+        "gdb": {
+            "path": config.gdb.path,
+            "available": std::process::Command::new(&config.gdb.path)
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        },
+        "gdbserver": {"available": program_available("gdbserver")},
+        "bubblewrap": {"available": std::path::Path::new("/usr/bin/bwrap").is_file()},
+        "host_architecture": std::env::consts::ARCH,
+        "ptrace_scope": std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+            .ok()
+            .map(|value| value.trim().to_owned()),
+        "workspace_roots": config.security.workspace_roots.iter().map(|root| json!({
+            "path": root,
+            "accessible": std::fs::canonicalize(root).is_ok()
+        })).collect::<Vec<_>>(),
+        "remote_allowlist_entries": config.security.remote_allowlist.len(),
+        "attach_allowlist_entries": config.security.attach_allowlist.len(),
+        "python_extension_configured": config.gdb.python_extension.is_some(),
+    });
     let gateway = Gateway::new(config)?;
     let caller = Caller::local("doctor");
     let created = gateway
@@ -143,12 +454,21 @@ async fn doctor(config: Config) -> Result<(), AnyError> {
         .session_id
         .clone()
         .ok_or_else(|| io::Error::other("session.create returned no session_id"))?;
+    let lease_id = created
+        .result
+        .as_ref()
+        .and_then(|result| result.get("write_lease"))
+        .and_then(|lease| lease.get("lease_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| io::Error::other("session.create returned no write lease"))?
+        .to_owned();
     let report = json!({
         "status": "ok",
         "session_id": session_id,
         "revision": created.revision,
         "backend": created.result.as_ref().and_then(|value| value.get("backend")),
         "capabilities": created.result.as_ref().and_then(|value| value.get("capabilities")),
+        "checks": checks,
     });
     let _ = gateway
         .dispatch(
@@ -159,7 +479,7 @@ async fn doctor(config: Config) -> Result<(), AnyError> {
                 method: "session.close".into(),
                 expected_revision: created.revision,
                 idempotency_key: None,
-                parameters: json!({}),
+                parameters: json!({"lease_id": lease_id}),
             },
             &caller,
         )
@@ -169,19 +489,45 @@ async fn doctor(config: Config) -> Result<(), AnyError> {
     Ok(())
 }
 
+fn program_available(program: &str) -> bool {
+    std::process::Command::new(program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
     let gateway = Arc::new(Gateway::new(config)?);
-    let mut caller = Caller {
-        identity: "mcp-stdio".into(),
-        admin: raw_admin,
-    };
+    let result = serve_stream(
+        gateway.clone(),
+        Caller {
+            identity: "mcp-stdio".into(),
+            admin: raw_admin,
+        },
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    )
+    .await;
+    gateway.shutdown().await;
+    result
+}
+
+async fn serve_stream<R, W>(
+    gateway: Arc<Gateway>,
+    mut caller: Caller,
+    input: R,
+    mut output: W,
+) -> Result<(), AnyError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let sequence = Arc::new(AtomicU64::new(1));
     let mut phase = Phase::New;
     let mut pending: HashMap<String, JoinHandle<()>> = HashMap::new();
     let mut input_open = true;
     let (responses, mut response_rx) = mpsc::channel::<RpcOutput>(128);
-    let mut input = BufReader::new(tokio::io::stdin());
-    let mut output = tokio::io::stdout();
+    let mut input = BufReader::new(input);
 
     loop {
         // 2026-08-28: EOF ends input, not pending work. Drain completed RPC
@@ -243,6 +589,12 @@ async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
                 }
 
                 let key = request_key(&id);
+                // 2026-08-28: Duplicate IDs replaced cancellation handles and
+                // unbounded pending tasks let one connection exhaust memory.
+                if pending.contains_key(&key) || pending.len() >= MAX_PENDING_REQUESTS {
+                    write_rpc(&mut output, rpc_error(id, -32600, "duplicate request id or too many pending requests")).await?;
+                    continue;
+                }
                 let gateway = gateway.clone();
                 let caller = caller.clone();
                 let responses = responses.clone();
@@ -251,10 +603,20 @@ async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
                 let task_key = key.clone();
                 // Requests may wait for a target stop; separate tasks let
                 // cancellation and inferior I/O reach the gateway meanwhile.
+                // 2026-08-28: Cancelling the response task used to cancel the
+                // Gateway future after a worker had accepted a mutation. Keep
+                // dispatch detached so idempotency and audit still complete.
+                let operation = tokio::spawn(async move {
+                    dispatch_rpc(&gateway, &caller, &sequence, &method, params).await
+                });
                 let handle = tokio::spawn(async move {
-                    let response = dispatch_rpc(&gateway, &caller, &sequence, &method, params)
-                        .await
-                        .map_or_else(|error| rpc_fault(id.clone(), error), |result| rpc_result(id.clone(), result));
+                    let response = match operation.await {
+                        Ok(result) => result.map_or_else(
+                            |error| rpc_fault(id.clone(), error),
+                            |result| rpc_result(id.clone(), result),
+                        ),
+                        Err(error) => rpc_error(id, -32603, error.to_string()),
+                    };
                     let _ = responses.send((Some(task_key), response)).await;
                 });
                 pending.insert(key, handle);
@@ -271,8 +633,366 @@ async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
     for task in pending.into_values() {
         task.abort();
     }
+    Ok(())
+}
+
+async fn serve_unix(config: Config, path: PathBuf, raw_admin: bool) -> Result<(), AnyError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "refusing to replace a non-socket Unix path",
+            )
+            .into());
+        }
+        std::fs::remove_file(&path)?;
+    }
+    let listener = UnixListener::bind(&path)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    let gateway = Arc::new(Gateway::new(config)?);
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                // 2026-08-28: Falling back to unix:unknown made every
+                // credential lookup failure share one authorization principal.
+                let identity = match stream.peer_cred() {
+                    Ok(credentials) => format!("unix:uid:{}", credentials.uid()),
+                    Err(error) => {
+                        tracing::warn!(%error, "rejected Unix client without peer credentials");
+                        continue;
+                    }
+                };
+                let (input, output) = stream.into_split();
+                let gateway = gateway.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = serve_stream(
+                        gateway,
+                        Caller { identity, admin: raw_admin },
+                        input,
+                        output,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "Unix client disconnected with an error");
+                    }
+                });
+            }
+            result = tokio::signal::ctrl_c() => {
+                result?;
+                break;
+            }
+        }
+    }
+    gateway.shutdown().await;
+    std::fs::remove_file(&path)?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct HttpState {
+    gateway: Arc<Gateway>,
+    sessions: Arc<RwLock<HashMap<String, HttpClient>>>,
+    sequence: Arc<AtomicU64>,
+    raw_admin: bool,
+    auth_token: Option<Arc<str>>,
+}
+
+#[derive(Clone)]
+struct HttpClient {
+    phase: Phase,
+    caller: Caller,
+    pending: HashMap<String, Option<tokio::task::AbortHandle>>,
+}
+
+async fn serve_http(
+    config: Config,
+    address: SocketAddr,
+    raw_admin: bool,
+    auth_token_file: Option<PathBuf>,
+) -> Result<(), AnyError> {
+    if !address.ip().is_loopback() && auth_token_file.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "non-loopback HTTP requires --auth-token-file",
+        )
+        .into());
+    }
+    let auth_token = auth_token_file
+        .map(|path| -> Result<Arc<str>, AnyError> {
+            let metadata = std::fs::metadata(&path)?;
+            if !metadata.is_file()
+                || metadata.len() == 0
+                || metadata.len() > 4_096
+                || metadata.permissions().mode() & 0o077 != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "token file must be regular, private, and contain 1 to 4096 bytes",
+                )
+                .into());
+            }
+            let token = std::fs::read_to_string(path)?;
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "authentication token is empty",
+                )
+                .into());
+            }
+            Ok(Arc::from(token))
+        })
+        .transpose()?;
+    let gateway = Arc::new(Gateway::new(config)?);
+    let state = HttpState {
+        gateway: gateway.clone(),
+        sessions: Arc::new(RwLock::new(HashMap::new())),
+        sequence: Arc::new(AtomicU64::new(1)),
+        raw_admin,
+        auth_token,
+    };
+    let router = Router::new()
+        .route("/mcp", post(http_mcp).delete(http_delete))
+        .route("/healthz", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/metrics", get(http_metrics))
+        .layer(DefaultBodyLimit::max(MAX_MESSAGE_BYTES))
+        .with_state(state);
+    let listener = TcpListener::bind(address).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await?;
     gateway.shutdown().await;
     Ok(())
+}
+
+async fn http_mcp(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(message): Json<Value>,
+) -> Response {
+    if !authorize_http(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(object) = message.as_object() else {
+        return json_http_response(
+            rpc_error(Value::Null, -32600, "request must be an object"),
+            None,
+        );
+    };
+    let id = object.get("id").cloned();
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return json_http_response(
+            rpc_error(id.unwrap_or(Value::Null), -32600, "jsonrpc must be 2.0"),
+            None,
+        );
+    }
+    let Some(method) = object.get("method").and_then(Value::as_str) else {
+        return json_http_response(
+            rpc_error(id.unwrap_or(Value::Null), -32600, "method is required"),
+            None,
+        );
+    };
+    let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
+    if method == "initialize" {
+        let Some(id) = id else {
+            return StatusCode::ACCEPTED.into_response();
+        };
+        let mut phase = Phase::New;
+        let mut caller = Caller {
+            identity: "mcp-http".into(),
+            admin: state.raw_admin,
+        };
+        let response = initialize(&params, &mut phase, &mut caller).map_or_else(
+            |error| rpc_fault(id.clone(), error),
+            |result| rpc_result(id.clone(), result),
+        );
+        if phase == Phase::New {
+            return json_http_response(response, None);
+        }
+        let session_id = format!("mcp_{}", SessionId::new().0);
+        state.sessions.write().await.insert(
+            session_id.clone(),
+            HttpClient {
+                phase,
+                caller,
+                pending: HashMap::new(),
+            },
+        );
+        return json_http_response(response, Some(&session_id));
+    }
+    let Some(session_id) = headers
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return (StatusCode::BAD_REQUEST, "Mcp-Session-Id is required").into_response();
+    };
+    let Some(client) = state.sessions.read().await.get(session_id).cloned() else {
+        return (StatusCode::NOT_FOUND, "MCP session not found").into_response();
+    };
+    if id.is_none() {
+        let mut sessions = state.sessions.write().await;
+        if let Some(client) = sessions.get_mut(session_id) {
+            if method == "notifications/initialized" && client.phase == Phase::AwaitingInitialized {
+                client.phase = Phase::Ready;
+            } else if method == "notifications/cancelled"
+                && let Some(id) = params.get("requestId")
+                && let Some(handle) = client.pending.remove(&request_key(id)).flatten()
+            {
+                handle.abort();
+            }
+        }
+        return StatusCode::ACCEPTED.into_response();
+    }
+    let id = id.unwrap();
+    if !valid_request_id(&id) {
+        return json_http_response(
+            rpc_error(Value::Null, -32600, "id must be a string or integer"),
+            Some(session_id),
+        );
+    }
+    if method != "ping" && client.phase != Phase::Ready {
+        return json_http_response(
+            rpc_error(id, -32002, "server is not initialized"),
+            Some(session_id),
+        );
+    }
+    let key = request_key(&id);
+    let reserved = {
+        let mut sessions = state.sessions.write().await;
+        sessions.get_mut(session_id).is_some_and(|client| {
+            if client.pending.contains_key(&key) || client.pending.len() >= MAX_PENDING_REQUESTS {
+                false
+            } else {
+                client.pending.insert(key.clone(), None);
+                true
+            }
+        })
+    };
+    if !reserved {
+        return json_http_response(
+            rpc_error(
+                id,
+                -32600,
+                "duplicate request id or too many pending requests",
+            ),
+            Some(session_id),
+        );
+    }
+    let gateway = state.gateway.clone();
+    let sequence = state.sequence.clone();
+    let caller = client.caller;
+    let method = method.to_owned();
+    let response_id = id.clone();
+    let operation =
+        tokio::spawn(
+            async move { dispatch_rpc(&gateway, &caller, &sequence, &method, params).await },
+        );
+    let task = tokio::spawn(async move {
+        match operation.await {
+            Ok(result) => result.map_or_else(
+                |error| rpc_fault(response_id.clone(), error),
+                |result| rpc_result(response_id.clone(), result),
+            ),
+            Err(error) => rpc_error(response_id, -32603, error.to_string()),
+        }
+    });
+    let registered = {
+        let mut sessions = state.sessions.write().await;
+        sessions
+            .get_mut(session_id)
+            .and_then(|client| client.pending.get_mut(&key))
+            .is_some_and(|slot| {
+                *slot = Some(task.abort_handle());
+                true
+            })
+    };
+    if !registered {
+        task.abort();
+        return json_http_response(
+            rpc_error(
+                id,
+                -32600,
+                "duplicate request id or too many pending requests",
+            ),
+            Some(session_id),
+        );
+    }
+    let response = match task.await {
+        Ok(response) => response,
+        Err(error) if error.is_cancelled() => rpc_error(id, -32800, "request cancelled"),
+        Err(error) => rpc_error(id, -32603, error.to_string()),
+    };
+    if let Some(client) = state.sessions.write().await.get_mut(session_id) {
+        client.pending.remove(&key);
+    }
+    json_http_response(response, Some(session_id))
+}
+
+async fn http_delete(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if !authorize_http(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(session_id) = headers
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return (StatusCode::BAD_REQUEST, "Mcp-Session-Id is required").into_response();
+    };
+    let Some(client) = state.sessions.write().await.remove(session_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    for handle in client.pending.into_values().flatten() {
+        handle.abort();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn http_metrics(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if !authorize_http(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut response = Response::new(Body::from(state.gateway.metrics()));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4"),
+    );
+    response
+}
+
+fn authorize_http(state: &HttpState, headers: &HeaderMap) -> bool {
+    let Some(expected) = &state.auth_token else {
+        return true;
+    };
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    supplied == Some(expected.as_ref())
+}
+
+fn json_http_response(value: Value, session_id: Option<&str>) -> Response {
+    let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"null".to_vec());
+    let mut response = Response::new(Body::from(body));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response.headers_mut().insert(
+        "mcp-protocol-version",
+        HeaderValue::from_static(MCP_VERSION),
+    );
+    if let Some(session_id) = session_id
+        && let Ok(value) = HeaderValue::from_str(session_id)
+    {
+        response.headers_mut().insert("mcp-session-id", value);
+    }
+    response
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,7 +1037,7 @@ fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<
             "clientInfo.name must contain 1 to 128 bytes",
         ));
     }
-    caller.identity = format!("mcp:{client_name}");
+    caller.identity = format!("{}/mcp:{client_name}", caller.identity);
     *phase = Phase::AwaitingInitialized;
     let supported = [MCP_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"];
     let version = if supported.contains(&requested) {
@@ -418,9 +1138,19 @@ fn map_tool(name: &str, arguments: Value, sequence: u64) -> Result<ApiRequest, R
         "gdb_session" => match take_required_string(&mut parameters, "action")?.as_str() {
             "create" => "session.create",
             "launch" => "target.launch",
+            "attach" => "target.attach",
+            "connect_remote" => "target.connect_remote",
+            "open_core" => "target.open_core",
+            "detach" => "target.detach",
+            "restart" => "target.restart",
+            "kill" => "target.kill",
             "status" => "session.get",
             "list" => "session.list",
             "capabilities" => "session.capabilities",
+            "providers" => "session.providers",
+            "acquire_write_lease" => "session.acquire_write_lease",
+            "release_write_lease" => "session.release_write_lease",
+            "attempt_recovery" => "session.attempt_recovery",
             "close" => "session.close",
             action => {
                 return Err(RpcFault::invalid(format!(
@@ -455,13 +1185,40 @@ fn map_tool(name: &str, arguments: Value, sequence: u64) -> Result<ApiRequest, R
                 }
             }
         }
-        "gdb_inspect" => "inspection.get",
+        "gdb_inspect" => match parameters.get("view").and_then(Value::as_str) {
+            Some("snapshot") => "inspection.snapshot",
+            Some("diff") => "inspection.diff",
+            _ => "inspection.get",
+        },
         "gdb_evaluate" => "value.evaluate",
+        "gdb_values" => match take_required_string(&mut parameters, "action")?.as_str() {
+            "create" => "value.create",
+            "children" => "value.children",
+            "update" => "value.update",
+            "release" => "value.release",
+            action => {
+                return Err(RpcFault::invalid(format!(
+                    "unsupported value action {action}"
+                )));
+            }
+        },
         "gdb_memory" => match take_required_string(&mut parameters, "action")?.as_str() {
             "read" => "memory.read",
+            "write" => "memory.write",
+            "search" => "memory.search",
+            "compare" => "memory.compare",
             action => {
                 return Err(RpcFault::invalid(format!(
                     "unsupported memory action {action}"
+                )));
+            }
+        },
+        "gdb_registers" => match take_required_string(&mut parameters, "action")?.as_str() {
+            "read" => "register.read",
+            "write" => "register.write",
+            action => {
+                return Err(RpcFault::invalid(format!(
+                    "unsupported register action {action}"
                 )));
             }
         },
@@ -477,8 +1234,50 @@ fn map_tool(name: &str, arguments: Value, sequence: u64) -> Result<ApiRequest, R
                 )));
             }
         },
+        "gdb_tracking" => match take_required_string(&mut parameters, "action")?.as_str() {
+            "add_expression" => "tracking.add_expression",
+            "add_memory" => "tracking.add_memory",
+            "remove" => "tracking.remove",
+            "list" => "tracking.list",
+            action => {
+                return Err(RpcFault::invalid(format!(
+                    "unsupported tracking action {action}"
+                )));
+            }
+        },
+        "gdb_signals" => match take_required_string(&mut parameters, "action")?.as_str() {
+            "get" => "signal.get",
+            "update" => "signal.update",
+            action => {
+                return Err(RpcFault::invalid(format!(
+                    "unsupported signal action {action}"
+                )));
+            }
+        },
+        "gdb_batch" => "inspection.batch",
+        "gdb_agent" => match take_required_string(&mut parameters, "action")?.as_str() {
+            "probe" => "agent.probe",
+            "experiment" => "agent.experiment",
+            "hypothesis_check" => "agent.hypothesis_check",
+            action => {
+                return Err(RpcFault::invalid(format!(
+                    "unsupported agent action {action}"
+                )));
+            }
+        },
+        "gdb_events" => "events.wait",
+        "gdb_kernel" => match take_required_string(&mut parameters, "action")?.as_str() {
+            "inspect" => "kernel.inspect",
+            "monitor" => "kernel.monitor",
+            action => {
+                return Err(RpcFault::invalid(format!(
+                    "unsupported kernel action {action}"
+                )));
+            }
+        },
         "gdb_raw" => match take_required_string(&mut parameters, "action")?.as_str() {
             "console" => "raw.console",
+            "mi" => "raw.mi",
             action => {
                 return Err(RpcFault::invalid(format!(
                     "unsupported raw action {action}"
@@ -516,14 +1315,8 @@ fn tool_result(response: ApiResponse) -> Value {
     let structured = serde_json::to_value(response).unwrap_or_else(
         |error| json!({"error": {"code": "INTERNAL", "message": error.to_string()}}),
     );
-    let serialized = serde_json::to_string(&structured).unwrap_or_else(|_| summary.clone());
-    let text = if serialized.len() <= 16 * 1024 {
-        serialized
-    } else {
-        summary
-    };
     json!({
-        "content": [{"type": "text", "text": text}],
+        "content": [{"type": "text", "text": summary}],
         "structuredContent": structured,
         "isError": is_error
     })
@@ -568,6 +1361,41 @@ fn resource_templates() -> Value {
             "mimeType": "application/json"
         },
         {
+            "uriTemplate": "gdbai://session/{session_id}/capabilities",
+            "name": "Session capabilities",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "gdbai://session/{session_id}/events",
+            "name": "Current event state",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "gdbai://session/{session_id}/transcript",
+            "name": "Paged MI transcript",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "gdbai://session/{session_id}/event/{event_seq}",
+            "name": "Journal evidence entry",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "gdbai://session/{session_id}/snapshot/{snapshot_id}",
+            "name": "Stop snapshot",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "gdbai://session/{session_id}/inferior/{inferior_id}/output",
+            "name": "Paged inferior output",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "gdbai://session/{session_id}/breakpoints",
+            "name": "Session breakpoints",
+            "mimeType": "application/json"
+        },
+        {
             "uriTemplate": "gdbai://artifact/sha256:{digest}",
             "name": "Content-addressed artifact",
             "mimeType": "application/octet-stream"
@@ -606,18 +1434,51 @@ async fn read_resource(
             "blob": blob
         }]}));
     }
-    let session = uri
+    let path = uri
         .strip_prefix("gdbai://session/")
-        .and_then(|path| path.strip_suffix("/status"))
-        .filter(|id| !id.is_empty() && !id.contains('/'))
         .ok_or_else(|| RpcFault {
             code: -32002,
             message: "resource not found".into(),
             data: Some(json!({"uri": uri})),
         })?;
+    let parts = path.split('/').collect::<Vec<_>>();
+    let session = parts
+        .first()
+        .copied()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| RpcFault {
+            code: -32002,
+            message: "resource not found".into(),
+            data: Some(json!({"uri": uri})),
+        })?;
+    let (method, parameters) = match parts.as_slice() {
+        [_, "status"] | [_, "events"] => ("session.get", json!({})),
+        [_, "capabilities"] => ("session.capabilities", json!({})),
+        [_, "transcript"] => ("session.transcript", json!({})),
+        [_, "event", event_seq] => (
+            "session.event",
+            json!({"event_seq": event_seq.parse::<u64>().map_err(|_| RpcFault::invalid("invalid event sequence"))?}),
+        ),
+        [_, "breakpoints"] => ("breakpoint.list", json!({})),
+        [_, "snapshot", snapshot_id] => (
+            "inspection.snapshot_get",
+            json!({"snapshot_id": snapshot_id}),
+        ),
+        [_, "inferior", _, "output"] => (
+            "inferior_io.read",
+            json!({"stream": "pty", "after_offset": 0, "max_bytes": 65536}),
+        ),
+        _ => {
+            return Err(RpcFault {
+                code: -32002,
+                message: "resource not found".into(),
+                data: Some(json!({"uri": uri})),
+            });
+        }
+    };
     let response = gateway
         .dispatch(
-            canonical_request(sequence, Some(session.into()), "session.get", json!({})),
+            canonical_request(sequence, Some(session.into()), method, parameters),
             caller,
         )
         .await;
@@ -663,13 +1524,37 @@ fn tools(include_raw: bool) -> Vec<Value> {
                         enum_schema(&[
                             "create",
                             "launch",
+                            "attach",
+                            "connect_remote",
+                            "open_core",
+                            "detach",
+                            "restart",
+                            "kill",
                             "status",
                             "list",
                             "capabilities",
+                            "providers",
+                            "acquire_write_lease",
+                            "release_write_lease",
+                            "attempt_recovery",
                             "close",
                         ]),
                     ),
                     ("program", json!({"type": "string"})),
+                    ("executable", json!({"type": "string"})),
+                    ("core", json!({"type": "string"})),
+                    ("pid", json!({"type": "integer", "minimum": 1})),
+                    ("mode", enum_schema(&["remote", "extended-remote"])),
+                    (
+                        "endpoint",
+                        json!({"oneOf": [
+                            {"type": "string"},
+                            {"type": "object", "properties": {
+                                "host": {"type": "string"},
+                                "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+                            }, "required": ["host", "port"], "additionalProperties": false}
+                        ]}),
+                    ),
                     (
                         "profile",
                         enum_schema(&[
@@ -693,7 +1578,9 @@ fn tools(include_raw: bool) -> Vec<Value> {
                     ("aslr", enum_schema(&["preserve", "disable"])),
                     ("stop", enum_schema(&["entry", "none"])),
                     ("follow_fork", enum_schema(&["parent", "child"])),
+                    ("follow_exec", enum_schema(&["same-inferior"])),
                     ("detach_on_fork", json!({"type": "boolean"})),
+                    ("force", json!({"type": "boolean"})),
                     ("wait", wait_schema()),
                 ],
             ),
@@ -745,15 +1632,27 @@ fn tools(include_raw: bool) -> Vec<Value> {
                         enum_schema(&[
                             "software",
                             "hardware",
+                            "temporary",
+                            "instruction",
                             "watchpoint",
                             "read_watchpoint",
                             "access_watchpoint",
+                            "catchpoint",
                         ]),
                     ),
                     ("condition", json!({"type": "string"})),
+                    ("catch", json!({"type": "string"})),
+                    ("thread_id", json!({"type": "string"})),
+                    ("inferior_id", json!({"type": "string"})),
                     ("ignore_count", json!({"type": "integer", "minimum": 0})),
                     ("temporary", json!({"type": "boolean"})),
-                    ("hardware", json!({"type": "boolean"})),
+                    (
+                        "hardware",
+                        json!({"oneOf": [
+                            {"type": "boolean"},
+                            {"type": "string", "enum": ["auto", "required"]}
+                        ]}),
+                    ),
                     ("pending", json!({"type": "boolean"})),
                 ],
             ),
@@ -781,12 +1680,26 @@ fn tools(include_raw: bool) -> Vec<Value> {
                             "breakpoints",
                             "capabilities",
                             "target",
+                            "signals",
+                            "providers",
+                            "crash",
+                            "snapshot",
+                            "diff",
                         ]),
                     ),
                     ("stop_id", json!({"type": "string"})),
                     ("thread_id", json!({"type": "string"})),
                     ("frame_id", json!({"type": "string"})),
                     ("limit", json!({"type": "integer", "minimum": 1})),
+                    ("offset", json!({"type": "integer", "minimum": 0})),
+                    (
+                        "profile",
+                        enum_schema(&["minimal", "brief", "standard", "deep"]),
+                    ),
+                    ("before_snapshot_id", json!({"type": "string"})),
+                    ("after_snapshot_id", json!({"type": "string"})),
+                    ("path", json!({"type": "string"})),
+                    ("line", json!({"type": "integer", "minimum": 1})),
                     (
                         "roles",
                         json!({"type": "array", "items": {"type": "string"}}),
@@ -811,12 +1724,39 @@ fn tools(include_raw: bool) -> Vec<Value> {
             true,
         ),
         tool(
-            "gdb_memory",
-            "Read a bounded memory range; large results become artifacts.",
+            "gdb_values",
+            "Create and page stop-scoped GDB variable objects.",
             schema(
-                &["action", "session_id", "address", "length", "stop_id"],
+                &["action", "session_id"],
                 [
-                    ("action", enum_schema(&["read"])),
+                    (
+                        "action",
+                        enum_schema(&["create", "children", "update", "release"]),
+                    ),
+                    ("value_id", json!({"type": "string"})),
+                    ("expression", json!({"type": "string", "maxLength": 4096})),
+                    ("stop_id", json!({"type": "string"})),
+                    ("thread_id", json!({"type": "string"})),
+                    ("frame_id", json!({"type": "string"})),
+                    ("offset", json!({"type": "integer", "minimum": 0})),
+                    (
+                        "limit",
+                        json!({"type": "integer", "minimum": 1, "maximum": 1000}),
+                    ),
+                ],
+            ),
+            false,
+        ),
+        tool(
+            "gdb_memory",
+            "Read, compare, search, or conditionally write bounded memory.",
+            schema(
+                &["action", "session_id", "stop_id"],
+                [
+                    (
+                        "action",
+                        enum_schema(&["read", "write", "search", "compare"]),
+                    ),
                     (
                         "address",
                         json!({"type": "string", "pattern": "^0x[0-9a-fA-F]+$"}),
@@ -824,9 +1764,21 @@ fn tools(include_raw: bool) -> Vec<Value> {
                     ("length", json!({"type": "integer", "minimum": 1})),
                     ("stop_id", json!({"type": "string"})),
                     ("allow_partial", json!({"type": "boolean"})),
+                    ("volatile", json!({"type": "boolean"})),
+                    (
+                        "start",
+                        json!({"type": "string", "pattern": "^0x[0-9a-fA-F]+$"}),
+                    ),
+                    ("data_base64", json!({"type": "string"})),
+                    ("expected", json!({"type": "object"})),
+                    ("pattern", json!({"type": "object"})),
+                    (
+                        "max_results",
+                        json!({"type": "integer", "minimum": 1, "maximum": 1000}),
+                    ),
                 ],
             ),
-            true,
+            false,
         ),
         tool(
             "gdb_disassemble",
@@ -844,6 +1796,25 @@ fn tools(include_raw: bool) -> Vec<Value> {
             true,
         ),
         tool(
+            "gdb_registers",
+            "Read semantic register roles or write one authorized register.",
+            schema(
+                &["action", "session_id", "stop_id"],
+                [
+                    ("action", enum_schema(&["read", "write"])),
+                    ("stop_id", json!({"type": "string"})),
+                    ("register", json!({"type": "string"})),
+                    ("value", json!({"type": "string"})),
+                    ("reason", json!({"type": "string"})),
+                    (
+                        "roles",
+                        json!({"type": "array", "items": {"type": "string"}}),
+                    ),
+                ],
+            ),
+            false,
+        ),
+        tool(
             "gdb_io",
             "Read or write the inferior PTY independently from GDB control output.",
             schema(
@@ -853,7 +1824,7 @@ fn tools(include_raw: bool) -> Vec<Value> {
                         "action",
                         enum_schema(&["read", "write", "close_stdin", "resize"]),
                     ),
-                    ("stream", enum_schema(&["pty", "console", "log"])),
+                    ("stream", enum_schema(&["pty", "target", "console", "log"])),
                     ("after_offset", json!({"type": "integer", "minimum": 0})),
                     (
                         "max_bytes",
@@ -873,16 +1844,136 @@ fn tools(include_raw: bool) -> Vec<Value> {
             ),
             false,
         ),
+        tool(
+            "gdb_tracking",
+            "Manage bounded tracked expressions and memory ranges.",
+            schema(
+                &["action", "session_id"],
+                [
+                    (
+                        "action",
+                        enum_schema(&["add_expression", "add_memory", "remove", "list"]),
+                    ),
+                    ("tracking_id", json!({"type": "string"})),
+                    ("expression", json!({"type": "string"})),
+                    ("address_expression", json!({"type": "string"})),
+                    ("length", json!({"type": "integer", "minimum": 1})),
+                    ("max_value_bytes", json!({"type": "integer", "minimum": 1})),
+                    (
+                        "max_history",
+                        json!({"type": "integer", "minimum": 1, "maximum": 256}),
+                    ),
+                ],
+            ),
+            false,
+        ),
+        tool(
+            "gdb_signals",
+            "Read or update structured signal handling policy.",
+            schema(
+                &["action", "session_id"],
+                [
+                    ("action", enum_schema(&["get", "update"])),
+                    ("signals", json!({"type": "object"})),
+                ],
+            ),
+            false,
+        ),
+        tool(
+            "gdb_batch",
+            "Run bounded inspection requests against one stop context.",
+            schema(
+                &["session_id", "stop_id", "requests"],
+                [
+                    ("stop_id", json!({"type": "string"})),
+                    (
+                        "requests",
+                        json!({"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "object"}}),
+                    ),
+                ],
+            ),
+            true,
+        ),
+        tool(
+            "gdb_agent",
+            "Run a bounded probe, experiment, or runtime hypothesis check.",
+            schema(
+                &["action", "session_id", "stop_id"],
+                [
+                    (
+                        "action",
+                        enum_schema(&["probe", "experiment", "hypothesis_check"]),
+                    ),
+                    ("stop_id", json!({"type": "string"})),
+                    ("location", json!({"type": "object"})),
+                    ("condition", json!({"type": "string"})),
+                    ("capture", json!({"type": "array", "maxItems": 100})),
+                    (
+                        "max_hits",
+                        json!({"type": "integer", "minimum": 1, "maximum": 100}),
+                    ),
+                    (
+                        "stop_policy",
+                        enum_schema(&["on_condition", "continue_after_capture"]),
+                    ),
+                    ("budget", json!({"type": "object"})),
+                    ("claim", json!({"type": "string"})),
+                    ("expression", json!({"type": "string"})),
+                    (
+                        "operator",
+                        enum_schema(&[
+                            "equals",
+                            "not_equals",
+                            "contains",
+                            "greater_than",
+                            "less_than",
+                        ]),
+                    ),
+                    ("expected", json!({"type": "string"})),
+                ],
+            ),
+            false,
+        ),
+        tool(
+            "gdb_events",
+            "Wait for the next bounded session event.",
+            schema(
+                &["session_id"],
+                [
+                    ("after_event_seq", json!({"type": "integer", "minimum": 0})),
+                    ("timeout_ms", json!({"type": "integer", "minimum": 1})),
+                ],
+            ),
+            true,
+        ),
+        tool(
+            "gdb_kernel",
+            "Inspect configured Linux kernel targets or run allowlisted monitor commands.",
+            schema(
+                &["action", "session_id"],
+                [
+                    ("action", enum_schema(&["inspect", "monitor"])),
+                    (
+                        "view",
+                        enum_schema(&["current_task", "init_task", "stack", "panic"]),
+                    ),
+                    ("command", json!({"type": "string"})),
+                    ("stop_id", json!({"type": "string"})),
+                ],
+            ),
+            false,
+        ),
     ];
     if include_raw {
         let mut raw = tool(
             "gdb_raw",
-            "Run an audited console command and taint unmanaged GDB state.",
+            "Run audited raw MI or console commands with reconciliation.",
             schema(
                 &["action", "session_id", "command"],
                 [
-                    ("action", enum_schema(&["console"])),
+                    ("action", enum_schema(&["mi", "console"])),
                     ("command", json!({"type": "string"})),
+                    ("arguments", json!({"type": "array", "maxItems": 64})),
                     ("timeout_ms", json!({"type": "integer", "minimum": 1})),
                 ],
             ),
@@ -915,6 +2006,7 @@ fn schema<const N: usize>(required: &[&str], fields: [(&str, Value); N]) -> Valu
             json!({"type": "integer", "minimum": 0}),
         ),
         ("accept_latest_revision".into(), json!({"type": "boolean"})),
+        ("lease_id".into(), json!({"type": "string"})),
         (
             "idempotency_key".into(),
             json!({"type": "string", "maxLength": 256}),
@@ -952,9 +2044,17 @@ fn tool_names(include_raw: bool) -> Vec<&'static str> {
         "gdb_breakpoints",
         "gdb_inspect",
         "gdb_evaluate",
+        "gdb_values",
         "gdb_memory",
+        "gdb_registers",
         "gdb_disassemble",
         "gdb_io",
+        "gdb_tracking",
+        "gdb_signals",
+        "gdb_batch",
+        "gdb_agent",
+        "gdb_events",
+        "gdb_kernel",
     ];
     if include_raw {
         names.push("gdb_raw");
@@ -1017,7 +2117,7 @@ fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
 }
 
 fn valid_request_id(id: &Value) -> bool {
-    id.is_string() || id.as_i64().is_some() || id.as_u64().is_some()
+    id.as_str().is_some_and(|id| id.len() <= 128) || id.as_i64().is_some() || id.as_u64().is_some()
 }
 
 fn request_key(id: &Value) -> String {
@@ -1101,6 +2201,7 @@ mod tests {
         assert!(request.parameters.get("session_id").is_none());
         assert!(!tool_names(false).contains(&"gdb_raw"));
         assert!(tool_names(true).contains(&"gdb_raw"));
+        assert!(!valid_request_id(&Value::String("x".repeat(129))));
     }
 
     #[tokio::test]
@@ -1155,10 +2256,37 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(created["isError"], false);
+        assert_eq!(created["isError"], false, "{created}");
         let response = &created["structuredContent"];
         let session_id = response["session_id"].as_str().unwrap();
         let revision = response["revision"].as_u64().unwrap();
+        let lease_id = response["result"]["write_lease"]["lease_id"]
+            .as_str()
+            .unwrap();
+        let invalid = call_tool(
+            &gateway,
+            &caller,
+            &sequence,
+            json!({
+                "name": "gdb_raw",
+                "arguments": {
+                    "action": "console",
+                    "session_id": session_id,
+                    "expected_revision": revision,
+                    "lease_id": lease_id,
+                    "command": "show language",
+                    "timeout_ms": 0
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(invalid["isError"], true);
+        assert_eq!(
+            invalid["structuredContent"]["state"]["consistency"],
+            "CLEAN"
+        );
+        assert_eq!(invalid["structuredContent"]["revision"], revision);
         let raw = call_tool(
             &gateway,
             &caller,
@@ -1169,6 +2297,7 @@ mod tests {
                     "action": "console",
                     "session_id": session_id,
                     "expected_revision": revision,
+                    "lease_id": lease_id,
                     "command": "show language"
                 }
             }),
@@ -1177,7 +2306,56 @@ mod tests {
         .unwrap();
         assert_eq!(raw["isError"], false);
         assert_eq!(raw["structuredContent"]["state"]["consistency"], "TAINTED");
+        assert_eq!(
+            raw["structuredContent"]["state"]["reconciliation_required"],
+            false
+        );
+        let console = call_tool(
+            &gateway,
+            &caller,
+            &sequence,
+            json!({
+                "name": "gdb_io",
+                "arguments": {
+                    "action": "read",
+                    "session_id": session_id,
+                    "stream": "console",
+                    "after_offset": 0
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(console["isError"], false);
+        assert!(
+            console["structuredContent"]["result"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("source language"))
+        );
         let revision = raw["structuredContent"]["revision"].as_u64().unwrap();
+        let denied = call_tool(
+            &gateway,
+            &caller,
+            &sequence,
+            json!({
+                "name": "gdb_raw",
+                "arguments": {
+                    "action": "mi",
+                    "session_id": session_id,
+                    "expected_revision": revision,
+                    "lease_id": lease_id,
+                    "command": "-target-select",
+                    "arguments": ["remote", "203.0.113.1:1"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(denied["isError"], true);
+        assert_eq!(
+            denied["structuredContent"]["error"]["code"],
+            "POLICY_DENIED"
+        );
         let closed = call_tool(
             &gateway,
             &caller,
@@ -1187,12 +2365,160 @@ mod tests {
                 "arguments": {
                     "action": "close",
                     "session_id": session_id,
-                    "expected_revision": revision
+                    "expected_revision": revision,
+                    "lease_id": lease_id
                 }
             }),
         )
         .await
         .unwrap();
         assert_eq!(closed["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn streamable_http_authenticates_and_tracks_mcp_sessions() {
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let gateway = Arc::new(Gateway::new(config).unwrap());
+        let state = HttpState {
+            gateway: gateway.clone(),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sequence: Arc::new(AtomicU64::new(1)),
+            raw_admin: false,
+            auth_token: Some(Arc::from("test-token")),
+        };
+        let unauthorized = http_mcp(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        let initialized = http_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_VERSION,
+                    "clientInfo": {"name": "http-test", "version": "1"}
+                }
+            })),
+        )
+        .await;
+        assert_eq!(initialized.status(), StatusCode::OK);
+        let session = initialized.headers().get("mcp-session-id").unwrap().clone();
+        headers.insert("mcp-session-id", session);
+        let ready = http_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            })),
+        )
+        .await;
+        assert_eq!(ready.status(), StatusCode::ACCEPTED);
+        let listed = http_mcp(
+            State(state),
+            headers,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {}
+            })),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(listed.into_body(), MAX_MESSAGE_BYTES)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            response["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "gdb_values")
+        );
+        gateway.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stream_protocol_runs_over_a_unix_compatible_byte_stream() {
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let gateway = Arc::new(Gateway::new(config).unwrap());
+        let (client, server) = tokio::io::duplex(128 * 1024);
+        let (client_input, mut client_output) = tokio::io::split(client);
+        let (server_input, server_output) = tokio::io::split(server);
+        let serving = tokio::spawn(serve_stream(
+            gateway.clone(),
+            Caller::local("stream-test"),
+            server_input,
+            server_output,
+        ));
+        let mut client_input = BufReader::new(client_input);
+        write_rpc(
+            &mut client_output,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_VERSION,
+                    "clientInfo": {"name": "stream-test", "version": "1"}
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let initialized = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(initialized["result"]["protocolVersion"], MCP_VERSION);
+        write_rpc(
+            &mut client_output,
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
+        )
+        .await
+        .unwrap();
+        write_rpc(
+            &mut client_output,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        )
+        .await
+        .unwrap();
+        let tools = read_json_line(&mut client_input).await.unwrap();
+        assert!(tools["result"]["tools"].as_array().is_some());
+        client_output.shutdown().await.unwrap();
+        drop(client_output);
+        serving.await.unwrap().unwrap();
+        gateway.shutdown().await;
     }
 }
