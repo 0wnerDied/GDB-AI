@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -1493,6 +1493,7 @@ impl Gateway {
         profile: &str,
         frames: usize,
     ) -> Result<Value> {
+        let started = Instant::now();
         let mut warnings = Vec::new();
         let stack = optional_command(
             &entry.handle,
@@ -1596,7 +1597,6 @@ impl Gateway {
         };
         let partial = !warnings.is_empty();
         let stop_id = state.stop_id.clone().unwrap();
-        self.metrics.snapshot(partial);
         let current = entry.handle.state();
         let snapshot_id = format!("snap_{stop_id}");
         let snapshot = json!({
@@ -1627,6 +1627,8 @@ impl Gateway {
                 partial,
             )
             .await?;
+        self.metrics
+            .snapshot(started.elapsed().as_micros() as u64, partial);
         Ok(snapshot)
     }
 

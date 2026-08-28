@@ -14,6 +14,7 @@ pub struct Metrics {
     command_timeouts: AtomicU64,
     target_stops: AtomicU64,
     snapshots: AtomicU64,
+    snapshot_latency_micros: AtomicU64,
     snapshot_partial: AtomicU64,
     raw_commands: AtomicU64,
     reconciliations: AtomicU64,
@@ -66,8 +67,10 @@ impl Metrics {
         self.target_stops.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn snapshot(&self, partial: bool) {
+    pub fn snapshot(&self, elapsed_micros: u64, partial: bool) {
         self.snapshots.fetch_add(1, Ordering::Relaxed);
+        self.snapshot_latency_micros
+            .fetch_add(elapsed_micros, Ordering::Relaxed);
         if partial {
             self.snapshot_partial.fetch_add(1, Ordering::Relaxed);
         }
@@ -115,6 +118,7 @@ impl Metrics {
                 "gdbai_command_timeouts_total {}\n",
                 "gdbai_target_stops_total {}\n",
                 "gdbai_snapshot_total {}\n",
+                "gdbai_snapshot_latency_seconds {}\n",
                 "gdbai_snapshot_partial_total {}\n",
                 "gdbai_raw_commands_total {}\n",
                 "gdbai_reconciliations_total {}\n",
@@ -135,6 +139,7 @@ impl Metrics {
             value(&self.command_timeouts),
             value(&self.target_stops),
             value(&self.snapshots),
+            value(&self.snapshot_latency_micros) as f64 / 1_000_000.0,
             value(&self.snapshot_partial),
             value(&self.raw_commands),
             value(&self.reconciliations),
@@ -143,5 +148,21 @@ impl Metrics {
             value(&self.artifact_bytes),
             value(&self.inferior_output_dropped_bytes)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Metrics;
+
+    #[test]
+    fn reports_snapshot_latency() {
+        let metrics = Metrics::default();
+        metrics.snapshot(125_000, true);
+
+        let rendered = metrics.render();
+        assert!(rendered.contains("gdbai_snapshot_total 1\n"));
+        assert!(rendered.contains("gdbai_snapshot_latency_seconds 0.125\n"));
+        assert!(rendered.contains("gdbai_snapshot_partial_total 1\n"));
     }
 }

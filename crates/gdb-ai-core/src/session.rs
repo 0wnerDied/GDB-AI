@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, RwLock as StdRwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -2419,6 +2419,7 @@ impl SessionWorker {
             event,
         });
         if stopped {
+            let snapshot_started = Instant::now();
             // 2026-08-28: SnapshotReady was published without a stored object.
             // Persist the bounded stop context before advertising readiness.
             let stop_id = self.reducer.state().stop_id.clone().unwrap();
@@ -2465,6 +2466,10 @@ impl SessionWorker {
                 stop_id,
                 partial: frame.is_none(),
             })?;
+            self.metrics.snapshot(
+                snapshot_started.elapsed().as_micros() as u64,
+                frame.is_none(),
+            );
         }
         Ok(())
     }
