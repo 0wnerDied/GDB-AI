@@ -928,6 +928,7 @@ struct SessionWorker {
     tracking_history: BTreeMap<String, VecDeque<Value>>,
     snapshots: BTreeMap<String, Value>,
     stale_backend_values: Vec<String>,
+    deferred_restoration: Vec<MiCommand>,
     tracking_memory_limit: usize,
     fatal: bool,
     metric_active: bool,
@@ -1056,6 +1057,7 @@ impl SessionWorker {
             tracking_history: BTreeMap::new(),
             snapshots: BTreeMap::new(),
             stale_backend_values: Vec::new(),
+            deferred_restoration: Vec::new(),
             tracking_memory_limit: config.limits.memory_read_bytes,
             fatal: false,
             metric_active: false,
@@ -1343,6 +1345,10 @@ impl SessionWorker {
                     let _ = response.send(Err(error));
                     return false;
                 }
+                if let Err(error) = self.restore_deferred_commands(deadline).await {
+                    let _ = response.send(Err(error));
+                    return false;
+                }
                 self.cleanup_stale_values(deadline).await;
                 let _ = response.send(self.execute_until(command, deadline).await);
             }
@@ -1354,6 +1360,10 @@ impl SessionWorker {
                 response,
             } => {
                 if let Err(error) = self.require_known_outcome(&command) {
+                    let _ = response.send(Err(error));
+                    return false;
+                }
+                if let Err(error) = self.restore_deferred_commands(deadline).await {
                     let _ = response.send(Err(error));
                     return false;
                 }
@@ -1369,14 +1379,22 @@ impl SessionWorker {
                     Ok(()) => self.execute_until(command, deadline).await,
                     Err(error) => Err(error),
                 };
-                let mut restoration_error = None;
-                for command in after {
-                    if let Err(error) = self.execute_until(command, deadline).await {
-                        restoration_error = Some(error);
-                        break;
+                // 2026-08-28: A timed-out transaction previously sent its
+                // restoration commands while the original outcome was unknown.
+                // Defer them until the late token is consumed by the worker.
+                if !after.is_empty() && !self.timed_out_tokens.is_empty() {
+                    self.deferred_restoration = after;
+                    match self.apply_event(DomainEvent::ConsistencyDirty {
+                        reason: "temporary GDB settings await a known command outcome".into(),
+                    }) {
+                        Ok(()) => {
+                            let _ = response.send(result);
+                        }
+                        Err(error) => {
+                            let _ = response.send(Err(error));
+                        }
                     }
-                }
-                if let Some(error) = restoration_error {
+                } else if let Err(error) = self.run_restoration(&after, deadline).await {
                     let _ = self.apply_event(DomainEvent::ConsistencyDirty {
                         reason: format!("failed to restore temporary GDB settings: {error}"),
                     });
@@ -1394,6 +1412,10 @@ impl SessionWorker {
                 response,
             } => {
                 if let Err(error) = self.require_known_outcome(&command) {
+                    let _ = response.send(Err(error));
+                    return false;
+                }
+                if let Err(error) = self.restore_deferred_commands(deadline).await {
                     let _ = response.send(Err(error));
                     return false;
                 }
@@ -1415,7 +1437,13 @@ impl SessionWorker {
             }
             WorkerRequest::RefreshTargetCapabilities { response } => {
                 let result = match self.require_known_outcome_name("-list-target-features") {
-                    Ok(()) => self.refresh_target_capabilities().await,
+                    Ok(()) => match self
+                        .restore_deferred_commands(command_deadline(Duration::from_secs(5)))
+                        .await
+                    {
+                        Ok(()) => self.refresh_target_capabilities().await,
+                        Err(error) => Err(error),
+                    },
                     Err(error) => Err(error),
                 };
                 let _ = response.send(result);
@@ -1699,6 +1727,34 @@ impl SessionWorker {
         }
     }
 
+    async fn run_restoration(
+        &mut self,
+        commands: &[MiCommand],
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        for command in commands {
+            self.execute_until(command.clone(), deadline).await?;
+        }
+        Ok(())
+    }
+
+    async fn restore_deferred_commands(&mut self, deadline: tokio::time::Instant) -> Result<()> {
+        if self.deferred_restoration.is_empty() {
+            return Ok(());
+        }
+        let commands = self.deferred_restoration.clone();
+        self.run_restoration(&commands, deadline)
+            .await
+            .map_err(|error| {
+                Error::new(
+                    ErrorCode::ConsistencyDirty,
+                    format!("deferred GDB setting restoration failed: {error}"),
+                )
+            })?;
+        self.deferred_restoration.clear();
+        Ok(())
+    }
+
     fn require_known_outcome(&self, command: &MiCommand) -> Result<()> {
         self.require_known_outcome_name(&command.name)
     }
@@ -1756,20 +1812,21 @@ impl SessionWorker {
             Some(error) => Err(error),
             None => self.execute_until(command, deadline).await,
         };
-        let mut restoration_error = None;
-        for (setting, value) in originals {
-            if let Err(error) = self
-                .execute_until(
-                    MiCommand::new("-gdb-set")?.bare(setting)?.bare(value)?,
-                    deadline,
-                )
-                .await
-            {
-                restoration_error = Some(error);
-                break;
-            }
+        let restoration = originals
+            .into_iter()
+            .map(|(setting, value)| MiCommand::new("-gdb-set")?.bare(setting)?.bare(value))
+            .collect::<Result<Vec<_>>>()?;
+        // 2026-08-28: Restoring safety settings before a timed-out evaluate
+        // resolved could overlap its late result. Keep the restrictive values
+        // and restore them only after the unknown-outcome fence clears.
+        if !self.timed_out_tokens.is_empty() {
+            self.deferred_restoration = restoration;
+            self.apply_event(DomainEvent::ConsistencyDirty {
+                reason: "safe-evaluation settings await a known command outcome".into(),
+            })?;
+            return result;
         }
-        if let Some(error) = restoration_error {
+        if let Err(error) = self.run_restoration(&restoration, deadline).await {
             self.apply_event(DomainEvent::ConsistencyDirty {
                 reason: format!("failed to restore safe-evaluation settings: {error}"),
             })?;
@@ -2742,6 +2799,72 @@ mod tests {
         .await
         .unwrap();
         assert!(session.state().reconciliation_required);
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn safe_evaluate_restores_settings_after_a_late_result() {
+        if std::process::Command::new("gdb")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let mut config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        config.server.command_timeout_ms = 500;
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let session = SessionHandle::start(
+            Arc::new(config),
+            Profile::RawAdmin,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+
+        let error = session
+            .safe_evaluate(
+                MiCommand::new("-interpreter-exec")
+                    .unwrap()
+                    .bare("console")
+                    .unwrap()
+                    .string("shell sleep 1"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Timeout);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !session.state().outcome_unknown_tokens.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let restored = session
+            .command(
+                MiCommand::new("-gdb-show")
+                    .unwrap()
+                    .bare("may-write-memory")
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            MiResult::find_str(restored.record.results(), "value"),
+            Some("on")
+        );
         session.close().await.unwrap();
     }
 
