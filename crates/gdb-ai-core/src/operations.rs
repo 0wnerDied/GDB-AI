@@ -544,6 +544,44 @@ impl Gateway {
         }
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
+        let aslr = parameters.aslr.clone();
+        let disable_randomization = match aslr.as_str() {
+            "preserve" => "off",
+            "disable" => "on",
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "aslr must be preserve or disable",
+                ));
+            }
+        };
+        // 2026-08-29: GDB 9-10 evaluates ASLR support against the active
+        // target. Select native first, and accept its explicit unsupported
+        // result only when preserving the operating system's existing ASLR.
+        entry
+            .handle
+            .command(MiCommand::new("-target-select")?.bare("native")?)
+            .await?;
+        let aslr_managed = match entry
+            .handle
+            .command(
+                MiCommand::new("-gdb-set")?
+                    .bare("disable-randomization")?
+                    .bare(disable_randomization)?,
+            )
+            .await
+        {
+            Ok(_) => true,
+            Err(error)
+                if aslr == "preserve"
+                    && error.code == ErrorCode::GdbError
+                    && error.message.contains("randomization")
+                    && error.message.contains("unsupported") =>
+            {
+                false
+            }
+            Err(error) => return Err(error),
+        };
         let mut setup = vec![
             MiCommand::new("-file-exec-and-symbols")?
                 .string(program.as_os_str().as_encoded_bytes()),
@@ -580,20 +618,6 @@ impl Gateway {
         }
         setup.push(
             MiCommand::new("-gdb-set")?
-                .bare("disable-randomization")?
-                .bare(match parameters.aslr.as_str() {
-                    "preserve" => "off",
-                    "disable" => "on",
-                    _ => {
-                        return Err(Error::new(
-                            ErrorCode::InvalidArgument,
-                            "aslr must be preserve or disable",
-                        ));
-                    }
-                })?,
-        );
-        setup.push(
-            MiCommand::new("-gdb-set")?
                 .bare("follow-fork-mode")?
                 .bare(parameters.follow_fork)?,
         );
@@ -624,7 +648,8 @@ impl Gateway {
             "command": reply,
             "state": state,
             "capabilities": capabilities,
-            "start_policy": start_policy.as_str()
+            "start_policy": start_policy.as_str(),
+            "aslr": {"requested": aslr, "backend_managed": aslr_managed}
         }))
     }
 
