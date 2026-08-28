@@ -1,0 +1,21 @@
+[Unit]
+Description=GDB/MI agent debugging control plane
+After=local-fs.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=gdb-ai
+RuntimeDirectory=gdb-ai
+ExecStart=/usr/bin/gdb-ai --config /etc/gdb-ai/gdb-ai.toml serve --unix /run/gdb-ai/gdb-ai.sock
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

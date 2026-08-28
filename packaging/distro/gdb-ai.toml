@@ -1,0 +1,27 @@
+[server]
+max_sessions = 8
+command_timeout_ms = 5000
+wait_timeout_ms = 5000
+write_lease_ms = 30000
+unix_socket = "/run/gdb-ai/gdb-ai.sock"
+requests_per_second = 100
+request_burst = 200
+
+[gdb]
+path = "/usr/bin/gdb"
+preferred_mi = "mi4"
+fallback_mi = "mi3"
+
+[artifacts]
+path = "/var/lib/gdb-ai/artifacts"
+
+[persistence]
+sqlite = "/var/lib/gdb-ai/gdb-ai.sqlite"
+sessions = "/var/lib/gdb-ai/sessions"
+
+[security]
+default_profile = "debug_control"
+workspace_roots = ["/workspace"]
+remote_allowlist = []
+attach_allowlist = []
+sandbox = "auto"
