@@ -149,6 +149,7 @@ impl Gateway {
         let entry = Arc::new(SessionEntry {
             handle,
             owner: caller.identity.clone(),
+            target_state: tokio::sync::RwLock::new(()),
             mutation: tokio::sync::Mutex::new(()),
             out_of_band_mutation: tokio::sync::Mutex::new(()),
             lease: tokio::sync::Mutex::new(Some(lease.clone())),
@@ -1535,7 +1536,7 @@ impl Gateway {
                     };
                     let bytes = match address {
                         Ok(address) => {
-                            read_memory_bytes(&entry.handle, address, length, true).await
+                            read_memory_bytes(&entry.handle, state, address, length, true).await
                         }
                         Err(error) => Err(error),
                     };
@@ -1759,6 +1760,7 @@ impl Gateway {
         }
         let (bytes, evidence_seq) = read_memory_bytes(
             &entry.handle,
+            &state,
             parse_address(address.as_str())?,
             length,
             bool_value(&request.parameters, "allow_partial", false),
@@ -1813,11 +1815,13 @@ impl Gateway {
         }
         let (before, _) = read_memory_bytes(
             &entry.handle,
+            &state,
             parse_address(address.as_str())?,
             bytes.len(),
             false,
         )
         .await?;
+        require_same_execution_context(&entry.handle, &state)?;
         require_expected_bytes(&request.parameters, &before)?;
         let reply = entry
             .handle
@@ -1855,6 +1859,7 @@ impl Gateway {
         }
         let (bytes, evidence_seq) = read_memory_bytes(
             &entry.handle,
+            &state,
             parse_address(address.as_str())?,
             length,
             false,
@@ -1891,7 +1896,7 @@ impl Gateway {
             .clamp(1, 1_000) as usize;
         let start_number = parse_address(start.as_str())?;
         let (bytes, evidence_seq) =
-            read_memory_bytes(&entry.handle, start_number, length, true).await?;
+            read_memory_bytes(&entry.handle, &state, start_number, length, true).await?;
         let mut matches = bytes
             .windows(pattern.len())
             .enumerate()
@@ -4193,6 +4198,7 @@ fn memory_contents(record: &MiRecord) -> Result<Vec<u8>> {
 // hexadecimal text. Keep backend records bounded while preserving one API read.
 async fn read_memory_bytes(
     handle: &SessionHandle,
+    expected: &crate::domain::SessionState,
     start: u64,
     length: usize,
     allow_partial: bool,
@@ -4202,6 +4208,9 @@ async fn read_memory_bytes(
     let mut bytes = Vec::with_capacity(length);
     let mut evidence_seq = handle.state().event_seq;
     while bytes.len() < length {
+        // 2026-08-28: Chunked reads could resume after an interrupt at a new
+        // stop and concatenate bytes from different execution epochs.
+        require_same_execution_context(handle, expected)?;
         let chunk = (length - bytes.len()).min(CHUNK_BYTES);
         let address = start.checked_add(bytes.len() as u64).ok_or_else(|| {
             Error::new(
@@ -4218,9 +4227,14 @@ async fn read_memory_bytes(
             .await
         {
             Ok(reply) => reply,
-            Err(_) if allow_partial && !bytes.is_empty() => break,
+            Err(error)
+                if allow_partial && !bytes.is_empty() && error.code != ErrorCode::StaleContext =>
+            {
+                break;
+            }
             Err(error) => return Err(error),
         };
+        require_same_execution_context(handle, expected)?;
         evidence_seq = reply.evidence_seq;
         let part = memory_contents(&reply.record)?;
         let part_len = part.len();
@@ -4230,6 +4244,21 @@ async fn read_memory_bytes(
         }
     }
     Ok((bytes, evidence_seq))
+}
+
+fn require_same_execution_context(
+    handle: &SessionHandle,
+    expected: &crate::domain::SessionState,
+) -> Result<()> {
+    let current = handle.state();
+    if current.stop_id == expected.stop_id && current.execution_epoch == expected.execution_epoch {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorCode::StaleContext,
+            "target stop changed during composite operation",
+        ))
+    }
 }
 
 fn require_expected_bytes(parameters: &Value, actual: &[u8]) -> Result<()> {

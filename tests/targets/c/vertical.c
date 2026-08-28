@@ -3,7 +3,7 @@
 
 volatile int global_value = 7;
 struct pair { int left; int right; } global_pair = {1, 2};
-unsigned char large_buffer[131072] = {0x5a};
+unsigned char large_buffer[4 * 1024 * 1024] = {0x5a};
 
 __attribute__((noinline)) static void marker(void)
 {

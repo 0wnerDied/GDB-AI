@@ -36,6 +36,7 @@ impl Caller {
 pub(crate) struct SessionEntry {
     pub handle: SessionHandle,
     pub owner: String,
+    pub target_state: tokio::sync::RwLock<()>,
     pub mutation: Mutex<()>,
     pub out_of_band_mutation: Mutex<()>,
     pub lease: Mutex<Option<WriteLease>>,
@@ -324,6 +325,21 @@ impl Gateway {
             || request.method == "session.acquire_write_lease"
             || (request.method == "execution.control"
                 && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"));
+        // 2026-08-28: Composite reads previously released the actor between MI
+        // commands, allowing continue to mix multiple stops in one response.
+        // Normal mutations exclude stable observations; control remains preemptive.
+        let stable_observation =
+            effect == Effect::Read && requires_stable_target(&request.method) && !out_of_band;
+        let _target_observation_guard = match &entry {
+            Some(entry) if stable_observation => Some(entry.target_state.read().await),
+            _ => None,
+        };
+        let _target_mutation_guard = match &entry {
+            Some(entry) if effect != Effect::Read && !out_of_band => {
+                Some(entry.target_state.write().await)
+            }
+            _ => None,
+        };
         let _mutation_guard = if effect != Effect::Read {
             match &entry {
                 Some(entry) if out_of_band => Some(entry.out_of_band_mutation.lock().await),
@@ -333,6 +349,10 @@ impl Gateway {
         } else {
             None
         };
+        let observation_baseline = stable_observation.then(|| {
+            let state = entry.as_ref().unwrap().handle.state();
+            (state.stop_id, state.execution_epoch)
+        });
         if let Some(entry) = &entry {
             let mut state = entry.handle.state();
             // 2026-08-28: A timed-out MI mutation may still complete later.
@@ -409,7 +429,18 @@ impl Gateway {
             "accepted",
         )?;
 
-        let result = self.execute_method(request, caller).await;
+        let mut result = self.execute_method(request, caller).await;
+        if result.is_ok()
+            && let (Some(entry), Some((stop_id, execution_epoch))) = (&entry, observation_baseline)
+        {
+            let current = entry.handle.state();
+            if current.stop_id != stop_id || current.execution_epoch != execution_epoch {
+                result = Err(Error::new(
+                    ErrorCode::StaleContext,
+                    "target stop changed during observation",
+                ));
+            }
+        }
         let completed_entry = match (&entry, result.as_ref()) {
             (Some(entry), _) => Some(entry.clone()),
             (None, Ok(result)) if request.method == "session.create" => {
@@ -690,6 +721,26 @@ fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
         "session.get" | "session.transcript" | "session.event" | "session.close" | "artifact.get"
     ) || (request.method == "execution.control"
         && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"))
+}
+
+fn requires_stable_target(method: &str) -> bool {
+    matches!(
+        method,
+        "inspection.get"
+            | "inspection.snapshot"
+            | "inspection.batch"
+            | "value.evaluate"
+            | "value.create"
+            | "value.children"
+            | "value.update"
+            | "memory.read"
+            | "memory.search"
+            | "memory.compare"
+            | "register.read"
+            | "disassembly.read"
+            | "agent.hypothesis_check"
+            | "kernel.inspect"
+    )
 }
 
 fn idempotency_key(request: &ApiRequest, caller: &Caller) -> String {

@@ -620,12 +620,81 @@ async fn local_debugging_vertical_slice() {
             .await,
     );
 
+    let stable_memory = gateway.dispatch(
+        request(
+            "stable-memory",
+            Some(&session_id),
+            "memory.read",
+            None,
+            json!({
+                "address": large_address,
+                "length": 4 * 1024 * 1024,
+                "stop_id": second_stop
+            }),
+        ),
+        &caller,
+    );
+    let resume_and_interrupt = async {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        successful(
+            gateway
+                .dispatch(
+                    request(
+                        "race-resume",
+                        Some(&session_id),
+                        "execution.control",
+                        snapshot.revision,
+                        json!({
+                            "action": "continue",
+                            "lease_id": lease_id,
+                            "stop_id": second_stop
+                        }),
+                    ),
+                    &caller,
+                )
+                .await,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        successful(
+            gateway
+                .dispatch(
+                    request(
+                        "race-interrupt",
+                        Some(&session_id),
+                        "execution.control",
+                        None,
+                        json!({
+                            "action": "interrupt",
+                            "lease_id": lease_id,
+                            "accept_latest_revision": true,
+                            "wait": {"until": "snapshot", "timeout_ms": 5000}
+                        }),
+                    ),
+                    &caller,
+                )
+                .await,
+        )
+    };
+    let (stable_memory, stable_stop) = tokio::join!(stable_memory, resume_and_interrupt);
+    assert_eq!(
+        successful(stable_memory).result.unwrap()["read_length"],
+        4 * 1024 * 1024
+    );
+    let second_stop = stable_stop
+        .state
+        .as_ref()
+        .and_then(|state| state.stop_id.as_ref())
+        .unwrap()
+        .0
+        .clone();
+    let stable_revision = stable_stop.revision;
+
     let resume = gateway.dispatch(
         request(
             "resume-to-input",
             Some(&session_id),
             "execution.control",
-            snapshot.revision,
+            stable_revision,
             json!({
                 "action": "continue",
                 "lease_id": lease_id,
