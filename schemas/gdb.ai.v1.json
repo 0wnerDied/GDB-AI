@@ -395,7 +395,8 @@
               },
               "environment_mode": {
                 "enum": [
-                  "clean"
+                  "clean",
+                  "inherited"
                 ],
                 "type": "string"
               },

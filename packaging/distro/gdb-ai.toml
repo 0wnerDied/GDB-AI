@@ -26,4 +26,5 @@ default_profile = "debug_control"
 workspace_roots = ["/workspace"]
 remote_allowlist = []
 attach_allowlist = []
+environment_allowlist = []
 sandbox = "auto"

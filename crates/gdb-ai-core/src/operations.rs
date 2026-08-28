@@ -494,13 +494,18 @@ impl Gateway {
                 "program is required",
             ));
         }
-        if parameters.environment_mode != "clean" {
-            return Err(Error::new(
-                ErrorCode::Unsupported,
-                "only environment_mode=clean is supported securely",
-            ));
-        }
-        validate_environment(&parameters.environment)?;
+        let mut environment = match parameters.environment_mode.as_str() {
+            "clean" => BTreeMap::new(),
+            "inherited" => inherited_environment(&self.config.security.environment_allowlist)?,
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "environment_mode must be clean or inherited",
+                ));
+            }
+        };
+        environment.extend(parameters.environment);
+        validate_environment(&environment)?;
         validate_argv(&parameters.argv)?;
         // 2026-08-28: Launch canonicalized program before applying the
         // requested cwd, so an otherwise valid relative executable failed.
@@ -609,7 +614,7 @@ impl Gateway {
             };
         }
         setup.push(arguments);
-        for (name, value) in parameters.environment {
+        for (name, value) in environment {
             setup.push(
                 MiCommand::new("-gdb-set")?
                     .bare("environment")?
@@ -4170,6 +4175,23 @@ fn validate_environment(environment: &BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+fn inherited_environment(allowlist: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut environment = BTreeMap::new();
+    for name in allowlist {
+        let Some(value) = std::env::var_os(name) else {
+            continue;
+        };
+        let value = value.into_string().map_err(|_| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                format!("inherited environment variable {name:?} is not UTF-8"),
+            )
+        })?;
+        environment.insert(name.clone(), value);
+    }
+    Ok(environment)
+}
+
 fn validate_argv(arguments: &[String]) -> Result<()> {
     if arguments.len() > 256
         || arguments
@@ -5989,6 +6011,19 @@ mod tests {
             StartPolicy::None.command().unwrap().encoded(3),
             b"3-exec-run\n"
         );
+    }
+
+    #[test]
+    fn inherits_only_allowlisted_environment_variables() {
+        let path = std::env::var("PATH").unwrap();
+        let environment = inherited_environment(&[
+            "PATH".into(),
+            "GDB_AI_TEST_VARIABLE_THAT_DOES_NOT_EXIST".into(),
+        ])
+        .unwrap();
+
+        assert_eq!(environment.len(), 1);
+        assert_eq!(environment.get("PATH"), Some(&path));
     }
 
     #[test]

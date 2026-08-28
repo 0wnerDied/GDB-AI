@@ -65,7 +65,8 @@ section 52.2 for the controls, replay evidence, and observed limitations.
   redacted SQLite audit, WAL metadata, JSONL evidence, and reconciliation
 - MCP stdio, MCP Streamable HTTP, Unix socket, canonical JSON-RPC, Python SDK,
   TypeScript SDK, CLI operations, schema files, and Prometheus text metrics
-- Secure GDB startup, clean inferior environment, workspace path policy,
+- Secure GDB startup, clean or allowlisted inherited inferior environments,
+  workspace path policy,
   bubblewrap filesystem/network hardening when available, `no_new_privs`, and
   process rlimits; untrusted targets require an external container or VM
 - Optional SHA-256-pinned GDB Python MI extension and conditional kernel
