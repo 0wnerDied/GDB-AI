@@ -13,7 +13,9 @@ __attribute__((noinline)) static void marker(void)
 
 int main(void)
 {
-  alarm(30);
+  /* 2026-08-29: TCG can keep this fixture stopped for over 30 seconds.
+     Leave the alarm as a final guard without racing debugger deadlines. */
+  alarm(300);
   marker();
   (void) getchar();
   return global_value == 42 ? 0 : 1;
