@@ -18,19 +18,26 @@ The repository is independently versioned as `gdb-ai`; the executable is
 
 ## Verification status
 
-The 2026-08-29 implementation baseline `bec8b12` passed
-[required CI](https://github.com/0wnerDied/GDB-AI/actions/runs/33188007777):
-workspace tests, Clippy, Rust 1.88, schema hashes, both SDKs, three 60-second
-libFuzzer campaigns, and QEMU kernel tests using pinned Debian 6.1 and 6.12
-builds. Local GDB 17.1 also passed the full workspace and both kernel tests;
-required CI used GDB and gdbserver 15.1.
+The 2026-08-29 runtime baseline `a52e069` passed a local matrix built from
+checksum-pinned GNU releases: GDB 9.2-12.1 with MI3 and GDB 13.2-17.1 with
+MI4. Every version ran the same local-launch vertical test. The full locked
+workspace also passed with GDB/gdbserver 17.1, including native launch,
+attach, core, remote, Agent, state-service, and replay paths.
+
+A real AArch64 user-space path passed through `qemu-aarch64` RSP and
+`gdb-multiarch`, covering remote connection, a function breakpoint, resume,
+semantic PC/SP/FP/return/argument registers, and disassembly. Required CI
+[run 33188007777](https://github.com/0wnerDied/GDB-AI/actions/runs/33188007777)
+at baseline `bec8b12` separately passed workspace tests, Clippy, Rust 1.88,
+schema hashes, both SDKs, bounded fuzz campaigns, and pinned Debian 6.1 and
+6.12 kernel tests.
 
 The North-star code surface is implemented, but release qualification is not
-complete. The real GDB 9-14 and 16 compatibility cases, AArch64 end-to-end
-paths, chaos and 10,000-cycle soak gates, repeated Agent A/B/C/D evaluation,
-and release provenance remain open. See [compatibility
-status](docs/compatibility.md) and PLAN section 55. The `gdb.ai/v1` namespace
-does not turn an unexecuted matrix entry into support.
+complete. Remaining gates include targeted chaos, the 10,000-cycle soak,
+AArch64 native/core/kernel environments, repeated Agent A/B/C/D evaluation,
+and release provenance. See [compatibility status](docs/compatibility.md) and
+PLAN section 55. The `gdb.ai/v1` namespace does not turn an unexecuted matrix
+entry into support.
 
 A matched blind Sol xhigh pilot completed SUCTF 2026 `SU_minivfs` with both
 native GDB and GDB/AI. GDB/AI finished in 20:31 and native GDB in 24:56; one
@@ -78,6 +85,7 @@ inferior restoration after GDB death.
   `required` fails closed); it is not a complete untrusted-code sandbox
 - A C compiler for integration tests
 - Optional: gdbserver, Python-enabled GDB, Node.js 18 or newer
+- AArch64 integration: gdb-multiarch, qemu-user, and an AArch64 C compiler
 
 ## Build and verify
 

@@ -1774,17 +1774,18 @@ configured KGDB/QEMU target and symbols.
 
 Release verification commands and deployment assets are maintained in
 `README.md`, `packaging/`, `schemas/`, `fuzz/`, and `tests/`. The 10,000-cycle
-soak and the GDB 13-17/AArch64 matrix are release-environment qualification
-gates; a development host that lacks those binaries reports the missing gate
-instead of claiming it ran.
+soak and the remaining AArch64 native/core/kernel environments are release
+qualification gates; a development host that lacks those facilities reports
+the missing gate instead of claiming it ran.
 
 ## 55. Current progress and resume point
 
-The 2026-08-29 verified implementation baseline is `bec8b12`. Required CI
-run `33188007777` passed workspace tests, Clippy, Rust 1.88, schema hashes,
-both SDKs, three bounded libFuzzer campaigns, and two public Debian kernel
-jobs. Local GDB 17.1 passed the full workspace; CI GDB 15.1 provided an
-independent environment.
+The 2026-08-29 runtime baseline is `a52e069`. A local immutable-container
+matrix built checksum-pinned GDB 9.2-12.1 for MI3 and GDB 13.2-17.1 for MI4;
+all nine versions passed the same local-launch vertical test. Local GDB 17.1
+passed the full workspace. Required CI run `33188007777` at the earlier
+`bec8b12` baseline passed Clippy, Rust 1.88, schema hashes, both SDKs, bounded
+fuzz campaigns, and two public Debian kernel jobs.
 
 Completed correctness work includes:
 
@@ -1801,14 +1802,17 @@ Completed correctness work includes:
   on Debian 6.1 and 6.12 under QEMU;
 - required 60-second MI parser, MI framer, and state reducer fuzz campaigns
   with no crash or state invariant failure; and
+- real GDB 9.2-17.1 compatibility coverage across MI3 and MI4;
+- AArch64 qemu-user RSP coverage for break, run, semantic registers, and
+  disassembly; and
 - two blind native-GDB versus GDB/AI Agent pilots, including one matched pair
   that completed target-side flag reads with replay and isolation evidence.
 
 Release qualification continues from this baseline. Remaining gates, in
 dependency order, are:
 
-1. run real GDB 9-17 compatibility jobs and AArch64 end-to-end targets;
-2. run targeted chaos cases and the 10,000-cycle lifecycle soak;
+1. run targeted chaos cases and the 10,000-cycle lifecycle soak;
+2. qualify AArch64 native-host, core, gdbserver, and kernel environments;
 3. repeat the paired Agent A/B/C/D evaluation from section 52; and
 4. produce release-tag provenance and rerun the complete final matrix.
 

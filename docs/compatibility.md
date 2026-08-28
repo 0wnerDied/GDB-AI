@@ -14,8 +14,12 @@ unknown state-changing event taints consistency instead of being guessed.
 - Local GDB and gdbserver 17.1 passed the full locked workspace tests,
   including native launch, attach, core, gdbserver, raw reconciliation,
   tracked state, Agent operations, and public session lifecycle paths.
-- The fresh-process MI3 fallback path is tested, but has not yet run against
-  an actual GDB 9-12 binary.
+- A local Docker matrix built checksum-pinned GDB 9.2, 10.2, 11.2, and 12.1
+  for MI3 and GDB 13.2, 14.2, 15.2, 16.3, and 17.1 for MI4. Every version
+  passed the same local-launch vertical test.
+- AArch64 user-space debugging passed through qemu-user RSP and
+  gdb-multiarch, including a function breakpoint, resume, semantic register
+  roles, and disassembly.
 - QEMU TCG tests passed with checksum-pinned Debian 6.1.176 and 6.12.105
   x86-64 kernels. They exercise legacy `core_layout`, current
   `module_memory`, tasks, stacks, panic context, and allowlisted monitor
@@ -29,8 +33,7 @@ unknown state-changing event taints consistency instead of being guessed.
 
 ## Qualification still open
 
-- Real GDB 9-12 MI3 and GDB 13, 14, and 16 MI4 runs;
-- AArch64 user-space, remote, core, register-role, and kernel paths;
+- AArch64 native-host, core, gdbserver, and kernel paths;
 - delayed-result, disconnect, storage-failure, and noisy-I/O chaos runs;
 - the 10,000-cycle session lifecycle soak;
 - repeated paired Agent A/B/C/D effect evaluation; and
