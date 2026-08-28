@@ -1061,9 +1061,10 @@ impl Gateway {
             }
             command
         };
-        command = breakpoint_scope(command, &request.parameters, &entry.handle.state())?;
+        let state = entry.handle.state();
+        command = breakpoint_scope(command, &request.parameters, &state)?;
         if needs_location {
-            command = command.string(self.breakpoint_location(&request.parameters)?);
+            command = command.string(self.breakpoint_location(&request.parameters, &state)?);
         }
         let reply = entry.handle.command(command).await?;
         if let Some(fields) =
@@ -2667,7 +2668,7 @@ impl Gateway {
             validate_expression(condition)?;
             insert = insert.bare("-c")?.string(condition);
         }
-        insert = insert.string(self.breakpoint_location(&request.parameters)?);
+        insert = insert.string(self.breakpoint_location(&request.parameters, &initial)?);
         let inserted = entry.handle.command(insert).await?;
         let backend_number = breakpoint_number_from_record(&inserted.record)?;
         let mut operation = OperationRecord {
@@ -3770,7 +3771,11 @@ impl Gateway {
         }))
     }
 
-    fn breakpoint_location(&self, parameters: &Value) -> Result<String> {
+    fn breakpoint_location(
+        &self,
+        parameters: &Value,
+        state: &crate::domain::SessionState,
+    ) -> Result<String> {
         let location = parameters.get("location").unwrap_or(parameters);
         if let Some(source) = location.get("source") {
             // 2026-08-28: Source breakpoints previously bypassed workspace
@@ -3781,6 +3786,18 @@ impl Gateway {
                 path.to_string_lossy(),
                 unsigned(source, "line")?
             ));
+        }
+        if let Some(module_offset) = location.get("module_offset") {
+            let module = string(module_offset, "module")?;
+            let offset = crate::domain::Address::parse(&string(module_offset, "offset")?)?;
+            let offset = u64::from_str_radix(&offset.as_str()[2..], 16)
+                .map_err(|_| Error::new(ErrorCode::InvalidArgument, "invalid module offset"))?;
+            // 2026-08-28: GDB does not report a loader-launched stripped PIE
+            // as a shared library, so `module+offset` remained pending. The
+            // existing local mapping provider supplies the actual load bias.
+            if let Some(address) = live_module_offset(state, &module, offset)? {
+                return Ok(format!("*{address}"));
+            }
         }
         breakpoint_location(parameters)
     }
@@ -4711,12 +4728,68 @@ fn parse_proc_map(line: &str) -> Option<Value> {
     let offset = fields.next()?;
     let device = fields.next()?;
     let inode = fields.next()?.parse::<u64>().ok()?;
-    let path = fields.next().unwrap_or("");
+    // 2026-08-28: splitn leaves the maps column padding in its final field;
+    // returning that padding broke exact path comparison and module lookup.
+    let path = fields.next().unwrap_or("").trim_start();
     Some(json!({
         "start": format!("0x{start}"), "end": format!("0x{end}"),
         "permissions": permissions, "offset": format!("0x{offset}"),
         "device": device, "inode": inode, "path": path, "source": "linux-proc"
     }))
+}
+
+fn live_module_offset(
+    state: &crate::domain::SessionState,
+    module: &str,
+    offset: u64,
+) -> Result<Option<String>> {
+    if !matches!(
+        state.target_origin,
+        TargetOrigin::Local | TargetOrigin::Attach
+    ) {
+        return Ok(None);
+    }
+    let Some(pid) = state.inferiors.values().find_map(|inferior| inferior.pid) else {
+        return Ok(None);
+    };
+    let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {
+        return Ok(None);
+    };
+    module_offset_from_maps(&maps, module, offset)
+}
+
+fn module_offset_from_maps(maps: &str, module: &str, offset: u64) -> Result<Option<String>> {
+    let requested_name = Path::new(module).file_name();
+    for mapping in maps.lines().filter_map(parse_proc_map) {
+        let path = mapping["path"].as_str().unwrap_or("");
+        if path != module && requested_name != Path::new(path).file_name() {
+            continue;
+        }
+        let Some(start) = mapping["start"]
+            .as_str()
+            .and_then(|value| u64::from_str_radix(value.trim_start_matches("0x"), 16).ok())
+        else {
+            continue;
+        };
+        let Some(file_offset) = mapping["offset"]
+            .as_str()
+            .and_then(|value| u64::from_str_radix(value.trim_start_matches("0x"), 16).ok())
+        else {
+            continue;
+        };
+        let Some(address) = start
+            .checked_sub(file_offset)
+            .and_then(|base| base.checked_add(offset))
+        else {
+            continue;
+        };
+        return Ok(Some(
+            crate::domain::Address::parse(&format!("0x{address:x}"))?
+                .as_str()
+                .to_owned(),
+        ));
+    }
+    Ok(None)
 }
 
 fn result_text(record: &MiRecord, name: &str) -> Option<String> {
@@ -5696,6 +5769,22 @@ mod tests {
         assert_eq!(
             StartPolicy::None.command().unwrap().encoded(3),
             b"3-exec-run\n"
+        );
+    }
+
+    #[test]
+    fn resolves_stripped_pie_module_offsets_from_proc_maps() {
+        let maps = concat!(
+            "555555554000-555555555000 r--p 00000000 00:21 1 /tmp/mini_vfs\n",
+            "555555555000-555555557000 r-xp 00001000 00:21 1 /tmp/mini_vfs\n",
+        );
+        assert_eq!(
+            module_offset_from_maps(maps, "mini_vfs", 0x1c9c).unwrap(),
+            Some("0x0000555555555c9c".into())
+        );
+        assert_eq!(
+            module_offset_from_maps(maps, "other", 0x1c9c).unwrap(),
+            None
         );
     }
 

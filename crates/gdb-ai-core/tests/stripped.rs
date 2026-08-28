@@ -88,6 +88,79 @@ async fn stops_at_the_first_instruction_without_symbols() {
         )
         .await;
     assert!(launched.error.is_none(), "{:?}", launched.error);
-    assert!(launched.state.as_ref().unwrap().stop_id.is_some());
+    let state = launched.state.as_ref().unwrap();
+    let stop_id = state.stop_id.as_ref().unwrap();
+    let pc = state
+        .inferiors
+        .values()
+        .flat_map(|inferior| inferior.threads.values())
+        .find_map(|thread| thread.frame.as_ref()?.address.as_deref())
+        .map(|address| u64::from_str_radix(address.trim_start_matches("0x"), 16).unwrap())
+        .unwrap();
+    let mappings = gateway
+        .dispatch(
+            request(
+                "mappings",
+                Some(&session_id),
+                "inspection.get",
+                None,
+                json!({"view": "mappings", "stop_id": stop_id}),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(mappings.error.is_none(), "{:?}", mappings.error);
+    let base = mappings.result.as_ref().unwrap()["mappings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mapping| mapping["path"] == executable.to_string_lossy().as_ref())
+        .map(|mapping| {
+            let start = u64::from_str_radix(
+                mapping["start"].as_str().unwrap().trim_start_matches("0x"),
+                16,
+            )
+            .unwrap();
+            let offset = u64::from_str_radix(
+                mapping["offset"].as_str().unwrap().trim_start_matches("0x"),
+                16,
+            )
+            .unwrap();
+            start - offset
+        })
+        .unwrap();
+    let breakpoint = gateway
+        .dispatch(
+            request(
+                "module-offset-breakpoint",
+                Some(&session_id),
+                "breakpoint.create",
+                launched.revision,
+                json!({
+                    "lease_id": lease_id,
+                    "module_offset": {
+                        "module": "stripped",
+                        "offset": format!("0x{:x}", pc - base)
+                    }
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(breakpoint.error.is_none(), "{:?}", breakpoint.error);
+    assert!(
+        breakpoint.result.as_ref().unwrap()["breakpoints"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|breakpoint| {
+                !breakpoint["pending"].as_bool().unwrap()
+                    && breakpoint["locations"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|location| location["address"] == format!("0x{pc:016x}"))
+            })
+    );
     gateway.shutdown().await;
 }
