@@ -2160,30 +2160,42 @@ impl Gateway {
                 "register value must be a decimal or hexadecimal integer",
             ));
         }
-        let names_reply = entry
+        // 2026-08-28: Register compare/write evidence previously released the
+        // command sequence between MI requests, so another command could alter
+        // the register before the recorded after-value. Keep it one observation.
+        let (register, before, write, after) = entry
             .handle
-            .command(MiCommand::new("-data-list-register-names")?)
-            .await?;
-        let names = result_string_list(&names_reply.record, "register-names");
-        let register = resolve_register_name(&requested, &names)?;
-        let read = |expression: String| {
-            context_options(
-                MiCommand::new("-data-evaluate-expression")?.string(expression),
-                &request.parameters,
+            .stable_observation(
                 &state,
+                Box::pin(async {
+                    let names_reply = entry
+                        .handle
+                        .command(MiCommand::new("-data-list-register-names")?)
+                        .await?;
+                    let names = result_string_list(&names_reply.record, "register-names");
+                    let register = resolve_register_name(&requested, &names)?;
+                    let read = |expression: String| {
+                        context_options(
+                            MiCommand::new("-data-evaluate-expression")?.string(expression),
+                            &request.parameters,
+                            &state,
+                        )
+                    };
+                    let before = entry.handle.command(read(format!("${register}"))?).await?;
+                    let write = entry
+                        .handle
+                        .command(read(format!("${register}={value}"))?)
+                        .await?;
+                    let after = entry.handle.command(read(format!("${register}"))?).await?;
+                    entry
+                        .handle
+                        .record_event(DomainEvent::RegisterChanged {
+                            register: register.clone(),
+                        })
+                        .await?;
+                    Ok((register, before, write, after))
+                }),
             )
-        };
-        let before = entry.handle.command(read(format!("${register}"))?).await?;
-        let write = entry
-            .handle
-            .command(read(format!("${register}={value}"))?)
-            .await?;
-        let after = entry.handle.command(read(format!("${register}"))?).await?;
-        entry
-            .handle
-            .record_event(DomainEvent::RegisterChanged {
-                register: register.clone(),
-            })
             .await?;
         Ok(json!({
             "register": register,
