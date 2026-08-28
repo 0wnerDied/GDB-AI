@@ -3537,7 +3537,15 @@ fn required_session(request: &ApiRequest) -> Result<&str> {
 }
 
 fn parameters<T: for<'de> Deserialize<'de>>(request: &ApiRequest) -> Result<T> {
-    serde_json::from_value(request.parameters.clone())
+    let mut parameters = request.parameters.clone();
+    // 2026-08-28: Strict operation structs rejected the lease and revision
+    // controls that the shared Gateway contract adds to every parameter map.
+    // Consume those transport controls before decoding operation-owned fields.
+    if let Some(parameters) = parameters.as_object_mut() {
+        parameters.remove("lease_id");
+        parameters.remove("accept_latest_revision");
+    }
+    serde_json::from_value(parameters)
         .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))
 }
 
@@ -5219,5 +5227,30 @@ mod tests {
             focused.encoded(2),
             b"2-data-evaluate-expression --thread 2 --frame 0 \"$pc\"\n"
         );
+    }
+
+    #[test]
+    fn strict_operation_parameters_ignore_gateway_controls() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct StrictParameters {
+            stop: StartPolicy,
+        }
+
+        let request = ApiRequest {
+            api_version: crate::protocol::API_VERSION.into(),
+            request_id: "strict-parameters".into(),
+            session_id: Some("sess_test".into()),
+            method: CanonicalMethod::TargetRestart,
+            expected_revision: Some(1),
+            idempotency_key: None,
+            parameters: json!({
+                "stop": "main",
+                "lease_id": "lease_test",
+                "accept_latest_revision": true
+            }),
+        };
+        let decoded: StrictParameters = parameters(&request).unwrap();
+        assert_eq!(decoded.stop.as_str(), "main");
     }
 }
