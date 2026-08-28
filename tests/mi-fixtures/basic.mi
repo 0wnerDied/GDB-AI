@@ -1,0 +1,7 @@
+1^done,features=["frozen-varobjs","pending-breakpoints"]
+=thread-group-added,id="i1"
+=thread-created,id="1",group-id="i1"
+2^running
+*running,thread-id="all"
+*stopped,reason="breakpoint-hit",thread-id="1",thread-group="i1",frame={addr="0x0000000000401000",func="main",file="main.c",fullname="/workspace/main.c",line="7"}
+(gdb)

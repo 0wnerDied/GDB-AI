@@ -1,0 +1,5 @@
+7^future,known="value",future={duplicate="1",duplicate="2"}
+=future-notification,new-field=[item={value="x"}]
+~"console\n"
+@"\377binary"
+(gdb)
