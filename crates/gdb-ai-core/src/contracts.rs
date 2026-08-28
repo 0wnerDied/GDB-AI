@@ -46,21 +46,25 @@ impl ParameterKind {
         }
     }
 
-    fn description(self) -> &'static str {
+    fn description(self) -> String {
         match self {
-            Self::String => "a string",
-            Self::Boolean => "a boolean",
-            Self::Unsigned => "an unsigned integer",
-            Self::Positive => "a positive integer",
-            Self::Object => "an object",
-            Self::Array => "an array",
-            Self::StringArray => "an array of strings",
-            Self::Shape(_) => "a supported object",
-            Self::ArrayOf(_) => "an array of supported values",
-            Self::MapOf(_) => "an object with supported values",
-            Self::OneOf(_) => "one supported shape",
-            Self::BooleanOrEnum(_) => "a boolean or supported string",
-            Self::Enum(_) => "a supported string",
+            Self::String => "a string".into(),
+            Self::Boolean => "a boolean".into(),
+            Self::Unsigned => "an unsigned integer".into(),
+            Self::Positive => "a positive integer".into(),
+            Self::Object => "an object".into(),
+            Self::Array => "an array".into(),
+            Self::StringArray => "an array of strings".into(),
+            Self::Shape(_) => "a supported object".into(),
+            Self::ArrayOf(_) => "an array of supported values".into(),
+            Self::MapOf(_) => "an object with supported values".into(),
+            Self::OneOf(_) => "one supported shape".into(),
+            // 2026-08-28: Generic enum errors forced Agents to guess values
+            // already known by the canonical contract.
+            Self::BooleanOrEnum(values) => {
+                format!("a boolean or one of {}", values.join(", "))
+            }
+            Self::Enum(values) => format!("one of {}", values.join(", ")),
         }
     }
 
@@ -821,5 +825,18 @@ mod tests {
             CanonicalMethod::TargetLaunch.parameter_schema()["properties"]["wait"]["additionalProperties"],
             false
         );
+    }
+
+    #[test]
+    fn enum_errors_list_allowed_values() {
+        let stream = CanonicalMethod::InferiorIoRead
+            .validate_parameters(&json!({"stream": "combined"}))
+            .unwrap_err();
+        assert!(stream.message.contains("pty, target, console, log"));
+
+        let side_effects = CanonicalMethod::ValueEvaluate
+            .validate_parameters(&json!({"expression": "$rax", "side_effects": "forbid"}))
+            .unwrap_err();
+        assert!(side_effects.message.contains("one of deny"));
     }
 }
