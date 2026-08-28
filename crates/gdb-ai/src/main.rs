@@ -42,6 +42,31 @@ const MAX_PENDING_REQUESTS: usize = 128;
 type AnyError = Box<dyn StdError + Send + Sync>;
 type RpcOutput = (Option<String>, Value);
 
+#[derive(Clone, Copy)]
+enum CancelMode {
+    DetachWaiter,
+    InterruptTarget,
+    CloseSession,
+}
+
+#[derive(Clone)]
+struct RequestCancellation {
+    mode: CancelMode,
+    session_id: Option<String>,
+    lease_id: Option<String>,
+}
+
+struct StreamPending {
+    waiter: JoinHandle<()>,
+    cancellation: RequestCancellation,
+}
+
+#[derive(Clone)]
+struct HttpPending {
+    waiter: Option<tokio::task::AbortHandle>,
+    cancellation: RequestCancellation,
+}
+
 #[derive(Parser)]
 #[command(name = "gdb-ai", version, about)]
 struct Cli {
@@ -525,7 +550,7 @@ where
 {
     let sequence = Arc::new(AtomicU64::new(1));
     let mut phase = Phase::New;
-    let mut pending: HashMap<String, JoinHandle<()>> = HashMap::new();
+    let mut pending: HashMap<String, StreamPending> = HashMap::new();
     let mut input_open = true;
     let (responses, mut response_rx) = mpsc::channel::<RpcOutput>(128);
     let mut input = BufReader::new(input);
@@ -570,7 +595,15 @@ where
                 let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
 
                 if id.is_none() {
-                    handle_notification(method, &params, &mut phase, &mut pending);
+                    handle_notification(
+                        method,
+                        &params,
+                        &mut phase,
+                        &mut pending,
+                        &gateway,
+                        &caller,
+                        &sequence,
+                    );
                     continue;
                 }
                 let id = id.unwrap();
@@ -596,6 +629,13 @@ where
                     write_rpc(&mut output, rpc_error(id, -32600, "duplicate request id or too many pending requests")).await?;
                     continue;
                 }
+                let cancellation = match request_cancellation(method, &params) {
+                    Ok(cancellation) => cancellation,
+                    Err(error) => {
+                        write_rpc(&mut output, rpc_fault(id, error)).await?;
+                        continue;
+                    }
+                };
                 let gateway = gateway.clone();
                 let caller = caller.clone();
                 let responses = responses.clone();
@@ -620,7 +660,13 @@ where
                     };
                     let _ = responses.send((Some(task_key), response)).await;
                 });
-                pending.insert(key, handle);
+                pending.insert(
+                    key,
+                    StreamPending {
+                        waiter: handle,
+                        cancellation,
+                    },
+                );
             }
             Some((key, response)) = response_rx.recv() => {
                 if let Some(key) = key {
@@ -631,8 +677,8 @@ where
         }
     }
 
-    for task in pending.into_values() {
-        task.abort();
+    for request in pending.into_values() {
+        request.waiter.abort();
     }
     Ok(())
 }
@@ -708,7 +754,7 @@ struct HttpState {
 struct HttpClient {
     phase: Phase,
     caller: Caller,
-    pending: HashMap<String, Option<tokio::task::AbortHandle>>,
+    pending: HashMap<String, HttpPending>,
     last_active: Instant,
 }
 
@@ -874,9 +920,9 @@ async fn http_mcp(
                 client.phase = Phase::Ready;
             } else if method == "notifications/cancelled"
                 && let Some(id) = params.get("requestId")
-                && let Some(handle) = client.pending.remove(&request_key(id)).flatten()
+                && let Some(pending) = client.pending.remove(&request_key(id))
             {
-                handle.abort();
+                cancel_http_waiter(&state, client.caller.clone(), pending);
             }
         }
         return StatusCode::ACCEPTED.into_response();
@@ -895,13 +941,23 @@ async fn http_mcp(
         );
     }
     let key = request_key(&id);
+    let cancellation = match request_cancellation(method, &params) {
+        Ok(cancellation) => cancellation,
+        Err(error) => return json_http_response(rpc_fault(id, error), Some(session_id)),
+    };
     let reserved = {
         let mut sessions = state.sessions.write().await;
         sessions.get_mut(session_id).is_some_and(|client| {
             if client.pending.contains_key(&key) || client.pending.len() >= MAX_PENDING_REQUESTS {
                 false
             } else {
-                client.pending.insert(key.clone(), None);
+                client.pending.insert(
+                    key.clone(),
+                    HttpPending {
+                        waiter: None,
+                        cancellation,
+                    },
+                );
                 true
             }
         })
@@ -939,8 +995,8 @@ async fn http_mcp(
         sessions
             .get_mut(session_id)
             .and_then(|client| client.pending.get_mut(&key))
-            .is_some_and(|slot| {
-                *slot = Some(task.abort_handle());
+            .is_some_and(|pending| {
+                pending.waiter = Some(task.abort_handle());
                 true
             })
     };
@@ -957,7 +1013,7 @@ async fn http_mcp(
     }
     let response = match task.await {
         Ok(response) => response,
-        Err(error) if error.is_cancelled() => rpc_error(id, -32800, "request cancelled"),
+        Err(error) if error.is_cancelled() => rpc_error(id, -32800, "request waiter cancelled"),
         Err(error) => rpc_error(id, -32603, error.to_string()),
     };
     if let Some(client) = state.sessions.write().await.get_mut(session_id) {
@@ -982,8 +1038,10 @@ fn evict_expired_http_clients(
         let active =
             !client.pending.is_empty() || now.duration_since(client.last_active) < idle_timeout;
         if !active {
-            for handle in client.pending.values().flatten() {
-                handle.abort();
+            for pending in client.pending.values() {
+                if let Some(waiter) = &pending.waiter {
+                    waiter.abort();
+                }
             }
         }
         active
@@ -1003,8 +1061,10 @@ async fn http_delete(State(state): State<HttpState>, headers: HeaderMap) -> Resp
     let Some(client) = state.sessions.write().await.remove(session_id) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    for handle in client.pending.into_values().flatten() {
-        handle.abort();
+    for pending in client.pending.into_values() {
+        if let Some(waiter) = pending.waiter {
+            waiter.abort();
+        }
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1116,7 +1176,10 @@ fn handle_notification(
     method: &str,
     params: &Value,
     phase: &mut Phase,
-    pending: &mut HashMap<String, JoinHandle<()>>,
+    pending: &mut HashMap<String, StreamPending>,
+    gateway: &Arc<Gateway>,
+    caller: &Caller,
+    sequence: &Arc<AtomicU64>,
 ) {
     match method {
         "notifications/initialized" if *phase == Phase::AwaitingInitialized => {
@@ -1124,13 +1187,117 @@ fn handle_notification(
         }
         "notifications/cancelled" => {
             if let Some(id) = params.get("requestId")
-                && let Some(task) = pending.remove(&request_key(id))
+                && let Some(request) = pending.remove(&request_key(id))
             {
-                task.abort();
+                request.waiter.abort();
+                apply_cancel_mode(
+                    gateway.clone(),
+                    caller.clone(),
+                    sequence.clone(),
+                    request.cancellation,
+                );
             }
         }
         _ => {}
     }
+}
+
+fn cancel_http_waiter(state: &HttpState, caller: Caller, pending: HttpPending) {
+    if let Some(waiter) = pending.waiter {
+        waiter.abort();
+    }
+    apply_cancel_mode(
+        state.gateway.clone(),
+        caller,
+        state.sequence.clone(),
+        pending.cancellation,
+    );
+}
+
+fn apply_cancel_mode(
+    gateway: Arc<Gateway>,
+    caller: Caller,
+    sequence: Arc<AtomicU64>,
+    cancellation: RequestCancellation,
+) {
+    // 2026-08-28: MCP cancellation only aborted the response waiter while
+    // presenting no explicit way to interrupt or close the target operation.
+    let Some(session_id) = cancellation.session_id else {
+        return;
+    };
+    let Some(lease_id) = cancellation.lease_id else {
+        return;
+    };
+    let (method, parameters) = match cancellation.mode {
+        CancelMode::DetachWaiter => return,
+        CancelMode::InterruptTarget => (
+            "execution.control",
+            json!({
+                "action": "interrupt",
+                "lease_id": lease_id,
+                "accept_latest_revision": true
+            }),
+        ),
+        CancelMode::CloseSession => (
+            "session.close",
+            json!({"lease_id": lease_id, "accept_latest_revision": true}),
+        ),
+    };
+    tokio::spawn(async move {
+        let response = gateway
+            .dispatch(
+                ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: format!("cancel_{}", sequence.fetch_add(1, Ordering::Relaxed)),
+                    session_id: Some(session_id),
+                    method: method.into(),
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters,
+                },
+                &caller,
+            )
+            .await;
+        if let Some(error) = response.error {
+            tracing::warn!(code = ?error.code, message = %error.message, "request cancellation action failed");
+        }
+    });
+}
+
+fn request_cancellation(method: &str, params: &Value) -> Result<RequestCancellation, RpcFault> {
+    let parameters = match method {
+        "tools/call" => params.get("arguments").unwrap_or(&Value::Null),
+        "gdb.ai/call" => params,
+        _ => &Value::Null,
+    };
+    let mode = match parameters
+        .get("cancel_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("detach_waiter")
+    {
+        "detach_waiter" => CancelMode::DetachWaiter,
+        "interrupt_target" => CancelMode::InterruptTarget,
+        "close_session" => CancelMode::CloseSession,
+        _ => return Err(RpcFault::invalid("unsupported cancel_mode")),
+    };
+    let session_id = parameters
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let lease_id = parameters
+        .get("lease_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if !matches!(mode, CancelMode::DetachWaiter) && (session_id.is_none() || lease_id.is_none()) {
+        return Err(RpcFault::invalid(
+            "interrupt_target and close_session require session_id and lease_id",
+        ));
+    }
+    Ok(RequestCancellation {
+        mode,
+        session_id,
+        lease_id,
+    })
 }
 
 async fn dispatch_rpc(
@@ -1190,6 +1357,7 @@ fn map_tool(name: &str, arguments: Value, sequence: u64) -> Result<ApiRequest, R
     let session_id = take_string(&mut parameters, "session_id")?;
     let expected_revision = take_u64(&mut parameters, "expected_revision")?;
     let idempotency_key = take_string(&mut parameters, "idempotency_key")?;
+    let _ = take_string(&mut parameters, "cancel_mode")?;
     let method = match name {
         "gdb_session" => match take_required_string(&mut parameters, "action")?.as_str() {
             "create" => "session.create",
@@ -2067,6 +2235,10 @@ fn schema<const N: usize>(required: &[&str], fields: [(&str, Value); N]) -> Valu
             "idempotency_key".into(),
             json!({"type": "string", "maxLength": 256}),
         ),
+        (
+            "cancel_mode".into(),
+            enum_schema(&["detach_waiter", "interrupt_target", "close_session"]),
+        ),
     ]);
     properties.extend(fields.into_iter().map(|(name, value)| (name.into(), value)));
     json!({
@@ -2244,6 +2416,7 @@ mod tests {
                 "action": "continue",
                 "session_id": "sess_test",
                 "expected_revision": 7,
+                "cancel_mode": "interrupt_target",
                 "stop_id": "stop_test",
                 "wait": {"until": "snapshot", "timeout_ms": 1000}
             }),
@@ -2255,6 +2428,20 @@ mod tests {
         assert_eq!(request.expected_revision, Some(7));
         assert_eq!(request.parameters["action"], "continue");
         assert!(request.parameters.get("session_id").is_none());
+        assert!(request.parameters.get("cancel_mode").is_none());
+        let cancellation = request_cancellation(
+            "tools/call",
+            &json!({
+                "arguments": {
+                    "session_id": "sess_test",
+                    "lease_id": "lease_test",
+                    "cancel_mode": "interrupt_target"
+                }
+            }),
+        )
+        .unwrap();
+        assert!(matches!(cancellation.mode, CancelMode::InterruptTarget));
+        assert_eq!(cancellation.session_id.as_deref(), Some("sess_test"));
         assert!(!tool_names(false).contains(&"gdb_raw"));
         assert!(tool_names(true).contains(&"gdb_raw"));
         assert!(!valid_request_id(&Value::String("x".repeat(129))));
