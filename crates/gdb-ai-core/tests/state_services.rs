@@ -300,6 +300,22 @@ async fn tracked_state_lifecycle_round_trips() {
         ),
     )
     .await;
+    let legacy_eof = call(
+        &gateway,
+        &caller,
+        request(
+            "legacy-eof",
+            Some(&session_id),
+            "inferior_io.close_stdin",
+            input.revision,
+            json!({"lease_id": lease_id}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        legacy_eof.result.as_ref().unwrap(),
+        &json!({"sent": true, "closed": false, "mechanism": "pty_veof"})
+    );
     let next_stop = call(
         &gateway,
         &caller,
@@ -307,7 +323,7 @@ async fn tracked_state_lifecycle_round_trips() {
             "continue-after-marker",
             Some(&session_id),
             "execution.control",
-            input.revision,
+            legacy_eof.revision,
             json!({
                 "action": "continue",
                 "lease_id": lease_id,
