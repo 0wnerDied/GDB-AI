@@ -223,6 +223,48 @@ async fn local_debugging_vertical_slice() {
     );
     assert_eq!(minimal_snapshot.result.unwrap()["stop_id"], first_stop);
 
+    let event_wait = gateway.dispatch(
+        request(
+            "event-wait",
+            Some(&session_id),
+            "events.wait",
+            None,
+            json!({
+                "after_event_seq": launched.state.as_ref().unwrap().event_seq,
+                "timeout_ms": 1000
+            }),
+        ),
+        &caller,
+    );
+    let resize = async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        gateway
+            .dispatch(
+                request(
+                    "resize",
+                    Some(&session_id),
+                    "inferior_io.resize",
+                    launched.revision,
+                    json!({
+                        "lease_id": lease_id,
+                        "rows": 40,
+                        "columns": 120
+                    }),
+                ),
+                &caller,
+            )
+            .await
+    };
+    let (event, resized) = tokio::join!(event_wait, resize);
+    let event = successful(event);
+    let resized = successful(resized);
+    assert!(
+        event.result.as_ref().unwrap()["event_seq"]
+            .as_u64()
+            .is_some_and(|seq| seq > launched.state.as_ref().unwrap().event_seq)
+    );
+    assert_eq!(resized.result.as_ref().unwrap()["rows"], 40);
+
     let breakpoint = successful(
         gateway
             .dispatch(
@@ -230,7 +272,7 @@ async fn local_debugging_vertical_slice() {
                     "breakpoint",
                     Some(&session_id),
                     "breakpoint.create",
-                    launched.revision,
+                    resized.revision,
                     json!({"lease_id": lease_id, "location": {"function": "marker"}}),
                 ),
                 &caller,

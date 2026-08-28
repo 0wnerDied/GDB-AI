@@ -3053,6 +3053,10 @@ impl Gateway {
             .get("after_event_seq")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        // 2026-08-28: Reading state before subscribing lost an event emitted
+        // in the gap and left a waiter blocked until timeout. Subscribe first,
+        // then use state as the coalescing check for that race window.
+        let mut events = entry.handle.subscribe();
         let current = entry.handle.state();
         if current.event_seq > after {
             return Ok(json!({ "state": current, "coalesced": true }));
@@ -3068,7 +3072,6 @@ impl Gateway {
                 "event timeout must be between 1 and 300000 ms",
             ));
         }
-        let mut events = entry.handle.subscribe();
         let event = tokio::time::timeout(Duration::from_millis(timeout_ms), events.recv())
             .await
             .map_err(|_| Error::new(ErrorCode::Timeout, "event wait timed out").retryable())?
