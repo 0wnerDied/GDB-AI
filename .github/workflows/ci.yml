@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - name: Install debugger prerequisites
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap gdb gdbserver gcc
+      - name: Install minimum Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Rust tests
+        run: cargo test --locked --workspace --all-targets
+      - name: Run Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Check minimum Rust version
+        run: cargo +1.88.0 check --locked --workspace --all-targets
+      - name: Verify schemas
+        run: cd schemas && sha256sum -c SHA256SUMS
+      - name: Verify Python sources
+        run: python3 -m compileall -q gdb-extension sdk/python benchmarks/python
+      - name: Build TypeScript SDK
+        run: npm --prefix sdk/typescript ci && npm --prefix sdk/typescript run build
+      - name: Check fuzz targets
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
