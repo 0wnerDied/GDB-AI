@@ -602,7 +602,7 @@ impl Gateway {
                 "PID is not in security.attach_allowlist",
             ));
         }
-        validate_attach_target(pid)?;
+        let target_identity = validate_attach_target(pid)?;
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
         if let Some(executable) = request.parameters.get("executable").and_then(Value::as_str) {
@@ -615,10 +615,21 @@ impl Gateway {
                 )
                 .await?;
         }
+        // 2026-08-28: PID ownership was checked before optional setup, leaving
+        // time for exit and PID reuse before GDB attached. Revalidate the
+        // process identity immediately before and after the numeric attach.
+        target_identity.revalidate(pid)?;
         let reply = entry
             .handle
             .command(MiCommand::new("-target-attach")?.bare(pid.to_string())?)
             .await?;
+        if let Err(error) = target_identity.revalidate(pid) {
+            let _ = entry
+                .handle
+                .command(MiCommand::new("-target-detach")?)
+                .await;
+            return Err(error);
+        }
         entry
             .handle
             .record_event(DomainEvent::TargetConfigured {
@@ -4771,10 +4782,33 @@ fn remote_endpoint(parameters: &Value) -> Result<String> {
         })
 }
 
-fn validate_attach_target(pid: u64) -> Result<()> {
+#[derive(Clone, Copy)]
+struct AttachIdentity {
+    start_time_ticks: u64,
+}
+
+impl AttachIdentity {
+    fn revalidate(self, pid: u64) -> Result<()> {
+        if process_start_time(pid)? == self.start_time_ticks {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::Conflict,
+                "attach target identity changed before attach completed",
+            ))
+        }
+    }
+}
+
+fn validate_attach_target(pid: u64) -> Result<AttachIdentity> {
     use std::os::unix::fs::MetadataExt;
 
-    let process = std::fs::metadata(format!("/proc/{pid}"))?;
+    let process = std::fs::metadata(format!("/proc/{pid}")).map_err(|error| {
+        Error::new(
+            ErrorCode::TargetUnavailable,
+            format!("cannot inspect attach target: {error}"),
+        )
+    })?;
     // SAFETY: geteuid has no preconditions and reads process credentials.
     let current_uid = unsafe { libc::geteuid() };
     if process.uid() != current_uid {
@@ -4793,7 +4827,41 @@ fn validate_attach_target(pid: u64) -> Result<()> {
             "attach target belongs to another PID namespace",
         ));
     }
-    Ok(())
+    Ok(AttachIdentity {
+        start_time_ticks: process_start_time(pid)?,
+    })
+}
+
+fn process_start_time(pid: u64) -> Result<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|error| {
+        Error::new(
+            ErrorCode::TargetUnavailable,
+            format!("cannot read attach target identity: {error}"),
+        )
+    })?;
+    parse_process_start_time(&stat)
+}
+
+fn parse_process_start_time(stat: &str) -> Result<u64> {
+    let fields = stat
+        .rsplit_once(") ")
+        .map(|(_, fields)| fields)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::TargetUnavailable,
+                "attach target stat record is malformed",
+            )
+        })?;
+    fields
+        .split_whitespace()
+        .nth(19)
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::TargetUnavailable,
+                "attach target stat record has no start time",
+            )
+        })
 }
 
 fn first_word(command: &str) -> &str {
@@ -4892,5 +4960,22 @@ mod tests {
         });
 
         assert!(require_probe_hit(&json!({}), &baseline, &stopped, "7").is_err());
+    }
+
+    #[test]
+    fn parses_and_revalidates_attach_identity() {
+        let stat = "123 (worker name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242";
+        assert_eq!(parse_process_start_time(stat).unwrap(), 4242);
+
+        let pid = u64::from(std::process::id());
+        let identity = validate_attach_target(pid).unwrap();
+        identity.revalidate(pid).unwrap();
+        let changed = AttachIdentity {
+            start_time_ticks: identity.start_time_ticks.saturating_add(1),
+        };
+        assert_eq!(
+            changed.revalidate(pid).unwrap_err().code,
+            ErrorCode::Conflict
+        );
     }
 }
