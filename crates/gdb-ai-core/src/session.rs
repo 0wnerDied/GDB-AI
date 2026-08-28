@@ -141,7 +141,7 @@ impl SessionHandle {
         // relative persistence configuration previously made startup fail.
         let session_dir = std::fs::canonicalize(session_dir)?;
         let journal_path = session_dir.join("journal.jsonl");
-        let mut journal = Journal::create(&journal_path)?;
+        let mut journal = Journal::create(&journal_path, config.limits.journal_bytes)?;
         journal.append_session_created(&id.0)?;
         let initial_state = SessionState::creating(id.clone());
         let (state_sender, state) = watch::channel(initial_state.clone());
@@ -299,6 +299,17 @@ impl SessionHandle {
                 request,
                 response: sender,
             })
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+        receiver
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+    }
+
+    pub async fn flush_journal(&self) -> Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        self.requests
+            .send(WorkerRequest::FlushJournal { response: sender })
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
         receiver
@@ -688,6 +699,9 @@ enum WorkerRequest {
     },
     RecordApi {
         request: Value,
+        response: oneshot::Sender<Result<()>>,
+    },
+    FlushJournal {
         response: oneshot::Sender<Result<()>>,
     },
     RefreshTargetCapabilities {
@@ -1145,8 +1159,18 @@ impl SessionWorker {
     }
 
     async fn run(mut self) {
+        let mut journal_flush = tokio::time::interval(Duration::from_millis(250));
+        journal_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                _ = journal_flush.tick() => {
+                    if let Err(error) = self.journal.flush() {
+                        tracing::error!(%error, "session journal flush failed");
+                        self.mark_failed();
+                        let _ = self.backend.shutdown().await;
+                        break;
+                    }
+                }
                 control = self.controls.recv(), if self.controls_open => {
                     match control {
                         Some(control) => {
@@ -1185,6 +1209,7 @@ impl SessionWorker {
                 }
             }
         }
+        let _ = self.journal.flush();
     }
 
     async fn handle_request(&mut self, request: WorkerRequest) -> bool {
@@ -1259,7 +1284,14 @@ impl SessionWorker {
                 let _ = response.send(self.apply_event(event));
             }
             WorkerRequest::RecordApi { request, response } => {
-                let _ = response.send(self.journal.append_api(&request).map(|_| ()));
+                let appended = self.journal.append_api(&request).map(|_| ());
+                let result = self.journal_result(appended);
+                let _ = response.send(result);
+            }
+            WorkerRequest::FlushJournal { response } => {
+                let flushed = self.journal.flush();
+                let result = self.journal_result(flushed);
+                let _ = response.send(result);
             }
             WorkerRequest::RefreshTargetCapabilities { response } => {
                 let result = match self.require_known_outcome_name("-list-target-features") {
@@ -1439,7 +1471,8 @@ impl SessionWorker {
                 let _ = response.send(read);
             }
             WorkerRequest::WriteInferior { bytes, response } => {
-                let result = match self.journal.append_inferior_input(&bytes) {
+                let appended = self.journal.append_inferior_input(&bytes);
+                let result = match self.journal_result(appended) {
                     Ok(_) => self.backend.write_inferior(&bytes).await,
                     Err(error) => Err(error),
                 };
@@ -1493,8 +1526,10 @@ impl SessionWorker {
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.apply_event(DomainEvent::SessionClosing)?;
-        self.backend.shutdown().await?;
+        let closing = self.apply_event(DomainEvent::SessionClosing);
+        let shutdown = self.backend.shutdown().await;
+        closing?;
+        shutdown?;
         self.apply_event(DomainEvent::SessionClosed)?;
         if self.metric_active {
             self.metrics.session_closed();
@@ -1824,7 +1859,8 @@ impl SessionWorker {
             .checked_add(1)
             .ok_or_else(|| Error::new(ErrorCode::Internal, "MI token counter exhausted"))?;
         let raw = command.encoded(token);
-        self.journal.append_mi_input(token, &raw)?;
+        let appended = self.journal.append_mi_input(token, &raw);
+        self.journal_result(appended)?;
         self.backend.send(token, command).await?;
         Ok(token)
     }
@@ -1833,7 +1869,8 @@ impl SessionWorker {
         match input {
             BackendInput::Mi { raw, record } => {
                 self.metrics.mi_record();
-                let evidence_seq = self.journal.append_mi_output(&raw)?;
+                let appended = self.journal.append_mi_output(&raw);
+                let evidence_seq = self.journal_result(appended)?;
                 if let Some(event) = normalize(&record) {
                     // 2026-08-28: Normal MI stream records were returned only
                     // with the in-flight command and never reached incremental
@@ -1863,12 +1900,14 @@ impl SessionWorker {
                 Ok(Some((record, evidence_seq)))
             }
             BackendInput::GdbStderr(bytes) => {
-                self.journal.append_gdb_stderr(&bytes)?;
+                let appended = self.journal.append_gdb_stderr(&bytes);
+                self.journal_result(appended)?;
                 self.log_output.append(&bytes);
                 Ok(None)
             }
             BackendInput::InferiorPty(bytes) => {
-                self.journal.append_inferior_output(&bytes)?;
+                let appended = self.journal.append_inferior_output(&bytes);
+                self.journal_result(appended)?;
                 let dropped = self.inferior_output.dropped_bytes();
                 self.metrics
                     .inferior_output_dropped(dropped.saturating_sub(self.inferior_output_dropped));
@@ -1918,7 +1957,8 @@ impl SessionWorker {
                 | DomainEvent::TargetDisconnected
                 | DomainEvent::TargetDetached
         );
-        let journaled: JournaledEvent = self.journal.append_domain(event.clone())?;
+        let appended = self.journal.append_domain(event.clone());
+        let journaled: JournaledEvent = self.journal_result(appended)?;
         let changed = self.reducer.apply(&journaled)?;
         match &event {
             DomainEvent::CoreOpened { .. } => {
@@ -1959,10 +1999,11 @@ impl SessionWorker {
         if changed {
             // 2026-08-28: State revisions were persisted to SQLite but absent
             // from the append-only replay evidence.
-            self.journal.append_state(
+            let appended = self.journal.append_state(
                 self.reducer.state().revision,
                 &serde_json::to_value(self.reducer.state())?,
-            )?;
+            );
+            self.journal_result(appended)?;
             self.persist()?;
         }
         self.state_sender.send_replace(self.reducer.state().clone());
@@ -2023,7 +2064,8 @@ impl SessionWorker {
     }
 
     fn store_snapshot_value(&mut self, snapshot_id: String, snapshot: Value) -> Result<()> {
-        self.journal.append_snapshot(&snapshot_id, &snapshot)?;
+        let appended = self.journal.append_snapshot(&snapshot_id, &snapshot);
+        self.journal_result(appended)?;
         self.store
             .upsert_snapshot(&self.reducer.state().session_id, &snapshot_id, &snapshot)?;
         if self.snapshots.len() >= 128 {
@@ -2031,6 +2073,14 @@ impl SessionWorker {
         }
         self.snapshots.insert(snapshot_id, snapshot);
         Ok(())
+    }
+
+    fn journal_result<T>(&mut self, result: Result<T>) -> Result<T> {
+        if result.is_err() {
+            self.fatal = true;
+            self.mark_failed();
+        }
+        result
     }
 
     fn persist(&mut self) -> Result<()> {

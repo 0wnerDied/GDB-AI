@@ -28,6 +28,7 @@ stack_frames = 64
 value_children = 1000
 value_depth = 8
 session_artifact_bytes = 536870912
+journal_bytes = 67108864
 process_memory_bytes = 2147483648
 process_cpu_seconds = 3600
 process_open_files = 1024

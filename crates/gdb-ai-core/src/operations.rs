@@ -402,7 +402,12 @@ impl Gateway {
         // 2026-08-28: Transcript and event reads previously required a live
         // worker, making retained failure evidence inaccessible after close.
         match self.entry(&session_id.0).await {
-            Ok(entry) => Ok(entry.handle.journal_path().clone()),
+            Ok(entry) => {
+                // 2026-08-28: Batched journal writes were not flushed before
+                // live transcript reads, so recently advertised evidence was missing.
+                entry.handle.flush_journal().await?;
+                Ok(entry.handle.journal_path().clone())
+            }
             Err(_) if self.store.get_session(session_id)?.is_some() => Ok(self
                 .config
                 .persistence

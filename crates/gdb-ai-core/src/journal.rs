@@ -38,10 +38,13 @@ pub struct JournalEntry {
 pub struct Journal {
     writer: BufWriter<File>,
     next_seq: u64,
+    bytes_written: usize,
+    max_bytes: usize,
+    unflushed_records: usize,
 }
 
 impl Journal {
-    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn create(path: impl AsRef<Path>, max_bytes: usize) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -53,6 +56,9 @@ impl Journal {
         Ok(Self {
             writer: BufWriter::new(file),
             next_seq: 1,
+            bytes_written: 0,
+            max_bytes,
+            unflushed_records: 0,
         })
     }
 
@@ -129,12 +135,33 @@ impl Journal {
             kind: kind.to_owned(),
             data,
         };
-        serde_json::to_writer(&mut self.writer, &entry)?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
-        self.writer.get_ref().sync_data()?;
+        let mut encoded = serde_json::to_vec(&entry)?;
+        encoded.push(b'\n');
+        // 2026-08-28: Journals performed an fsync for every record and had no
+        // total size bound, so noisy targets could exhaust I/O and disk space.
+        if self.bytes_written.saturating_add(encoded.len()) > self.max_bytes {
+            return Err(Error::new(
+                ErrorCode::OutputLimit,
+                "session journal byte limit reached",
+            ));
+        }
+        self.writer.write_all(&encoded)?;
+        self.bytes_written += encoded.len();
+        self.unflushed_records += 1;
+        if self.unflushed_records >= 64 {
+            self.flush()?;
+        }
         self.next_seq += 1;
         Ok(seq)
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        if self.unflushed_records == 0 {
+            return Ok(());
+        }
+        self.writer.flush()?;
+        self.unflushed_records = 0;
+        Ok(())
     }
 }
 
@@ -150,7 +177,7 @@ mod tests {
     fn appends_monotonic_jsonl_before_returning_event() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("journal.jsonl");
-        let mut journal = Journal::create(&path).unwrap();
+        let mut journal = Journal::create(&path, 1024).unwrap();
         assert_eq!(journal.append_mi_output(b"*running").unwrap(), 1);
         let event = journal
             .append_domain(DomainEvent::TargetRunning {
@@ -158,7 +185,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(event.seq(), 2);
-        drop(journal);
+        journal.flush().unwrap();
 
         let entries: Vec<JournalEntry> = BufReader::new(File::open(path).unwrap())
             .lines()
@@ -167,5 +194,16 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].kind, "mi.output");
         assert_eq!(entries[1].kind, "normalized.event");
+    }
+
+    #[test]
+    fn rejects_records_beyond_the_session_quota() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let mut journal = Journal::create(&path, 64).unwrap();
+        let error = journal.append_mi_output(&[0; 128]).unwrap_err();
+        assert_eq!(error.code, ErrorCode::OutputLimit);
+        journal.flush().unwrap();
+        assert!(std::fs::metadata(path).unwrap().len() <= 64);
     }
 }

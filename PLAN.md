@@ -1151,6 +1151,7 @@ stack_frames = 64
 value_children = 1000
 value_depth = 8
 session_artifact_bytes = 536870912
+journal_bytes = 67108864
 
 [artifacts]
 backend = "filesystem"
