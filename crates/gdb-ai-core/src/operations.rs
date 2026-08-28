@@ -816,7 +816,16 @@ impl Gateway {
         let wait = wait_spec(&request.parameters)?;
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
-        let reply = entry.handle.command(MiCommand::new("-exec-abort")?).await?;
+        // 2026-08-28: GDB 17 has no -exec-abort MI command. Use console kill
+        // after the handshake disables confirmation so exit events stay MI.
+        let reply = entry
+            .handle
+            .command(
+                MiCommand::new("-interpreter-exec")?
+                    .bare("console")?
+                    .string("kill"),
+            )
+            .await?;
         let state = wait_if_requested(&entry.handle, wait, Some(&baseline)).await?;
         Ok(json!({ "command": reply, "state": state }))
     }

@@ -415,6 +415,22 @@ async fn tracked_state_lifecycle_round_trips() {
             .map(serde_json::Map::len),
         Some(1)
     );
+    let killed = call(
+        &gateway,
+        &caller,
+        request(
+            "kill",
+            Some(&session_id),
+            "target.kill",
+            deleted.revision,
+            json!({
+                "lease_id": lease_id,
+                "wait": {"until": "exited", "timeout_ms": 5000}
+            }),
+        ),
+    )
+    .await;
+    assert!(killed.state.as_ref().unwrap().stop_id.is_none());
     call(
         &gateway,
         &caller,
@@ -422,7 +438,7 @@ async fn tracked_state_lifecycle_round_trips() {
             "close",
             Some(&session_id),
             "session.close",
-            deleted.revision,
+            killed.revision,
             json!({"lease_id": lease_id}),
         ),
     )
