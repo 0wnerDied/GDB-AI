@@ -639,6 +639,33 @@ impl SessionHandle {
                 {
                     return Ok(current);
                 }
+                // 2026-08-28: State waiters kept sleeping after GDB death or
+                // an unmatched result made the controller unreliable, turning
+                // a known failure into an unrelated timeout.
+                if matches!(
+                    current.lifecycle,
+                    crate::domain::SessionLifecycle::Closed
+                        | crate::domain::SessionLifecycle::Failed
+                ) || current.backend == crate::domain::BackendHealth::Dead
+                {
+                    return Err(Error::new(ErrorCode::GdbExited, "GDB session ended"));
+                }
+                if current.consistency == crate::domain::Consistency::Lost {
+                    return Err(Error::new(
+                        ErrorCode::ConsistencyLost,
+                        "session consistency was lost while waiting",
+                    ));
+                }
+                if current.reconciliation_required
+                    && baseline
+                        .as_ref()
+                        .is_none_or(|baseline| current.event_seq > baseline.event_seq)
+                {
+                    return Err(Error::new(
+                        ErrorCode::ConsistencyDirty,
+                        "session requires reconciliation after an unexpected backend result",
+                    ));
+                }
                 state.changed().await.map_err(|_| {
                     Error::new(ErrorCode::GdbExited, "session state channel closed")
                 })?;
@@ -1322,10 +1349,14 @@ impl SessionWorker {
                         let _ = self.backend.shutdown().await;
                         break;
                     };
-                    if let Ok(Some((record, _))) = self.process_input(input)
-                        && let Some(token) = take_delayed_token(&mut self.timed_out_tokens, &record)
-                    {
-                        let _ = self.apply_event(DomainEvent::CommandOutcomeResolved { token });
+                    if let Ok(Some((record, _))) = self.process_input(input) {
+                        if let Some(token) =
+                            take_delayed_token(&mut self.timed_out_tokens, &record)
+                        {
+                            let _ = self.apply_event(DomainEvent::CommandOutcomeResolved { token });
+                        } else {
+                            let _ = self.handle_unmatched_result(&record);
+                        }
                     }
                     if self.fatal {
                         let _ = self.backend.shutdown().await;
@@ -2003,7 +2034,8 @@ impl SessionWorker {
                     let Some((record, evidence_seq)) = self.process_input(input)? else {
                         continue;
                     };
-                    if let Some(delayed) = take_delayed_token(&mut self.timed_out_tokens, &record) {
+                    let delayed = take_delayed_token(&mut self.timed_out_tokens, &record);
+                    if let Some(delayed) = delayed {
                         self.apply_event(DomainEvent::CommandOutcomeResolved { token: delayed })?;
                     }
                     let result_token = match &record {
@@ -2045,6 +2077,9 @@ impl SessionWorker {
                         ));
                         continue;
                     }
+                    if delayed.is_none() {
+                        self.handle_unmatched_result(&record)?;
+                    }
                     if normal_result.is_none()
                         && matches!(
                             record,
@@ -2064,6 +2099,18 @@ impl SessionWorker {
                 }
             }
         }
+    }
+
+    fn handle_unmatched_result(&mut self, record: &MiRecord) -> Result<()> {
+        let MiRecord::Result { token, class, .. } = record else {
+            return Ok(());
+        };
+        // 2026-08-28: GDB can accept async execution with ^running and later
+        // emit ^error for the same token when startup fails. Silently dropping
+        // that second result left canonical state running until a wait timed out.
+        self.apply_event(DomainEvent::ConsistencyDirty {
+            reason: format!("unmatched MI result token {token:?} class {class}"),
+        })
     }
 
     async fn begin_command(&mut self, command: &MiCommand) -> Result<u64> {
@@ -2828,6 +2875,114 @@ mod tests {
         .unwrap();
         assert!(session.state().reconciliation_required);
         session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_execution_error_requires_reconciliation() {
+        if ["gdb", "cc"].iter().any(|command| {
+            std::process::Command::new(command)
+                .arg("--version")
+                .output()
+                .is_err()
+        }) {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let executable = directory.path().join("late-error");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
+        assert!(
+            std::process::Command::new("cc")
+                .args(["-g", "-O0"])
+                .arg(source)
+                .arg("-o")
+                .arg(&executable)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let session = SessionHandle::start(
+            Arc::new(config),
+            Profile::RawAdmin,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+        session
+            .command(
+                MiCommand::new("-file-exec-and-symbols")
+                    .unwrap()
+                    .string(executable.as_os_str().as_encoded_bytes()),
+            )
+            .await
+            .unwrap();
+        session
+            .command(
+                MiCommand::new("-gdb-set")
+                    .unwrap()
+                    .bare("may-write-memory")
+                    .unwrap()
+                    .bare("off")
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let baseline = session.state();
+        let run = session
+            .command(
+                MiCommand::new("-exec-run")
+                    .unwrap()
+                    .bare("--start")
+                    .unwrap(),
+            )
+            .await;
+        if let Ok(reply) = run {
+            assert_eq!(reply.class, "running");
+            let started = std::time::Instant::now();
+            let error = session
+                .wait_after(WaitUntil::Snapshot, Duration::from_secs(5), &baseline)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::ConsistencyDirty);
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(session.state().reconciliation_required);
+        } else {
+            assert_eq!(run.unwrap_err().code, ErrorCode::GdbError);
+        }
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn state_wait_returns_when_gdb_exits() {
+        let Some(session) = control_test_session().await else {
+            return;
+        };
+        let _ = session.command(MiCommand::new("-gdb-exit").unwrap()).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while session.state().lifecycle != crate::domain::SessionLifecycle::Failed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let started = std::time::Instant::now();
+        let error = session
+            .wait(WaitUntil::Stopped, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::GdbExited);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[tokio::test]
