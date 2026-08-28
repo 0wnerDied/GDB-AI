@@ -344,10 +344,16 @@ impl Gateway {
         } else {
             None
         };
-        let observation_baseline = stable_observation.then(|| {
-            let state = entry.as_ref().unwrap().handle.state();
-            (state.stop_id, state.execution_epoch)
-        });
+        // 2026-08-28: Stable reads for an unknown or closed session reached
+        // this point without a registry entry and panicked before returning
+        // NOT_FOUND. Only capture a baseline when a live entry exists.
+        let observation_baseline = match (&entry, stable_observation) {
+            (Some(entry), true) => {
+                let state = entry.handle.state();
+                Some((state.stop_id, state.execution_epoch))
+            }
+            _ => None,
+        };
         if let Some(entry) = &entry {
             let mut state = entry.handle.state();
             // 2026-08-28: A timed-out MI mutation may still complete later.
@@ -516,6 +522,14 @@ impl Gateway {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
                 "parameters must be an object",
+            ));
+        }
+        // 2026-08-28: Session-scoped methods accepted a missing session ID,
+        // allowing later stable-observation setup to dereference no session.
+        if request.method.requires_session() && request.session_id.is_none() {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "method requires session_id",
             ));
         }
         // 2026-08-28: The envelope schema accepted arbitrary method
@@ -1064,5 +1078,76 @@ mod tests {
                 })))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn every_session_method_rejects_a_missing_session_id() {
+        let directory = tempdir().unwrap();
+        let gateway = Gateway::new(Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        })
+        .unwrap();
+
+        for method in crate::protocol::CanonicalMethod::ALL
+            .iter()
+            .copied()
+            .filter(|method| method.requires_session())
+        {
+            let error = gateway
+                .validate_request(&ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: format!("missing-session-{method}"),
+                    session_id: None,
+                    method,
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters: json!({}),
+                })
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidArgument, "{method}");
+            assert_eq!(error.message, "method requires session_id", "{method}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stable_read_for_unknown_session_returns_not_found() {
+        let directory = tempdir().unwrap();
+        let gateway = Gateway::new(Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        })
+        .unwrap();
+        let response = gateway
+            .dispatch(
+                ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "unknown-session-read".into(),
+                    session_id: Some("sess_missing".into()),
+                    method: crate::protocol::CanonicalMethod::MemoryRead,
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters: json!({
+                        "address": "0x1000",
+                        "length": 16,
+                        "stop_id": "stop_missing"
+                    }),
+                },
+                &Caller::local("missing-session-test"),
+            )
+            .await;
+        assert_eq!(response.error.unwrap().code, ErrorCode::NotFound);
     }
 }
