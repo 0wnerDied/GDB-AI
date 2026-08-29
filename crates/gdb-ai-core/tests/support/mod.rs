@@ -4,7 +4,16 @@ pub fn require_commands(commands: &[&str]) -> bool {
     let missing = commands
         .iter()
         .copied()
-        .filter(|command| Command::new(command).arg("--version").output().is_err())
+        .filter(|command| {
+            // 2026-08-29: Compatibility jobs qualify an exact GDB release
+            // without replacing the runner's system binary.
+            let executable = if *command == "gdb" {
+                std::env::var_os("GDB_AI_GDB_PATH").unwrap_or_else(|| (*command).into())
+            } else {
+                (*command).into()
+            };
+            Command::new(executable).arg("--version").output().is_err()
+        })
         .collect::<Vec<_>>();
     if missing.is_empty() {
         return true;
