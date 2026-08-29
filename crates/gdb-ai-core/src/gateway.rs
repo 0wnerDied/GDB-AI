@@ -12,7 +12,7 @@ use crate::{
     config::Config,
     domain::{Address, SessionState, TargetOrigin, WriteLease},
     metrics::Metrics,
-    persistence::{ArtifactLimits, Store},
+    persistence::{ArtifactLimits, StorageLock, Store},
     policy::{Effect, Profile, effect_for_method},
     protocol::{API_VERSION, ApiRequest, ApiResponse},
     session::SessionHandle,
@@ -53,6 +53,7 @@ pub struct Gateway {
     idempotency_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     rates: Mutex<BTreeMap<String, RateWindow>>,
     pub(crate) session_creation: Mutex<()>,
+    _storage_lock: StorageLock,
 }
 
 struct RateWindow {
@@ -63,6 +64,7 @@ struct RateWindow {
 impl Gateway {
     pub fn new(config: Config) -> Result<Self> {
         config.validate()?;
+        let storage_lock = StorageLock::acquire(config.persistence.sqlite.with_extension("lock"))?;
         let store = Arc::new(Store::open(&config.persistence.sqlite)?);
         let artifacts = ArtifactStore::new(&config.artifacts.path)?;
         let metrics = Arc::new(Metrics::default());
@@ -76,6 +78,7 @@ impl Gateway {
             idempotency_locks: Mutex::new(BTreeMap::new()),
             rates: Mutex::new(BTreeMap::new()),
             session_creation: Mutex::new(()),
+            _storage_lock: storage_lock,
         })
     }
 
@@ -1134,6 +1137,7 @@ mod tests {
             ErrorCode::PolicyDenied
         );
         gateway.shutdown().await;
+        drop(gateway);
 
         let reopened = Gateway::new(config).unwrap();
         assert!(

@@ -1,0 +1,221 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use clap::Subcommand;
+use gdb_ai_core::{
+    Error, ErrorCode, Result,
+    artifact::{ArtifactFile, ArtifactStore},
+    config::Config,
+    persistence::{StorageLock, Store, StoredArtifact},
+};
+use serde_json::{Value, json};
+
+#[derive(Subcommand)]
+pub enum StorageCommand {
+    Status,
+    Verify,
+    Gc {
+        #[arg(long)]
+        execute: bool,
+    },
+}
+
+struct StorageScan {
+    database: Vec<StoredArtifact>,
+    files: Vec<ArtifactFile>,
+    invalid_entries: Vec<String>,
+    untracked_files: Vec<String>,
+    missing_files: Vec<String>,
+    unowned_artifacts: Vec<String>,
+    size_mismatches: Vec<String>,
+    corrupt_artifacts: Vec<Value>,
+    sqlite_quick_check: String,
+}
+
+impl StorageScan {
+    fn ok(&self) -> bool {
+        self.sqlite_quick_check == "ok"
+            && self.invalid_entries.is_empty()
+            && self.untracked_files.is_empty()
+            && self.missing_files.is_empty()
+            && self.unowned_artifacts.is_empty()
+            && self.size_mismatches.is_empty()
+            && self.corrupt_artifacts.is_empty()
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "ok": self.ok(),
+            "sqlite_quick_check": self.sqlite_quick_check,
+            "database": {
+                "artifacts": self.database.len(),
+                "bytes": self.database.iter().map(|artifact| artifact.size).sum::<usize>()
+            },
+            "filesystem": {
+                "artifacts": self.files.len(),
+                "bytes": self.files.iter().map(|artifact| artifact.size).sum::<u64>()
+            },
+            "invalid_entries": self.invalid_entries,
+            "untracked_files": self.untracked_files,
+            "missing_files": self.missing_files,
+            "unowned_artifacts": self.unowned_artifacts,
+            "size_mismatches": self.size_mismatches,
+            "corrupt_artifacts": self.corrupt_artifacts,
+        })
+    }
+}
+
+pub fn run(config: Config, command: StorageCommand) -> Result<()> {
+    let _lock = StorageLock::acquire(config.persistence.sqlite.with_extension("lock"))?;
+    let store = Store::open(&config.persistence.sqlite)?;
+    let artifacts = ArtifactStore::new(&config.artifacts.path)?;
+    match command {
+        StorageCommand::Status => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&scan(&store, &artifacts, false)?.json())?
+            );
+        }
+        StorageCommand::Verify => {
+            let report = scan(&store, &artifacts, true)?;
+            println!("{}", serde_json::to_string_pretty(&report.json())?);
+            if !report.ok() {
+                return Err(Error::new(
+                    ErrorCode::Internal,
+                    "storage verification found inconsistencies",
+                ));
+            }
+        }
+        StorageCommand::Gc { execute } => {
+            let before = scan(&store, &artifacts, false)?;
+            let removed = if execute {
+                collect_garbage(&store, &artifacts, &before)?
+            } else {
+                0
+            };
+            let after = execute
+                .then(|| scan(&store, &artifacts, false))
+                .transpose()?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "executed": execute,
+                    "removed": removed,
+                    "planned": {
+                        "untracked_files": before.untracked_files,
+                        "unowned_artifacts": before.unowned_artifacts,
+                    },
+                    "after": after.map(|scan| scan.json()),
+                }))?
+            );
+        }
+    }
+    Ok(())
+}
+
+fn scan(store: &Store, artifacts: &ArtifactStore, verify: bool) -> Result<StorageScan> {
+    let database = store.list_artifacts()?;
+    let inventory = artifacts.inventory()?;
+    let database_by_uri = database
+        .iter()
+        .map(|artifact| (artifact.uri.as_str(), artifact))
+        .collect::<BTreeMap<_, _>>();
+    let files_by_uri = inventory
+        .files
+        .iter()
+        .map(|artifact| (artifact.uri.as_str(), artifact))
+        .collect::<BTreeMap<_, _>>();
+    let database_uris = database_by_uri.keys().copied().collect::<BTreeSet<_>>();
+    let file_uris = files_by_uri.keys().copied().collect::<BTreeSet<_>>();
+    let untracked_files = file_uris
+        .difference(&database_uris)
+        .map(|uri| (*uri).to_owned())
+        .collect();
+    let missing_files = database_uris
+        .difference(&file_uris)
+        .map(|uri| (*uri).to_owned())
+        .collect();
+    let unowned_artifacts = database
+        .iter()
+        .filter(|artifact| !artifact.global && artifact.owner_count == 0)
+        .map(|artifact| artifact.uri.clone())
+        .collect();
+    let size_mismatches = database_uris
+        .intersection(&file_uris)
+        .filter(|uri| database_by_uri[**uri].size as u64 != files_by_uri[**uri].size)
+        .map(|uri| (*uri).to_owned())
+        .collect();
+    let mut corrupt_artifacts = Vec::new();
+    if verify {
+        for uri in database_uris.intersection(&file_uris) {
+            if let Err(error) = artifacts.verify(uri) {
+                corrupt_artifacts.push(json!({"uri": uri, "error": error.to_string()}));
+            }
+        }
+    }
+    Ok(StorageScan {
+        database,
+        files: inventory.files,
+        invalid_entries: inventory.invalid_entries,
+        untracked_files,
+        missing_files,
+        unowned_artifacts,
+        size_mismatches,
+        corrupt_artifacts,
+        sqlite_quick_check: store.quick_check()?,
+    })
+}
+
+fn collect_garbage(store: &Store, artifacts: &ArtifactStore, scan: &StorageScan) -> Result<usize> {
+    let mut removed = 0;
+    for uri in &scan.unowned_artifacts {
+        if store.delete_unowned_artifact(uri)? {
+            if scan.files.iter().any(|file| &file.uri == uri) {
+                artifacts.remove(uri)?;
+            }
+            removed += 1;
+        }
+    }
+    for uri in &scan.untracked_files {
+        artifacts.remove(uri)?;
+        removed += 1;
+    }
+    store.checkpoint_wal()?;
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use gdb_ai_core::{domain::SessionId, persistence::ArtifactLimits};
+
+    use super::*;
+
+    #[test]
+    fn garbage_collection_keeps_owned_artifacts() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(directory.path().join("state.sqlite")).unwrap();
+        let artifacts = ArtifactStore::new(directory.path().join("artifacts")).unwrap();
+        let session = SessionId("sess_owned".into());
+        store.set_session_owner(&session, "owner").unwrap();
+        let owned = store
+            .put_artifact(
+                &artifacts,
+                b"owned",
+                Some(&session),
+                "public",
+                ArtifactLimits {
+                    session_bytes: 1024,
+                    owner_bytes: 1024,
+                    total_bytes: 1024,
+                },
+            )
+            .unwrap();
+        let orphan = artifacts.put(b"orphan").unwrap();
+        let before = scan(&store, &artifacts, false).unwrap();
+        assert_eq!(before.untracked_files, std::slice::from_ref(&orphan));
+        assert_eq!(collect_garbage(&store, &artifacts, &before).unwrap(), 1);
+        assert!(artifacts.verify(&owned).is_ok());
+        assert!(artifacts.verify(&orphan).is_err());
+    }
+}

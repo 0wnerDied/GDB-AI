@@ -35,6 +35,7 @@ use tokio::{
     task::JoinHandle,
 };
 
+mod storage_cli;
 mod tool_catalog;
 
 use tool_catalog::{discriminator_for_tool, method_for_tool, tool_exists, tool_names, tools};
@@ -118,6 +119,10 @@ enum Command {
     Transcript {
         #[command(subcommand)]
         command: TranscriptCommand,
+    },
+    Storage {
+        #[command(subcommand)]
+        command: storage_cli::StorageCommand,
     },
     Schema {
         #[command(subcommand)]
@@ -205,6 +210,7 @@ async fn run() -> Result<(), AnyError> {
         }
         Command::Session { command } => session_cli(config, command).await,
         Command::Transcript { command } => transcript_cli(config, command),
+        Command::Storage { command } => storage_cli::run(config, command).map_err(Into::into),
         Command::Schema {
             command: SchemaCommand::Export,
         } => {

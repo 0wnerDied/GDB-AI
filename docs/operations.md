@@ -26,3 +26,11 @@ export`, and `replay` for diagnosis without executing the inferior again.
 Replay rejects gaps and mismatches among raw MI, adjacent normalized events,
 and recorded reducer state checkpoints. MI-only transcripts have no checkpoint
 integrity guarantee and reconstruct only MI-derived controller state.
+
+Artifact storage has per-session, per-owner, and daemon-wide byte limits. Use
+`gdb-ai storage status` for metadata and filesystem inventory, `storage verify`
+for SQLite and full content-digest verification, and `storage gc` for a safe
+dry-run. `storage gc --execute` removes only valid digest files absent from the
+database and session artifacts with no remaining owner, then checkpoints the
+SQLite WAL. Stop the daemon first; the shared lock rejects maintenance while
+the data directory is live.

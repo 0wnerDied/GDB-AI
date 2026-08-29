@@ -201,6 +201,10 @@ gdb-ai session list
 gdb-ai session inspect <session-id>
 gdb-ai session close <session-id>
 gdb-ai schema export
+gdb-ai storage status
+gdb-ai storage verify
+gdb-ai storage gc
+gdb-ai storage gc --execute
 ```
 
 Session CLI commands connect to `server.unix_socket`. Replay validates strict
@@ -208,6 +212,12 @@ journal ordering and reconstructs controller state and stored snapshots. A
 recorded `session.created` ID overrides `--session-id`; the flag supplies a
 legacy MI-only fallback. Replay never executes or claims to restore an
 inferior.
+
+Storage GC is dry-run unless `--execute` is present. Status and GC never hash
+all content; `storage verify` performs that explicit integrity scan. Daemon
+and maintenance commands share one non-blocking data-directory lock, so GC
+cannot race live artifact ownership changes. Invalid unknown directory entries
+are reported and never removed automatically.
 
 ## Embedding in binutils-gdb
 

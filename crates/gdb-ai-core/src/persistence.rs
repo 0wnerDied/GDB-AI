@@ -1,6 +1,14 @@
-use std::{os::unix::fs::PermissionsExt, path::Path, sync::Mutex, time::SystemTime};
+use std::{
+    fs::{File, OpenOptions},
+    os::fd::AsRawFd,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::Path,
+    sync::Mutex,
+    time::SystemTime,
+};
 
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
@@ -15,10 +23,23 @@ pub struct Store {
     connection: Mutex<Connection>,
 }
 
+pub struct StorageLock {
+    _file: File,
+}
+
 #[derive(Clone, Debug)]
 pub struct ArtifactRecord {
     pub size: usize,
     pub sensitivity: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StoredArtifact {
+    pub uri: String,
+    pub size: usize,
+    pub sensitivity: String,
+    pub owner_count: usize,
+    pub global: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -628,6 +649,66 @@ impl Store {
         Ok(total.max(0) as usize)
     }
 
+    pub fn list_artifacts(&self) -> Result<Vec<StoredArtifact>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT artifacts.uri, artifacts.size, artifacts.sensitivity,
+                            artifacts.session_id IS NULL,
+                            COUNT(artifact_owners.session_id)
+                     FROM artifacts
+                     LEFT JOIN artifact_owners ON artifact_owners.uri=artifacts.uri
+                     GROUP BY artifacts.uri
+                     ORDER BY artifacts.uri",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(StoredArtifact {
+                        uri: row.get(0)?,
+                        size: row.get::<_, i64>(1)?.max(0) as usize,
+                        sensitivity: row.get(2)?,
+                        global: row.get(3)?,
+                        owner_count: row.get::<_, i64>(4)?.max(0) as usize,
+                    })
+                })
+                .map_err(sql_error)?;
+            rows.map(|row| row.map_err(sql_error)).collect()
+        })
+    }
+
+    pub fn delete_unowned_artifact(&self, uri: &str) -> Result<bool> {
+        self.with_connection(|connection| {
+            let deleted = connection
+                .execute(
+                    "DELETE FROM artifacts
+                     WHERE uri=?1 AND session_id IS NOT NULL
+                       AND NOT EXISTS (
+                         SELECT 1 FROM artifact_owners WHERE artifact_owners.uri=artifacts.uri
+                       )",
+                    params![uri],
+                )
+                .map_err(sql_error)?;
+            Ok(deleted == 1)
+        })
+    }
+
+    pub fn quick_check(&self) -> Result<String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row("PRAGMA quick_check", [], |row| row.get(0))
+                .map_err(sql_error)
+        })
+    }
+
+    pub fn checkpoint_wal(&self) -> Result<()> {
+        self.with_connection(|connection| {
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .map_err(sql_error)
+        })
+    }
+
     pub fn get_idempotent_response(
         &self,
         key: &str,
@@ -752,6 +833,35 @@ impl Store {
                 .map_err(sql_error)?;
             Ok(())
         })
+    }
+}
+
+impl StorageLock {
+    pub fn acquire(path: impl AsRef<Path>) -> Result<Self> {
+        if let Some(parent) = path.as_ref().parent() {
+            std::fs::create_dir_all(parent)?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)?;
+        // 2026-08-29: Destructive GC could race a daemon registering the same
+        // digest and unlink newly-owned evidence. One data directory has one
+        // writer; maintenance uses this same non-blocking process lock.
+        // SAFETY: flock only reads this live file descriptor and does not
+        // retain it after the call.
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            return Err(Error::new(
+                ErrorCode::Conflict,
+                "storage is already in use by another GDB/AI process",
+            ));
+        }
+        Ok(Self { _file: file })
     }
 }
 
@@ -962,6 +1072,16 @@ mod tests {
         assert!(artifacts.get(&ArtifactStore::uri(b"g"), 1).is_err());
         assert!(artifacts.get(&ArtifactStore::uri(b"s"), 1).is_err());
         assert!(artifacts.get(&ArtifactStore::uri(b"o"), 1).is_err());
+    }
+
+    #[test]
+    fn storage_lock_excludes_concurrent_maintenance() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("storage.lock");
+        let first = StorageLock::acquire(&path).unwrap();
+        assert!(StorageLock::acquire(&path).is_err());
+        drop(first);
+        StorageLock::acquire(path).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

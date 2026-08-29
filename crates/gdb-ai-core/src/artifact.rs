@@ -9,6 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{Error, ErrorCode, Result};
@@ -28,6 +29,18 @@ struct ArtifactFingerprint {
     modified_nanoseconds: i64,
     changed_seconds: i64,
     changed_nanoseconds: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ArtifactFile {
+    pub uri: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ArtifactInventory {
+    pub files: Vec<ArtifactFile>,
+    pub invalid_entries: Vec<String>,
 }
 
 impl From<&std::fs::Metadata> for ArtifactFingerprint {
@@ -92,12 +105,7 @@ impl ArtifactStore {
     }
 
     pub fn get(&self, uri: &str, max_bytes: usize) -> Result<Vec<u8>> {
-        let digest = uri
-            .strip_prefix("gdbai://artifact/sha256:")
-            .filter(|digest| {
-                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "invalid artifact URI"))?;
+        let digest = artifact_digest(uri)?;
         let path = self.root.join("sha256").join(digest);
         let metadata = std::fs::symlink_metadata(&path)?;
         if !metadata.file_type().is_file() {
@@ -123,12 +131,7 @@ impl ArtifactStore {
     }
 
     pub fn get_range(&self, uri: &str, offset: u64, max_bytes: usize) -> Result<(Vec<u8>, u64)> {
-        let digest = uri
-            .strip_prefix("gdbai://artifact/sha256:")
-            .filter(|digest| {
-                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "invalid artifact URI"))?;
+        let digest = artifact_digest(uri)?;
         let path = self.root.join("sha256").join(digest);
         let mut file = OpenOptions::new()
             .read(true)
@@ -199,6 +202,62 @@ impl ArtifactStore {
         }
         Ok((bytes, metadata.len()))
     }
+
+    pub fn inventory(&self) -> Result<ArtifactInventory> {
+        let mut files = Vec::new();
+        let mut invalid_entries = Vec::new();
+        for entry in std::fs::read_dir(self.root.join("sha256"))? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let file_type = entry.file_type()?;
+            if name.len() != 64
+                || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || name.bytes().any(|byte| byte.is_ascii_uppercase())
+                || !file_type.is_file()
+            {
+                invalid_entries.push(name);
+                continue;
+            }
+            files.push(ArtifactFile {
+                uri: format!("gdbai://artifact/sha256:{name}"),
+                size: entry.metadata()?.len(),
+            });
+        }
+        files.sort_by(|left, right| left.uri.cmp(&right.uri));
+        invalid_entries.sort();
+        Ok(ArtifactInventory {
+            files,
+            invalid_entries,
+        })
+    }
+
+    pub fn verify(&self, uri: &str) -> Result<()> {
+        self.get_range(uri, 0, 0).map(|_| ())
+    }
+
+    pub fn remove(&self, uri: &str) -> Result<()> {
+        let digest = artifact_digest(uri)?;
+        let path = self.root.join("sha256").join(digest);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::new(
+                ErrorCode::Internal,
+                "artifact path is not a regular file",
+            ));
+        }
+        std::fs::remove_file(path)?;
+        self.verified
+            .lock()
+            .map_err(|_| Error::new(ErrorCode::Internal, "artifact verification cache poisoned"))?
+            .remove(digest);
+        Ok(())
+    }
+}
+
+fn artifact_digest(uri: &str) -> Result<&str> {
+    uri.strip_prefix("gdbai://artifact/sha256:")
+        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "invalid artifact URI"))
 }
 
 fn read_artifact_file(path: &std::path::Path, maximum: usize) -> Result<Vec<u8>> {
