@@ -521,3 +521,12 @@ impl Gateway {
         )
     }
 }
+
+fn valid_signal_name(signal: &str) -> bool {
+    signal.strip_prefix("SIG").is_some_and(|name| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    })
+}

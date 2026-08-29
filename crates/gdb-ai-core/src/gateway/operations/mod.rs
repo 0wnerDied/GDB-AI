@@ -143,15 +143,6 @@ impl Gateway {
     }
 }
 
-fn valid_signal_name(signal: &str) -> bool {
-    signal.strip_prefix("SIG").is_some_and(|name| {
-        !name.is_empty()
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    })
-}
-
 fn hex_decode(value: &str) -> Result<Vec<u8>> {
     if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(Error::new(
