@@ -172,7 +172,10 @@ impl SessionHandle {
         // they needed to preempt. Keep a dedicated bounded control lane.
         let (controls, control_receiver) = mpsc::channel(16);
 
-        let mut worker = SessionWorker::bootstrap(
+        // 2026-08-29: Bootstrap, handshake, MI journaling, and the caller's
+        // Gateway future shared one poll stack. A normal session create could
+        // exhaust Tokio's 2 MiB worker stack as the request surface grew.
+        let mut worker = tokio::spawn(SessionWorker::bootstrap(
             config.clone(),
             profile,
             store,
@@ -184,8 +187,14 @@ impl SessionHandle {
             events.clone(),
             receiver,
             control_receiver,
-        )
-        .await?;
+        ))
+        .await
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("bootstrap task failed: {error}"),
+            )
+        })??;
         let capabilities = worker.capabilities.clone();
         let inferior_output = worker.inferior_output.clone();
         metrics.session_started();
