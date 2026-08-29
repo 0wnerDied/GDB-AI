@@ -1,7 +1,7 @@
 # GDB/AI Implementation Plan and Normative Specification
 
-Status: North-star implementation and runtime qualification complete;
-release packaging pending
+Status: North-star functional baseline qualified; production-stable v1
+release gates remain open
 
 This document records the complete project requested for `GDB/AI`. It is the
 normative implementation and release checklist. Host-dependent functions are
@@ -1744,12 +1744,15 @@ document:
 - The North-star matrix is not a claim that the vertical slice already
   supports every target, transport, architecture, SDK, or isolation feature.
 
-## 54. Version 1 implementation conformance
+## 54. Version 1 functional implementation conformance
 
 The repository implements every canonical method in section 14 without a
 placeholder or deferred response. MCP exposes the complete semantic surface,
 including values, registers, tracking, batching, Agent experiments, events,
-raw administration, and the conditional kernel provider.
+raw administration, and the conditional kernel provider. This is functional
+conformance, not a claim that every transport, resource, evidence-retention,
+and daemon-operability path is production-stable. Sections 56-59 define the
+remaining release boundary.
 
 Implemented release surfaces:
 
@@ -1815,9 +1818,409 @@ Completed correctness work includes:
 - two blind native-GDB versus GDB/AI Agent pilots, including one matched pair
   that completed target-side flag reads with replay and isolation evidence.
 
-North-star implementation and runtime qualification are complete at this
-functional baseline. Repeated paired Agent A/B/C/D evaluation from section 52
-is explicitly deferred by project direction; it remains future product-effect
-research rather than a correctness or release gate. Creating a release tag
-and publishing artifact hashes/provenance remain separate packaging work.
-The `gdb.ai/v1` name identifies the protocol major version, not a release tag.
+North-star feature implementation and the declared runtime matrix are complete
+at this functional baseline. The latest evidence-delivery audit in section 56
+identified release blockers outside the already-qualified GDB/MI control core.
+Repeated paired Agent A/B/C/D evaluation from section 52 is explicitly deferred
+by project direction. It is not an engineering correctness gate, but it remains
+required before making comparative Agent-effect claims. The `gdb.ai/v1` name
+identifies the protocol major version, not a stable software release or tag.
+
+## 56. Latest release audit and evidence boundary
+
+The latest independent audit examined `GDB-AI-main (1).zip`, SHA-256
+`c2663adbcd2dbfa3050fad107c17fdf7910b6f792ccb5066d53d4048ed17b8c1`.
+The archive contains no Git metadata, so its self-reported commit cannot be
+proven from the archive alone. Repository baseline `4195050` is independently
+corroborated by required CI run `33225096633`; documentation HEAD `6b49bc6`
+passed the same 14-job matrix in run `33225756058`.
+
+The audit distinguishes local execution, public CI evidence, and static code
+inspection. Its local environment ran the Python and TypeScript SDK checks,
+schema hashes, strict C/C++ fixture builds, and target smoke tests. Rust, GDB,
+GDBserver, AArch64, kernel, fuzz, and soak claims rely on the named repository
+CI and previously recorded local runs rather than on that archive container.
+
+Current release assessment:
+
+| Area | Status | Score |
+| --- | --- | ---: |
+| Technical direction | Strong | 9.3/10 |
+| MI parser and framer | Strong | 8.8/10 |
+| Session scheduling, state, and preemption | Strong | 8.6/10 |
+| Stop-consistent observation | Strong | 8.7/10 |
+| Target lifecycle and compatibility | Qualified | 8.2/10 |
+| Test and CI design | Qualified | 8.7/10 |
+| Security defaults | Needs network/data-plane closure | 7.4/10 |
+| MCP resources | Release blocker remains | 6.2/10 |
+| Evidence and persistence | Incomplete retention boundary | 6.8/10 |
+| Agent-specific semantics | Correct but not causally proven | 5.8/10 |
+| Maintainability | Large modules need later splitting | 6.0/10 |
+| Overall | Functional RC baseline | 7.7/10 |
+
+The local stdio/Unix control core is near release-candidate quality. The full
+HTTP/resource daemon and complete 17-tool surface remain pre-production until
+the gates below close.
+
+The following earlier control-plane blockers are closed and must not be
+regressed:
+
+- required-session validation returns typed errors instead of panicking;
+- typed stop reasons preserve breakpoint, watchpoint, signal, and scope data;
+- probes count only their own breakpoint and reject unrelated stops;
+- stable observations and snapshot commit cannot cross a stop or epoch;
+- MI, GDB stderr, and PTY bulk paths are separated;
+- PTY slave release and explicit rearm prevent EOF polling and descriptor
+  leaks;
+- control requests preempt normal commands and absolute deadlines fence
+  unknown outcomes;
+- every advertised minimal snapshot is actually stored;
+- duplicate running events share one execution epoch;
+- reused backend thread IDs receive a new public generation;
+- unknown methods use fallible conversion; and
+- GDB 9.2-17.1, AArch64, kernel, fuzz, chaos, and 10,000 lifecycle evidence
+  is recorded at exact baselines.
+
+## 57. Open release findings
+
+### 57.1 P0: MCP artifact resources can silently truncate
+
+`artifact.get` correctly returns a bounded page with `size`, `offset`,
+`next_offset`, and `truncated`. The current MCP `resources/read` adapter calls
+that method, extracts only `data_base64`, discards the paging fields, and
+returns the original content-addressed URI. A large artifact is therefore
+represented as a complete blob even though only its first page was returned.
+
+This violates the evidence invariant: bytes returned for a content-addressed
+resource must hash to the digest named by that resource, or the URI must
+explicitly identify a complete byte range. It can corrupt memory, transcript,
+crash, and large-value evidence without giving the Agent a recovery cursor.
+The MCP 2025-11-25 [resource schema](https://modelcontextprotocol.io/specification/2025-11-25/schema)
+does not define a `resources/read` continuation field, and the standard
+[pagination operations](https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/pagination)
+do not include resource reads.
+
+The canonical resource design is:
+
+```text
+gdbai://artifact/sha256:<digest>
+    -> application/vnd.gdb-ai.artifact-manifest+json
+
+gdbai://artifact/sha256:<digest>?offset=<n>&length=<m>
+    -> a complete application/octet-stream range
+```
+
+The manifest contains the full digest, size, MIME type, sensitivity, page
+size, and range URI template. `artifact.get` remains the canonical paged API.
+SDK helpers may stream and reassemble pages, then verify the final SHA-256;
+they must not allocate an unbounded artifact in Agent context.
+
+Required tests cover a small artifact, a multi-page artifact, exact boundary
+ranges, invalid and out-of-range parameters, deleted content, owner denial,
+and reconstruction whose SHA-256 equals the manifest digest. Until this is
+fixed, the complete MCP resource surface is not releasable as stable v1.
+
+### 57.2 P1: HTTP disconnect can retain pending work
+
+HTTP request handling reserves a pending entry, spawns an operation and
+waiter, awaits the waiter in the network handler, and removes the entry only
+after that await returns. Dropping the handler on client disconnect does not
+cancel the target operation, which is correct, but it also skips bookkeeping
+cleanup. The stale entry prevents idle eviction and can eventually exhaust
+the transport-session cap.
+
+The operation-owned task must remove its pending entry on success, typed
+error, panic, timeout, or abort. Each entry has an absolute deadline and an
+abort handle. The existing idle task also removes entries beyond that hard
+deadline. Deleting a transport session applies the recorded cancellation
+policy to every pending request. Network disconnect, waiter cancellation,
+target interruption, and session closure remain distinct semantics.
+
+### 57.3 P1: HTTP Origin and confidentiality policy are incomplete
+
+The current server permits non-loopback HTTP when a bearer-token file exists,
+but it does not validate `Origin` and does not provide transport encryption.
+A bearer token authenticates a caller; it does not protect that token,
+inferior I/O, memory, or transcripts on plaintext networks.
+
+Default policy is:
+
+```text
+loopback HTTP                     allowed
+Unix socket                       allowed
+non-loopback plaintext HTTP       denied
+trusted TLS reverse proxy         explicit configuration required
+```
+
+Every `/mcp` request with an `Origin` header must match an explicit allowlist
+or return HTTP 403. Non-browser loopback clients may omit Origin. Native TLS is
+not required for the first correction; a documented trusted reverse proxy is
+the smaller deployment boundary. Forwarding headers are trusted only from
+configured proxy addresses. Metrics remain authenticated and health output
+contains no sensitive state. These checks follow the MCP 2025-11-25
+[Streamable HTTP transport rules](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports).
+
+### 57.4 P1: Declared MCP versions exceed implemented HTTP semantics
+
+Initialization currently accepts `2025-11-25`, `2025-06-18`, `2025-03-26`,
+and `2024-11-05`, while HTTP client state does not retain the negotiated
+version. Later requests are not checked against `MCP-Protocol-Version`, every
+response emits the current constant, and the deprecated 2024-11-05 HTTP+SSE
+endpoints are absent.
+
+The short path is to expose Streamable HTTP only as `2025-11-25`. Subsequent
+requests must carry that negotiated version, with invalid or unsupported
+values returning HTTP 400. Stdio may retain message-level compatibility where
+tests prove it. Older HTTP versions return only after their transport behavior
+and independent conformance tests exist; no compatibility shim is added merely
+to preserve a version list.
+
+### 57.5 Evidence data-plane issues
+
+The following are high-priority evidence issues after the P0/P1 transport
+work:
+
+1. `ArtifactStore::get_range` re-hashes the complete file for every page,
+   making sequential paging approach O(page count times artifact size).
+   `put` already computes and syncs the digest; range reads need verified
+   immutable metadata or a metadata-sensitive verification cache, with an
+   explicit scrub path for full revalidation.
+2. PTY bytes live only in the bounded ring. Journal entries record offset,
+   length, and dropped bytes but no content hash or artifact reference. The
+   API must distinguish ephemeral output from spooled or finalized evidence.
+3. The advertised per-inferior output URI ignores its inferior ID and returns
+   session-wide PTY data. Until real per-inferior routing exists, the truthful
+   URI is `gdbai://session/<session>/output/pty`.
+4. The PTY reader awaits every metadata notification after writing the ring.
+   A full metadata queue can stop PTY draining and eventually block the
+   inferior. Use a coalesced, non-blocking high-water notification; bytes stay
+   in the ring even if a notification is dropped.
+5. Event lag and event-stream closure both become `INTERNAL`. Lag must return
+   a typed `EVENT_GAP` with requested, earliest, and current cursors plus a
+   resync resource. Closure must report a terminal stream/session state.
+6. The journal is ordered before reducer application but batch flush without
+   `sync_data` is not crash durability. Performance and durable modes must use
+   those terms separately and sync only at declared operation, stop,
+   snapshot, and close boundaries.
+
+### 57.6 Storage, protocol, and security issues
+
+Long-running daemon state still needs a bounded lifecycle across sessions,
+audit rows, operation results, snapshots, journals, artifacts, and SQLite WAL.
+The storage controller must provide global, owner, and session quotas; closed
+session retention; pinning/reference accounting; orphan collection; WAL
+checkpointing; disk watermarks; and a dry-run GC report. A hard cap rejects
+new work without corrupting already-recorded evidence.
+
+The recursive contract registry is now a shared runtime/schema source, but
+`ObjectContract::any_of` means at least one field rather than exactly one.
+Current schemas accept ambiguous breakpoint selectors, duplicate nested and
+top-level locations, both text and base64 payloads, both expected bytes and a
+digest, multiple search patterns, and source line zero. Runtime and generated
+schema must reject the same corpus using exactly-one/mutual-exclusion groups
+and positive source positions.
+
+Memory effect classification currently becomes volatile only when the caller
+sets `volatile=true`. The server or provider must classify ordinary, volatile,
+MMIO, unknown, and forbidden ranges. A caller field is acknowledgement, not
+the source of truth. Unknown and volatile reads require the corresponding
+policy authorization.
+
+Artifact sensitivity updates are not monotonic: registering an existing
+digest can overwrite a stronger label. Sensitivity belongs to the owner
+association where possible; any global label can only stay equal or become
+more restrictive.
+
+### 57.7 Default surface and maintainability
+
+The 61-method canonical protocol remains useful for advanced clients, but the
+default 17-tool MCP projection makes ordinary Agent selection harder and
+exposes low-evidence or high-risk operations without need. The G3 target
+projection and feature groups are defined in section 59.
+
+`agent.experiment` currently shares the probe implementation,
+`inferior_io.close_stdin` duplicates the more honest `send_eof` name, and
+`agent.hypothesis_check` remains a thin formatted-value comparison. G3 will
+hide them from the default projection and deprecate them rather than give them
+new speculative behavior. A future experiment needs distinct setup,
+execution, capture, verdict, cleanup, and budget semantics.
+
+Large modules (`operations.rs`, `session.rs`, `main.rs`, and `gateway.rs`) now
+raise review cost. They are split by behavior-preserving moves only after the
+release blockers and golden tests are complete. No broad cleanup refactor is
+combined with protocol or concurrency fixes.
+
+## 58. Release gates after the functional baseline
+
+The gates are dependency ordered. Passing a later test does not waive an
+earlier invariant.
+
+### G0: Auditable release identity
+
+Create a signed release tag, deterministic source archive, binary checksums,
+SBOM, toolchain inventory, and CI attestation. Exclude interpreter caches,
+local SDK build output, fuzz corpora generated at runtime, and temporary test
+files. `gdb-ai doctor` reports build commit, dirty state, software version,
+Rust version, GDB/MI version, and MCP version.
+
+Exit condition: a downloader can prove that source, tested commit, and binary
+belong to one provenance chain. This gate is a release operation, not a reason
+to change the `gdb.ai/v1` protocol namespace.
+
+### G1: MCP and HTTP release blockers
+
+Complete, in order:
+
+1. artifact manifest and exact range resources;
+2. operation-owned HTTP pending cleanup and hard deadlines;
+3. Origin validation and loopback/trusted-TLS-proxy binding policy; and
+4. truthful HTTP protocol-version negotiation, initially only 2025-11-25.
+
+Each fix includes success, denial, disconnect, timeout, cleanup, and boundary
+tests at the shared root cause. G1 is the gate for the complete MCP/HTTP
+daemon. A restricted stdio/Unix RC may omit HTTP and artifact resources, but
+must say so explicitly.
+
+### G2: Evidence and output data plane
+
+Complete linear artifact paging, coalesced PTY notifications, explicit
+`ephemeral_ring`/`bounded_spool`/`artifact` output modes, truthful session PTY
+URIs, typed event gaps, and documented performance/durable journal modes.
+Journaled durable chunks carry a digest and content reference; ephemeral
+offsets never claim replayability after ring loss.
+
+Exit conditions:
+
+- blocked journal/storage consumers do not stop PTY draining;
+- sequential paging reads approximately the artifact size, not one full scan
+  per page;
+- output durability is queryable and missing ranges are explicit; and
+- event consumers have a deterministic resynchronization path.
+
+### G3: Deterministic contracts and default Agent projection
+
+Add exactly-one and mutual-exclusion constraints to the shared contract,
+positive numeric bounds, server-side range-effect classification, and
+monotonic per-owner artifact sensitivity. One invalid-request corpus must
+produce equivalent runtime and JSON Schema rejection.
+
+The default MCP projection becomes seven core tools, with at most two
+read-oriented additions. Advanced canonical methods remain available only
+through explicit feature/profile configuration. Deprecated aliases disappear
+from the default catalog.
+
+### G4: Bounded daemon storage
+
+Implement global, owner, and session byte/count/age limits; closed-session
+retention; pinned artifact ownership; orphan cleanup; journal rotation; WAL
+checkpointing; storage verification; and `storage gc --dry-run` plus an
+explicit execution command. Metrics expose HTTP pending entries, spool bytes,
+artifact verification, event gaps, disk watermarks, and reclaimed bytes.
+
+Exit condition: a long-running soak remains within configured disk limits,
+GC never deletes content with a live owner, and a hard-cap condition fails
+new work safely without damaging existing evidence.
+
+### G5: Behavior-preserving module split
+
+After G1-G4 and golden replay/schema/tool-catalog tests, split one domain per
+commit:
+
+```text
+operations/  session, target, execution, breakpoint, inspection, value,
+             memory, io, tracking, agent, kernel, raw, artifact
+session/     handle, actor, scheduler, control, observation, output, snapshot
+server/      stdio, unix, http lifecycle, resources, tools
+```
+
+Each move preserves schemas, tool catalogs, errors, replay output, and public
+behavior. Refactoring never shares a commit with a release-blocker fix.
+
+### G6: Agent-effect evaluation
+
+Repeated paired A/B/C/D evaluation remains deferred by project direction and
+does not block engineering correctness or the restricted RC. Before making a
+comparative product claim, use matched model versions, prompts, permissions,
+budgets, environments, tasks, and multiple seeds:
+
+```text
+A  shell plus CLI GDB
+B  persistent raw GDB
+C  structured core GDB/AI
+D  C plus typed probe/experiment
+```
+
+Report resolution, root-cause localization, first useful evidence, corrected
+hypotheses, irrelevant debugger calls, raw fallback, tokens, turns, resumes,
+wall time, paired differences, and confidence intervals. `B > A`, `C > B`,
+and `D > C` support distinct orchestration, structured-interface, and semantic
+probe claims respectively. Existing CTF pilots remain usability cases only.
+
+### G7: Post-North-star options
+
+Only measured demand can promote non-stop per-thread execution,
+capability-gated record/replay, fuller multi-inferior support, managed GDB
+handoff, LLDB, or vendor target providers. None blocks the Linux all-stop
+GDB/MI North-star release. Arbitrary shell/Python/CLI as the normal Agent
+interface, arbitrary live-GDB takeover, and transparent live-inferior recovery
+remain non-goals.
+
+## 59. Default product surface and stable release claims
+
+The G3 production default Agent-visible tools will be:
+
+```text
+gdb_session
+gdb_run
+gdb_breakpoints
+gdb_inspect
+gdb_evaluate
+gdb_memory
+gdb_io
+```
+
+`gdb_events` may be enabled for clients that need explicit event waiting;
+disassembly remains an inspect view or an optional dedicated projection.
+Feature groups contain the remaining surface:
+
+```text
+extended-targets    attach, core, remote
+mutation            memory, register, and signal writes
+advanced-values     variable objects, tracking, and diffs
+multi-client        HTTP, authentication, leases, and idempotency
+experimental-agent  probe, hypothesis, and experiment
+kernel              kernel inspection and monitor
+raw-admin           raw MI and controlled CLI
+```
+
+Before G1-G4 and G0 release provenance pass, acceptable claims are limited to:
+
+- GDB/AI provides a stateful Agent Interface above GDB and GDB/MI;
+- the qualified control core separates MI from inferior I/O;
+- asynchronous state, stop-scoped context, and composite observations are
+  bounded and consistency checked;
+- probes attribute their own breakpoint stops; and
+- exact compatibility, kernel, chaos, fuzz, and soak evidence exists for the
+  named functional baseline.
+
+The project must not yet claim that the full HTTP/resource daemon is
+production-stable, that every tool belongs in the default Agent prompt, that
+all PTY evidence is durably replayable, or that structured/probe interfaces
+generally improve Agent success rates.
+
+Production-stable v1 requires all of the following at one signed tag:
+
+- no silently truncated artifact resource;
+- no leaked HTTP pending or transport session;
+- compliant Origin, confidentiality/proxy, and protocol-version handling;
+- deterministic rejection of ambiguous requests;
+- explicit PTY and journal durability;
+- bounded storage with safe GC;
+- green locked workspace, Clippy, MSRV, SDK, schema, fuzz, GDB, AArch64,
+  kernel, chaos, and soak gates; and
+- verifiable source, binary, SBOM, checksum, and CI provenance.
+
+Agent-effect evidence is a separate product-claim gate. Until G6 is resumed
+and completed, GDB/AI may claim an Agent-oriented interface and positive
+usability pilots, but not a general improvement in vulnerability discovery,
+exploitation, or software-repair success.
