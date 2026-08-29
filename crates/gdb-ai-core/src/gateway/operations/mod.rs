@@ -145,43 +145,5 @@ impl Gateway {
     }
 }
 
-fn raw_mi_is_managed(command: &str) -> bool {
-    [
-        "-break-",
-        "-exec-",
-        "-gdb-show",
-        "-list-thread-groups",
-        "-list-target-features",
-        "-file-list-shared-libraries",
-        "-stack-list-",
-        "-stack-select-frame",
-        "-thread-info",
-        "-thread-select",
-    ]
-    .iter()
-    .any(|prefix| command.starts_with(prefix))
-}
-
-// 2026-08-28: Raw MI previously bypassed workspace, attach, remote endpoint,
-// and safe-startup policy. Protected setup operations use their semantic APIs.
-fn raw_mi_is_denied(command: &str) -> bool {
-    matches!(
-        command,
-        "-interpreter-exec"
-            | "-gdb-exit"
-            | "-gdb-set"
-            | "-target-select"
-            | "-target-attach"
-            | "-target-file-get"
-            | "-target-file-put"
-            | "-target-file-delete"
-            | "-file-exec-and-symbols"
-            | "-file-exec-file"
-            | "-file-symbol-file"
-            | "-environment-cd"
-            | "-inferior-tty-set"
-    )
-}
-
 #[cfg(test)]
 mod tests;
