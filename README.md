@@ -1,5 +1,24 @@
 # GDB/AI
 
+<p align="center">
+  <img src="docs/assets/gdb-ai-control-plane.png"
+       alt="GDB/AI connects Agents to a stateful debugging control plane above GDB and the inferior"
+       width="100%">
+</p>
+
+<p align="center">
+  <a href="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-2ea44f"></a>
+  <img alt="Rust 1.88+" src="https://img.shields.io/badge/Rust-1.88%2B-dea584?logo=rust">
+  <img alt="GDB 9-17" src="https://img.shields.io/badge/GDB-9--17-4c7f9f">
+  <img alt="GDB/MI 3 and 4" src="https://img.shields.io/badge/GDB%2FMI-3%20%7C%204-00a6a6">
+</p>
+
+<p align="center">
+  <strong>A stateful debugger control plane for modern Agents.</strong><br>
+  Dynamic debugging · vulnerability validation · authorized exploit development
+</p>
+
 **GDB/AI (Agent Interface)** is a stateful interface for modern Agents doing
 dynamic debugging, vulnerability validation, and authorized vulnerability
 exploitation. It runs above GDB and the GDB/MI machine interface, exposing
@@ -11,6 +30,31 @@ GDB/AI does not define or replace GDB/MI. GDB/MI is part of GNU GDB in the
 binutils-gdb project and serves only as GDB/AI's backend protocol. Each GDB/AI
 session runs one dedicated GDB process, separates inferior PTY traffic from
 MI control traffic, and reduces asynchronous records into explicit state.
+
+## How it works
+
+```mermaid
+flowchart TB
+    Agent["Agent · IDE · SDK"] --> API["GDB/AI semantic API<br/>MCP · JSON-RPC · SDK"]
+    API --> Control["Stateful control plane<br/>policy · scheduler · reducer · evidence"]
+    Control -->|"tokenized commands"| GDB["GNU GDB<br/>native GDB/MI backend"]
+    GDB -->|"result + async records"| Control
+    Control <-->|"bounded I/O"| PTY["Dedicated inferior PTY"]
+    GDB --> Target["Native · core · gdbserver · remote target"]
+    PTY <--> Target
+```
+
+GDB/AI keeps GDB/MI as the backend boundary and takes over the stateful work
+that every Agent frontend would otherwise need to implement:
+
+| Concern | Frontend using GDB/MI directly | GDB/AI |
+| --- | --- | --- |
+| Lifecycle | Spawn, restart, interrupt, and clean up GDB | One owned GDB process per session |
+| State | Correlate result and asynchronous records | Reducer-owned revisions, epochs, and stop IDs |
+| Context | Track selected inferior, thread, and frame | Explicit, stale-checked handles |
+| Target I/O | Configure and drain target streams | Dedicated bounded PTY and separate MI control |
+| Large results | Add limits and storage per command | Pagination, quotas, and content-addressed artifacts |
+| Safety | Build policy around every mutation | Profiles, leases, revisions, audit, and reconciliation |
 
 The repository is independently versioned as `gdb-ai`; the executable is
 `gdb-ai`, the current protocol namespace is `gdb.ai/v1`, and resources use
@@ -25,11 +69,12 @@ completed behavior-preserving module split is in the
 
 ## Verification status
 
-The 2026-08-29 functional baseline `4195050` passed required CI
-[run 33225096633](https://github.com/0wnerDied/GDB-AI/actions/runs/33225096633).
-It exercised the full locked workspace, Clippy, Rust 1.88, schemas, both SDKs,
+The 2026-08-29 native MI audit baseline `c01fc1a` passed the complete verify
+job and all nine compatibility jobs in CI
+[run 33240437655](https://github.com/0wnerDied/GDB-AI/actions/runs/33240437655).
+It exercised the locked workspace, Clippy, Rust 1.88, schemas, both SDKs,
 bounded fuzz campaigns, and checksum-pinned GDB 9.2-12.1 with MI3 plus GDB
-13.2-17.1 with MI4.
+13.2-17.2 with MI4.
 
 Post-baseline release closure through `eca9806` completed artifact manifest
 and exact-range resources, operation-owned HTTP cleanup, loopback/Origin and
