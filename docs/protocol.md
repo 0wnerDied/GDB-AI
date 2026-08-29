@@ -51,6 +51,10 @@ atomically published, so concurrent writers cannot expose a partial artifact.
 Inferior PTY bytes currently share one session-scoped ring and are exposed as
 `gdbai://session/<session_id>/output/pty`. GDB/AI does not claim per-inferior
 output attribution until the backend can provide genuinely separate streams.
+The base PTY and transcript resource URIs return current-bound manifests;
+`?offset=<n>&length=<m>` returns that exact bounded range or fails if the bytes
+are unavailable. A resource page therefore never inherits an ambiguous base
+URI.
 The `output.evidence` setting selects an `ephemeral_ring`, a retained
 `bounded_spool`, or an `artifact` finalized when the session closes. I/O reads
 and close responses report captured, spooled, dropped, completeness, digest,

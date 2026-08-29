@@ -58,8 +58,13 @@ pub(super) fn resource_templates() -> Value {
         },
         {
             "uriTemplate": "gdbai://session/{session_id}/transcript",
-            "name": "Paged MI transcript",
-            "mimeType": "application/json"
+            "name": "MI transcript manifest",
+            "mimeType": "application/vnd.gdb-ai.transcript-manifest+json"
+        },
+        {
+            "uriTemplate": "gdbai://session/{session_id}/transcript?offset={offset}&length={length}",
+            "name": "Exact MI transcript range",
+            "mimeType": "application/x-ndjson"
         },
         {
             "uriTemplate": "gdbai://session/{session_id}/event/{event_seq}",
@@ -73,8 +78,13 @@ pub(super) fn resource_templates() -> Value {
         },
         {
             "uriTemplate": "gdbai://session/{session_id}/output/pty",
-            "name": "Paged session PTY output",
-            "mimeType": "application/json"
+            "name": "Session PTY output manifest",
+            "mimeType": "application/vnd.gdb-ai.output-manifest+json"
+        },
+        {
+            "uriTemplate": "gdbai://session/{session_id}/output/pty?offset={offset}&length={length}",
+            "name": "Exact session PTY output range",
+            "mimeType": "application/octet-stream"
         },
         {
             "uriTemplate": "gdbai://session/{session_id}/breakpoints",
@@ -109,6 +119,50 @@ enum ArtifactResource {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ExactRange {
+    offset: u64,
+    length: u64,
+}
+
+#[derive(Debug, PartialEq)]
+enum SessionResource {
+    Json {
+        method: CanonicalMethod,
+        parameters: Value,
+    },
+    TranscriptManifest,
+    TranscriptRange(ExactRange),
+    PtyManifest,
+    PtyRange(ExactRange),
+}
+
+fn resource_not_found(uri: &str) -> RpcFault {
+    RpcFault {
+        code: -32002,
+        message: "resource not found".into(),
+        data: Some(json!({"uri": uri})),
+    }
+}
+
+fn parse_exact_range(query: &str, name: &str) -> Result<ExactRange, RpcFault> {
+    let (offset, length) = query
+        .strip_prefix("offset=")
+        .and_then(|query| query.split_once("&length="))
+        .ok_or_else(|| RpcFault::invalid(format!("{name} range requires offset and length")))?;
+    let offset = offset
+        .parse::<u64>()
+        .ok()
+        .filter(|value| value.to_string() == offset)
+        .ok_or_else(|| RpcFault::invalid(format!("{name} range offset is invalid")))?;
+    let length = length
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0 && value.to_string() == length)
+        .ok_or_else(|| RpcFault::invalid(format!("{name} range length is invalid")))?;
+    Ok(ExactRange { offset, length })
+}
+
 fn parse_artifact_resource(uri: &str) -> Result<ArtifactResource, RpcFault> {
     let (artifact_uri, query) = match uri.split_once('?') {
         Some(parts) => (parts.0, Some(parts.1)),
@@ -130,20 +184,7 @@ fn parse_artifact_resource(uri: &str) -> Result<ArtifactResource, RpcFault> {
             digest,
         });
     };
-    let (offset, length) = query
-        .strip_prefix("offset=")
-        .and_then(|query| query.split_once("&length="))
-        .ok_or_else(|| RpcFault::invalid("artifact range requires offset and length"))?;
-    let offset = offset
-        .parse::<u64>()
-        .ok()
-        .filter(|value| value.to_string() == offset)
-        .ok_or_else(|| RpcFault::invalid("artifact range offset is invalid"))?;
-    let length = length
-        .parse::<u64>()
-        .ok()
-        .filter(|value| *value > 0 && value.to_string() == length)
-        .ok_or_else(|| RpcFault::invalid("artifact range length is invalid"))?;
+    let ExactRange { offset, length } = parse_exact_range(query, "artifact")?;
     Ok(ArtifactResource::Range {
         uri: uri.to_owned(),
         artifact_uri: artifact_uri.to_owned(),
@@ -151,6 +192,59 @@ fn parse_artifact_resource(uri: &str) -> Result<ArtifactResource, RpcFault> {
         offset,
         length,
     })
+}
+
+fn parse_session_resource(uri: &str) -> Result<(String, SessionResource), RpcFault> {
+    let (base_uri, query) = match uri.split_once('?') {
+        Some(parts) => (parts.0, Some(parts.1)),
+        None => (uri, None),
+    };
+    let path = base_uri
+        .strip_prefix("gdbai://session/")
+        .ok_or_else(|| resource_not_found(uri))?;
+    let parts = path.split('/').collect::<Vec<_>>();
+    let session = parts
+        .first()
+        .copied()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| resource_not_found(uri))?
+        .to_owned();
+    let resource = match (parts.as_slice(), query) {
+        ([_, "status"] | [_, "events"], None) => SessionResource::Json {
+            method: CanonicalMethod::SessionGet,
+            parameters: json!({}),
+        },
+        ([_, "capabilities"], None) => SessionResource::Json {
+            method: CanonicalMethod::SessionCapabilities,
+            parameters: json!({}),
+        },
+        ([_, "transcript"], None) => SessionResource::TranscriptManifest,
+        ([_, "transcript"], Some(query)) => {
+            SessionResource::TranscriptRange(parse_exact_range(query, "transcript")?)
+        }
+        ([_, "event", event_seq], None) => SessionResource::Json {
+            method: CanonicalMethod::SessionEvent,
+            parameters: json!({
+                "event_seq": event_seq
+                    .parse::<u64>()
+                    .map_err(|_| RpcFault::invalid("invalid event sequence"))?
+            }),
+        },
+        ([_, "breakpoints"], None) => SessionResource::Json {
+            method: CanonicalMethod::BreakpointList,
+            parameters: json!({}),
+        },
+        ([_, "snapshot", snapshot_id], None) => SessionResource::Json {
+            method: CanonicalMethod::InspectionSnapshotGet,
+            parameters: json!({"snapshot_id": snapshot_id}),
+        },
+        ([_, "output", "pty"], None) => SessionResource::PtyManifest,
+        ([_, "output", "pty"], Some(query)) => {
+            SessionResource::PtyRange(parse_exact_range(query, "PTY output")?)
+        }
+        _ => return Err(resource_not_found(uri)),
+    };
+    Ok((session, resource))
 }
 
 fn artifact_resource_contents(
@@ -226,6 +320,151 @@ fn artifact_resource_contents(
     }
 }
 
+fn session_resource_request(
+    resource: &SessionResource,
+) -> Result<(CanonicalMethod, Value), RpcFault> {
+    let bounded_range = |range: ExactRange| {
+        if range.length > 64 * 1024 {
+            Err(RpcFault::invalid("session resource range exceeds 64 KiB"))
+        } else {
+            Ok(range)
+        }
+    };
+    match resource {
+        SessionResource::Json { method, parameters } => Ok((*method, parameters.clone())),
+        SessionResource::TranscriptManifest => Ok((
+            CanonicalMethod::SessionTranscript,
+            json!({"offset": 0, "max_bytes": 1}),
+        )),
+        SessionResource::TranscriptRange(range) => {
+            let range = bounded_range(*range)?;
+            Ok((
+                CanonicalMethod::SessionTranscript,
+                json!({"offset": range.offset, "max_bytes": range.length}),
+            ))
+        }
+        SessionResource::PtyManifest => Ok((
+            CanonicalMethod::InferiorIoRead,
+            json!({"stream": "pty", "after_offset": u64::MAX, "max_bytes": 0}),
+        )),
+        SessionResource::PtyRange(range) => {
+            let range = bounded_range(*range)?;
+            Ok((
+                CanonicalMethod::InferiorIoRead,
+                json!({
+                    "stream": "pty",
+                    "after_offset": range.offset,
+                    "max_bytes": range.length
+                }),
+            ))
+        }
+    }
+}
+
+fn session_resource_contents(
+    uri: &str,
+    resource: SessionResource,
+    result: Value,
+) -> Result<Value, RpcFault> {
+    let manifest = |mime_type: &str, body: Value| -> Result<Value, RpcFault> {
+        Ok(json!({"contents": [{
+            "uri": uri,
+            "mimeType": mime_type,
+            "text": serde_json::to_string(&body)
+                .map_err(|error| RpcFault::invalid(error.to_string()))?
+        }]}))
+    };
+    let exact_blob = |mime_type: &str,
+                      range: ExactRange,
+                      requested_offset: Option<u64>,
+                      next_offset: Option<u64>,
+                      gap: bool,
+                      available_from: Option<u64>|
+     -> Result<Value, RpcFault> {
+        let end = range
+            .offset
+            .checked_add(range.length)
+            .ok_or_else(|| RpcFault::invalid("session resource range overflows"))?;
+        if requested_offset != Some(range.offset)
+            || next_offset != Some(end)
+            || gap
+            || available_from.is_some_and(|available| available > range.offset)
+        {
+            return Err(RpcFault::invalid(
+                "session resource did not contain the exact requested range",
+            ));
+        }
+        let blob = result
+            .get("data_base64")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcFault::invalid("session resource contained no data"))?;
+        Ok(json!({"contents": [{
+            "uri": uri,
+            "mimeType": mime_type,
+            "blob": blob,
+            "_meta": {"offset": range.offset, "length": range.length}
+        }]}))
+    };
+
+    match resource {
+        SessionResource::Json { .. } => manifest("application/json", result),
+        SessionResource::TranscriptManifest => {
+            let size = result
+                .get("total_bytes")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| RpcFault::invalid("transcript response contained no size"))?;
+            manifest(
+                "application/vnd.gdb-ai.transcript-manifest+json",
+                json!({
+                    "uri": uri,
+                    "size": size,
+                    "mime_type": "application/x-ndjson",
+                    "page_size": 64 * 1024,
+                    "range_uri_template": format!("{uri}?offset={{offset}}&length={{length}}")
+                }),
+            )
+        }
+        SessionResource::TranscriptRange(range) => exact_blob(
+            "application/x-ndjson",
+            range,
+            result.get("offset").and_then(Value::as_u64),
+            result.get("next_offset").and_then(Value::as_u64),
+            false,
+            None,
+        ),
+        SessionResource::PtyManifest => {
+            let available_from = result
+                .get("available_from")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| RpcFault::invalid("PTY response contained no lower bound"))?;
+            let end_offset = result
+                .get("next_offset")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| RpcFault::invalid("PTY response contained no upper bound"))?;
+            manifest(
+                "application/vnd.gdb-ai.output-manifest+json",
+                json!({
+                    "uri": uri,
+                    "available_from": available_from,
+                    "end_offset": end_offset,
+                    "mime_type": "application/octet-stream",
+                    "page_size": 64 * 1024,
+                    "range_uri_template": format!("{uri}?offset={{offset}}&length={{length}}"),
+                    "evidence": result.get("evidence").cloned().unwrap_or(Value::Null)
+                }),
+            )
+        }
+        SessionResource::PtyRange(range) => exact_blob(
+            "application/octet-stream",
+            range,
+            result.get("requested_offset").and_then(Value::as_u64),
+            result.get("next_offset").and_then(Value::as_u64),
+            result.get("gap").and_then(Value::as_bool) != Some(false),
+            result.get("available_from").and_then(Value::as_u64),
+        ),
+    }
+}
+
 pub(super) async fn read_resource(
     gateway: &Gateway,
     caller: &Caller,
@@ -264,66 +503,21 @@ pub(super) async fn read_resource(
         // Return a manifest or an exact URI-bound range so evidence is whole.
         return artifact_resource_contents(resource, result);
     }
-    let path = uri
-        .strip_prefix("gdbai://session/")
-        .ok_or_else(|| RpcFault {
-            code: -32002,
-            message: "resource not found".into(),
-            data: Some(json!({"uri": uri})),
-        })?;
-    let parts = path.split('/').collect::<Vec<_>>();
-    let session = parts
-        .first()
-        .copied()
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| RpcFault {
-            code: -32002,
-            message: "resource not found".into(),
-            data: Some(json!({"uri": uri})),
-        })?;
-    let (method, parameters) = match parts.as_slice() {
-        [_, "status"] | [_, "events"] => (CanonicalMethod::SessionGet, json!({})),
-        [_, "capabilities"] => (CanonicalMethod::SessionCapabilities, json!({})),
-        [_, "transcript"] => (CanonicalMethod::SessionTranscript, json!({})),
-        [_, "event", event_seq] => (
-            CanonicalMethod::SessionEvent,
-            json!({"event_seq": event_seq.parse::<u64>().map_err(|_| RpcFault::invalid("invalid event sequence"))?}),
-        ),
-        [_, "breakpoints"] => (CanonicalMethod::BreakpointList, json!({})),
-        [_, "snapshot", snapshot_id] => (
-            CanonicalMethod::InspectionSnapshotGet,
-            json!({"snapshot_id": snapshot_id}),
-        ),
-        // 2026-08-29: The PTY ring is session-scoped. The old per-inferior
-        // resource URI ignored its inferior ID and promised false isolation.
-        [_, "output", "pty"] => (
-            CanonicalMethod::InferiorIoRead,
-            json!({"stream": "pty", "after_offset": 0, "max_bytes": 65536}),
-        ),
-        _ => {
-            return Err(RpcFault {
-                code: -32002,
-                message: "resource not found".into(),
-                data: Some(json!({"uri": uri})),
-            });
-        }
-    };
+    let (session, resource) = parse_session_resource(uri)?;
+    let (method, parameters) = session_resource_request(&resource)?;
     let response = gateway
         .dispatch(
-            canonical_request(sequence, Some(session.into()), method, parameters),
+            canonical_request(sequence, Some(session), method, parameters),
             caller,
         )
         .await;
     if let Some(error) = response.error {
         return Err(core_fault(error.code.code_name(), error.message));
     }
-    let text = serde_json::to_string(&response.result.unwrap_or(Value::Null))
-        .map_err(|error| RpcFault::invalid(error.to_string()))?;
-    Ok(json!({"contents": [{
-        "uri": uri,
-        "mimeType": "application/json",
-        "text": text
-    }]}))
+    // 2026-08-29: Session resources returned paged bytes under a base URI,
+    // leaving clients unable to name or verify the next page. Base URIs now
+    // describe current bounds and range URIs return only exact bytes.
+    session_resource_contents(uri, resource, response.result.unwrap_or(Value::Null))
 }
 
 #[cfg(test)]
@@ -424,6 +618,51 @@ mod tests {
     fn resource_templates_describe_session_scoped_pty_output() {
         let templates = resource_templates().to_string();
         assert!(templates.contains("gdbai://session/{session_id}/output/pty"));
+        assert!(templates.contains("output/pty?offset={offset}&length={length}"));
+        assert!(templates.contains("transcript?offset={offset}&length={length}"));
         assert!(!templates.contains("/inferior/{inferior_id}/output"));
+    }
+
+    #[test]
+    fn session_resources_are_manifests_or_exact_ranges() {
+        let transcript = "gdbai://session/sess_test/transcript";
+        let (_, resource) = parse_session_resource(transcript).unwrap();
+        let manifest = session_resource_contents(
+            transcript,
+            resource,
+            json!({"total_bytes": 8, "offset": 0, "next_offset": 1}),
+        )
+        .unwrap();
+        let manifest: Value =
+            serde_json::from_str(manifest["contents"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(manifest["size"], 8);
+
+        let transcript_range = format!("{transcript}?offset=4&length=4");
+        let (_, resource) = parse_session_resource(&transcript_range).unwrap();
+        let range = session_resource_contents(
+            &transcript_range,
+            resource,
+            json!({"offset": 4, "next_offset": 8, "data_base64": "BAUGBw=="}),
+        )
+        .unwrap();
+        assert_eq!(range["contents"][0]["uri"], transcript_range);
+        assert_eq!(range["contents"][0]["blob"], "BAUGBw==");
+
+        let pty_range = "gdbai://session/sess_test/output/pty?offset=4&length=4";
+        let (_, resource) = parse_session_resource(pty_range).unwrap();
+        assert!(
+            session_resource_contents(
+                pty_range,
+                resource,
+                json!({
+                    "requested_offset": 4,
+                    "available_from": 5,
+                    "next_offset": 8,
+                    "gap": true,
+                    "data_base64": "BAUGBw=="
+                }),
+            )
+            .is_err()
+        );
     }
 }
