@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 struct ToolAction {
     name: &'static str,
     method: CanonicalMethod,
+    advanced: bool,
 }
 
 struct ToolProjection {
@@ -15,6 +16,7 @@ struct ToolProjection {
     discriminator: Option<&'static str>,
     actions: &'static [ToolAction],
     read_only: bool,
+    advanced: bool,
     raw: bool,
 }
 
@@ -23,6 +25,17 @@ macro_rules! action {
         ToolAction {
             name: $name,
             method: CanonicalMethod::$method,
+            advanced: false,
+        }
+    };
+}
+
+macro_rules! advanced_action {
+    ($name:literal, $method:ident) => {
+        ToolAction {
+            name: $name,
+            method: CanonicalMethod::$method,
+            advanced: true,
         }
     };
 }
@@ -30,9 +43,9 @@ macro_rules! action {
 const SESSION_ACTIONS: &[ToolAction] = &[
     action!("create", SessionCreate),
     action!("launch", TargetLaunch),
-    action!("attach", TargetAttach),
-    action!("connect_remote", TargetConnectRemote),
-    action!("open_core", TargetOpenCore),
+    advanced_action!("attach", TargetAttach),
+    advanced_action!("connect_remote", TargetConnectRemote),
+    advanced_action!("open_core", TargetOpenCore),
     action!("detach", TargetDetach),
     action!("restart", TargetRestart),
     action!("kill", TargetKill),
@@ -82,7 +95,7 @@ const INSPECTION_ACTIONS: &[ToolAction] = &[
     action!("providers", InspectionGet),
     action!("crash", InspectionGet),
     action!("snapshot", InspectionSnapshot),
-    action!("diff", InspectionDiff),
+    advanced_action!("diff", InspectionDiff),
 ];
 const EVALUATE_ACTIONS: &[ToolAction] = &[action!("", ValueEvaluate)];
 const VALUE_ACTIONS: &[ToolAction] = &[
@@ -93,9 +106,9 @@ const VALUE_ACTIONS: &[ToolAction] = &[
 ];
 const MEMORY_ACTIONS: &[ToolAction] = &[
     action!("read", MemoryRead),
-    action!("write", MemoryWrite),
-    action!("search", MemorySearch),
-    action!("compare", MemoryCompare),
+    advanced_action!("write", MemoryWrite),
+    advanced_action!("search", MemorySearch),
+    advanced_action!("compare", MemoryCompare),
 ];
 const REGISTER_ACTIONS: &[ToolAction] = &[
     action!("read", RegisterRead),
@@ -106,7 +119,6 @@ const IO_ACTIONS: &[ToolAction] = &[
     action!("read", InferiorIoRead),
     action!("write", InferiorIoWrite),
     action!("send_eof", InferiorIoSendEof),
-    action!("close_stdin", InferiorIoCloseStdin),
     action!("resize", InferiorIoResize),
 ];
 const TRACKING_ACTIONS: &[ToolAction] = &[
@@ -117,11 +129,7 @@ const TRACKING_ACTIONS: &[ToolAction] = &[
 ];
 const SIGNAL_ACTIONS: &[ToolAction] = &[action!("get", SignalGet), action!("update", SignalUpdate)];
 const BATCH_ACTIONS: &[ToolAction] = &[action!("", InspectionBatch)];
-const AGENT_ACTIONS: &[ToolAction] = &[
-    action!("probe", AgentProbe),
-    action!("experiment", AgentExperiment),
-    action!("hypothesis_check", AgentHypothesisCheck),
-];
+const AGENT_ACTIONS: &[ToolAction] = &[action!("probe", AgentProbe)];
 const EVENT_ACTIONS: &[ToolAction] = &[action!("", EventsWait)];
 const KERNEL_ACTIONS: &[ToolAction] = &[
     action!("inspect", KernelInspect),
@@ -136,6 +144,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -144,6 +153,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -152,6 +162,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: BREAKPOINT_ACTIONS,
         read_only: false,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -160,6 +171,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("view"),
         actions: INSPECTION_ACTIONS,
         read_only: true,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -168,6 +180,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: None,
         actions: EVALUATE_ACTIONS,
         read_only: true,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -176,6 +189,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: VALUE_ACTIONS,
         read_only: false,
+        advanced: true,
         raw: false,
     },
     ToolProjection {
@@ -184,6 +198,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: MEMORY_ACTIONS,
         read_only: false,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -192,6 +207,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: REGISTER_ACTIONS,
         read_only: false,
+        advanced: true,
         raw: false,
     },
     ToolProjection {
@@ -200,6 +216,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: None,
         actions: DISASSEMBLY_ACTIONS,
         read_only: true,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -208,6 +225,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: IO_ACTIONS,
         read_only: false,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -216,6 +234,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: TRACKING_ACTIONS,
         read_only: false,
+        advanced: true,
         raw: false,
     },
     ToolProjection {
@@ -224,6 +243,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: SIGNAL_ACTIONS,
         read_only: false,
+        advanced: true,
         raw: false,
     },
     ToolProjection {
@@ -232,14 +252,16 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: None,
         actions: BATCH_ACTIONS,
         read_only: true,
+        advanced: true,
         raw: false,
     },
     ToolProjection {
         name: "gdb_agent",
-        description: "Run a bounded probe, experiment, or runtime hypothesis check.",
+        description: "Run a bounded probe with explicit stop attribution.",
         discriminator: Some("action"),
         actions: AGENT_ACTIONS,
         read_only: false,
+        advanced: true,
         raw: false,
     },
     ToolProjection {
@@ -248,6 +270,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: None,
         actions: EVENT_ACTIONS,
         read_only: true,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -256,6 +279,7 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: KERNEL_ACTIONS,
         read_only: false,
+        advanced: true,
         raw: false,
     },
     ToolProjection {
@@ -264,16 +288,23 @@ const TOOLS: &[ToolProjection] = &[
         discriminator: Some("action"),
         actions: RAW_ACTIONS,
         read_only: false,
+        advanced: false,
         raw: true,
     },
 ];
 
-pub fn method_for_tool(tool_name: &str, action_name: Option<&str>) -> Option<CanonicalMethod> {
-    let tool = TOOLS.iter().find(|tool| tool.name == tool_name)?;
+pub fn method_for_tool(
+    tool_name: &str,
+    action_name: Option<&str>,
+    include_advanced: bool,
+    include_raw: bool,
+) -> Option<CanonicalMethod> {
+    let tool =
+        available_tools(include_advanced, include_raw).find(|tool| tool.name == tool_name)?;
     let action_name = action_name.unwrap_or_default();
     tool.actions
         .iter()
-        .find(|action| action.name == action_name)
+        .find(|action| action.name == action_name && (include_advanced || !action.advanced))
         .map(|action| action.method)
 }
 
@@ -284,21 +315,20 @@ pub fn discriminator_for_tool(tool_name: &str) -> Option<&'static str> {
         .and_then(|tool| tool.discriminator)
 }
 
-pub fn tool_exists(tool_name: &str) -> bool {
-    TOOLS.iter().any(|tool| tool.name == tool_name)
+pub fn tool_exists(tool_name: &str, include_advanced: bool, include_raw: bool) -> bool {
+    available_tools(include_advanced, include_raw).any(|tool| tool.name == tool_name)
 }
 
-pub fn tools(include_raw: bool) -> Vec<Value> {
-    TOOLS
-        .iter()
-        .filter(|tool| include_raw || !tool.raw)
+pub fn tools(include_advanced: bool, include_raw: bool) -> Vec<Value> {
+    available_tools(include_advanced, include_raw)
         .map(|tool| {
             json!({
                 "name": tool.name,
                 "description": tool.description,
-                "inputSchema": projected_schema(tool),
+                "inputSchema": projected_schema(tool, include_advanced),
                 "annotations": {
-                    "readOnlyHint": tool.read_only,
+                    "readOnlyHint": tool.read_only
+                        || (!include_advanced && tool.name == "gdb_memory"),
                     "destructiveHint": tool.raw,
                     "openWorldHint": false
                 }
@@ -307,18 +337,26 @@ pub fn tools(include_raw: bool) -> Vec<Value> {
         .collect()
 }
 
-pub fn tool_names(include_raw: bool) -> Vec<&'static str> {
-    TOOLS
-        .iter()
-        .filter(|tool| include_raw || !tool.raw)
+pub fn tool_names(include_advanced: bool, include_raw: bool) -> Vec<&'static str> {
+    available_tools(include_advanced, include_raw)
         .map(|tool| tool.name)
         .collect()
 }
 
-fn projected_schema(tool: &ToolProjection) -> Value {
+fn available_tools(
+    include_advanced: bool,
+    include_raw: bool,
+) -> impl Iterator<Item = &'static ToolProjection> {
+    TOOLS
+        .iter()
+        .filter(move |tool| (include_advanced || !tool.advanced) && (include_raw || !tool.raw))
+}
+
+fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
     let branches = tool
         .actions
         .iter()
+        .filter(|action| include_advanced || !action.advanced)
         .map(|action| projected_method_schema(tool.discriminator, *action))
         .collect::<Vec<_>>();
     if branches.len() == 1 {
@@ -373,7 +411,7 @@ mod tests {
 
     #[test]
     fn projects_canonical_parameter_contracts() {
-        let tools = tools(true);
+        let tools = tools(true, true);
         let memory = tools
             .iter()
             .find(|tool| tool["name"] == "gdb_memory")
@@ -392,16 +430,43 @@ mod tests {
                 .contains(&Value::String("address".into()))
         );
         assert_eq!(
-            method_for_tool("gdb_memory", Some("read")),
+            method_for_tool("gdb_memory", Some("read"), false, false),
             Some(CanonicalMethod::MemoryRead)
         );
         assert_eq!(
-            method_for_tool("gdb_io", Some("send_eof")),
+            method_for_tool("gdb_io", Some("send_eof"), false, false),
             Some(CanonicalMethod::InferiorIoSendEof)
         );
+    }
+
+    #[test]
+    fn defaults_to_the_bounded_agent_surface() {
         assert_eq!(
-            method_for_tool("gdb_io", Some("close_stdin")),
-            Some(CanonicalMethod::InferiorIoCloseStdin)
+            tool_names(false, false),
+            [
+                "gdb_session",
+                "gdb_run",
+                "gdb_breakpoints",
+                "gdb_inspect",
+                "gdb_evaluate",
+                "gdb_memory",
+                "gdb_disassemble",
+                "gdb_io",
+                "gdb_events",
+            ]
         );
+        assert!(!tool_exists("gdb_values", false, false));
+        assert!(tool_exists("gdb_values", true, false));
+        assert!(method_for_tool("gdb_memory", Some("write"), false, false).is_none());
+        assert!(method_for_tool("gdb_memory", Some("write"), true, false).is_some());
+        assert_eq!(
+            tools(false, false)
+                .into_iter()
+                .find(|tool| tool["name"] == "gdb_memory")
+                .unwrap()["annotations"]["readOnlyHint"],
+            true
+        );
+        assert!(method_for_tool("gdb_io", Some("close_stdin"), true, false).is_none());
+        assert!(method_for_tool("gdb_agent", Some("experiment"), true, false).is_none());
     }
 }

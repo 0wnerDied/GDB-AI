@@ -99,6 +99,8 @@ enum Command {
         #[arg(long)]
         raw_admin: bool,
         #[arg(long)]
+        advanced_tools: bool,
+        #[arg(long)]
         auth_token_file: Option<PathBuf>,
         #[arg(long, requires = "http")]
         trusted_origin: Vec<String>,
@@ -164,20 +166,33 @@ async fn run() -> Result<(), AnyError> {
         Command::Serve {
             stdio: true,
             raw_admin,
+            advanced_tools,
             ..
-        } => serve_stdio(config, raw_admin).await,
+        } => serve_stdio(config, raw_admin, advanced_tools).await,
         Command::Serve {
             unix: Some(path),
             raw_admin,
+            advanced_tools,
             ..
-        } => serve_unix(config, path, raw_admin).await,
+        } => serve_unix(config, path, raw_admin, advanced_tools).await,
         Command::Serve {
             http: Some(address),
             raw_admin,
+            advanced_tools,
             auth_token_file,
             trusted_origin,
             ..
-        } => serve_http(config, address, raw_admin, auth_token_file, trusted_origin).await,
+        } => {
+            serve_http(
+                config,
+                address,
+                raw_admin,
+                advanced_tools,
+                auth_token_file,
+                trusted_origin,
+            )
+            .await
+        }
         Command::Serve { .. } => unreachable!("clap requires one transport"),
         Command::Doctor => doctor(config).await,
         Command::Replay {
@@ -211,8 +226,9 @@ async fn run() -> Result<(), AnyError> {
                     "api_version": API_VERSION,
                     "mcp_protocol_version": MCP_VERSION,
                     "transports": ["stdio", "unix", "streamable_http", "json_rpc"],
-                    "tools": tool_names(false),
+                    "tools": tool_names(false, false),
                     "raw_admin_tool": "gdb_raw",
+                    "advanced_tools_flag": "--advanced-tools",
                     "schemas": [
                         "schemas/gdb.ai.v1.json",
                         "schemas/events.v1.json",
@@ -530,7 +546,11 @@ fn program_available(program: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
+async fn serve_stdio(
+    config: Config,
+    raw_admin: bool,
+    advanced_tools: bool,
+) -> Result<(), AnyError> {
     let gateway = Arc::new(Gateway::new(config)?);
     let result = serve_stream(
         gateway.clone(),
@@ -538,6 +558,7 @@ async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
             identity: "mcp-stdio".into(),
             admin: raw_admin,
         },
+        advanced_tools,
         tokio::io::stdin(),
         tokio::io::stdout(),
     )
@@ -549,6 +570,7 @@ async fn serve_stdio(config: Config, raw_admin: bool) -> Result<(), AnyError> {
 async fn serve_stream<R, W>(
     gateway: Arc<Gateway>,
     mut caller: Caller,
+    advanced_tools: bool,
     input: R,
     mut output: W,
 ) -> Result<(), AnyError>
@@ -670,7 +692,15 @@ where
                 // Gateway future after a worker had accepted a mutation. Keep
                 // dispatch detached so idempotency and audit still complete.
                 let operation = tokio::spawn(async move {
-                    dispatch_rpc(&gateway, &caller, &sequence, &method, params).await
+                    dispatch_rpc(
+                        &gateway,
+                        &caller,
+                        advanced_tools,
+                        &sequence,
+                        &method,
+                        params,
+                    )
+                    .await
                 });
                 let handle = tokio::spawn(async move {
                     let response = match operation.await {
@@ -713,7 +743,12 @@ where
     Ok(())
 }
 
-async fn serve_unix(config: Config, path: PathBuf, raw_admin: bool) -> Result<(), AnyError> {
+async fn serve_unix(
+    config: Config,
+    path: PathBuf,
+    raw_admin: bool,
+    advanced_tools: bool,
+) -> Result<(), AnyError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -749,6 +784,7 @@ async fn serve_unix(config: Config, path: PathBuf, raw_admin: bool) -> Result<()
                     if let Err(error) = serve_stream(
                         gateway,
                         Caller { identity, admin: raw_admin },
+                        advanced_tools,
                         input,
                         output,
                     )
@@ -775,6 +811,7 @@ struct HttpState {
     sessions: Arc<RwLock<HashMap<String, HttpClient>>>,
     sequence: Arc<AtomicU64>,
     raw_admin: bool,
+    advanced_tools: bool,
     auth_token: Option<Arc<str>>,
     trusted_origins: Arc<[HeaderValue]>,
     max_sessions: usize,
@@ -793,6 +830,7 @@ async fn serve_http(
     config: Config,
     address: SocketAddr,
     raw_admin: bool,
+    advanced_tools: bool,
     auth_token_file: Option<PathBuf>,
     trusted_origins: Vec<String>,
 ) -> Result<(), AnyError> {
@@ -832,6 +870,7 @@ async fn serve_http(
         sessions: Arc::new(RwLock::new(HashMap::new())),
         sequence: Arc::new(AtomicU64::new(1)),
         raw_admin,
+        advanced_tools,
         auth_token,
         trusted_origins,
         max_sessions,
@@ -1024,12 +1063,20 @@ async fn http_mcp(
     }
     let gateway = state.gateway.clone();
     let sequence = state.sequence.clone();
+    let advanced_tools = state.advanced_tools;
     let method = method.to_owned();
     let response_id = id.clone();
-    let operation =
-        tokio::spawn(
-            async move { dispatch_rpc(&gateway, &caller, &sequence, &method, params).await },
-        );
+    let operation = tokio::spawn(async move {
+        dispatch_rpc(
+            &gateway,
+            &caller,
+            advanced_tools,
+            &sequence,
+            &method,
+            params,
+        )
+        .await
+    });
     let (response_sender, mut response_receiver) = oneshot::channel();
     tokio::spawn(complete_http_operation(
         state.sessions.clone(),
@@ -1507,14 +1554,15 @@ fn progress_notification(token: Value, progress: u64, message: &str) -> Value {
 async fn dispatch_rpc(
     gateway: &Gateway,
     caller: &Caller,
+    advanced_tools: bool,
     sequence: &AtomicU64,
     method: &str,
     params: Value,
 ) -> Result<Value, RpcFault> {
     match method {
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": tools(caller.admin)})),
-        "tools/call" => call_tool(gateway, caller, sequence, params).await,
+        "tools/list" => Ok(json!({"tools": tools(advanced_tools, caller.admin)})),
+        "tools/call" => call_tool(gateway, caller, advanced_tools, sequence, params).await,
         "resources/list" => list_resources(gateway, caller, sequence).await,
         "resources/templates/list" => Ok(resource_templates()),
         "resources/read" => read_resource(gateway, caller, sequence, &params).await,
@@ -1537,6 +1585,7 @@ async fn dispatch_rpc(
 async fn call_tool(
     gateway: &Gateway,
     caller: &Caller,
+    advanced_tools: bool,
     sequence: &AtomicU64,
     params: Value,
 ) -> Result<Value, RpcFault> {
@@ -1548,12 +1597,24 @@ async fn call_tool(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let request = map_tool(name, arguments, sequence.fetch_add(1, Ordering::Relaxed))?;
+    let request = map_tool(
+        name,
+        arguments,
+        advanced_tools,
+        caller.admin,
+        sequence.fetch_add(1, Ordering::Relaxed),
+    )?;
     let response = gateway.dispatch(request, caller).await;
     Ok(tool_result(response))
 }
 
-fn map_tool(name: &str, arguments: Value, sequence: u64) -> Result<ApiRequest, RpcFault> {
+fn map_tool(
+    name: &str,
+    arguments: Value,
+    advanced_tools: bool,
+    raw_admin: bool,
+    sequence: u64,
+) -> Result<ApiRequest, RpcFault> {
     let mut parameters = arguments
         .as_object()
         .cloned()
@@ -1566,20 +1627,21 @@ fn map_tool(name: &str, arguments: Value, sequence: u64) -> Result<ApiRequest, R
     let action = discriminator
         .map(|field| take_required_string(&mut parameters, field))
         .transpose()?;
-    let method = method_for_tool(name, action.as_deref()).ok_or_else(|| {
-        if tool_exists(name) {
-            RpcFault::invalid(format!(
-                "unsupported {name} action {}",
-                action.as_deref().unwrap_or_default()
-            ))
-        } else {
-            RpcFault {
-                code: -32601,
-                message: format!("tool not found: {name}"),
-                data: None,
+    let method =
+        method_for_tool(name, action.as_deref(), advanced_tools, raw_admin).ok_or_else(|| {
+            if tool_exists(name, advanced_tools, raw_admin) {
+                RpcFault::invalid(format!(
+                    "unsupported {name} action {}",
+                    action.as_deref().unwrap_or_default()
+                ))
+            } else {
+                RpcFault {
+                    code: -32601,
+                    message: format!("tool not found: {name}"),
+                    data: None,
+                }
             }
-        }
-    })?;
+        })?;
     match (name, method, action.as_deref()) {
         ("gdb_run", CanonicalMethod::ExecutionControl, Some(action)) => {
             parameters.insert("action".into(), Value::String(action.into()));
@@ -2129,6 +2191,8 @@ mod tests {
                 "stop_id": "stop_test",
                 "wait": {"until": "snapshot", "timeout_ms": 1000}
             }),
+            false,
+            false,
             3,
         )
         .unwrap();
@@ -2151,8 +2215,14 @@ mod tests {
         .unwrap();
         assert!(matches!(cancellation.mode, CancelMode::InterruptTarget));
         assert_eq!(cancellation.session_id.as_deref(), Some("sess_test"));
-        assert!(!tool_names(false).contains(&"gdb_raw"));
-        assert!(tool_names(true).contains(&"gdb_raw"));
+        assert!(!tool_names(false, false).contains(&"gdb_raw"));
+        assert!(tool_names(false, true).contains(&"gdb_raw"));
+        assert_eq!(
+            map_tool("gdb_values", json!({"action": "create"}), false, false, 4,)
+                .unwrap_err()
+                .code,
+            -32601
+        );
         assert!(!valid_request_id(&Value::String("x".repeat(129))));
     }
 
@@ -2297,6 +2367,7 @@ mod tests {
         let created = call_tool(
             &gateway,
             &caller,
+            false,
             &sequence,
             json!({
                 "name": "gdb_session",
@@ -2315,6 +2386,7 @@ mod tests {
         let invalid = call_tool(
             &gateway,
             &caller,
+            false,
             &sequence,
             json!({
                 "name": "gdb_raw",
@@ -2339,6 +2411,7 @@ mod tests {
         let raw = call_tool(
             &gateway,
             &caller,
+            false,
             &sequence,
             json!({
                 "name": "gdb_raw",
@@ -2362,6 +2435,7 @@ mod tests {
         let console = call_tool(
             &gateway,
             &caller,
+            false,
             &sequence,
             json!({
                 "name": "gdb_io",
@@ -2385,6 +2459,7 @@ mod tests {
         let denied = call_tool(
             &gateway,
             &caller,
+            false,
             &sequence,
             json!({
                 "name": "gdb_raw",
@@ -2408,6 +2483,7 @@ mod tests {
         let closed = call_tool(
             &gateway,
             &caller,
+            false,
             &sequence,
             json!({
                 "name": "gdb_session",
@@ -2443,6 +2519,7 @@ mod tests {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
+            advanced_tools: false,
             auth_token: Some(Arc::from("test-token")),
             trusted_origins: parse_trusted_origins(&["https://agent.example".into()]).unwrap(),
             max_sessions: 1,
@@ -2572,13 +2649,9 @@ mod tests {
             .await
             .unwrap();
         let response: Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(
-            response["result"]["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|tool| tool["name"] == "gdb_values")
-        );
+        let tools = response["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 9);
+        assert!(!tools.iter().any(|tool| tool["name"] == "gdb_values"));
         let limited = http_mcp(
             State(state.clone()),
             headers.clone(),
@@ -2731,6 +2804,7 @@ mod tests {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
+            advanced_tools: false,
             auth_token: None,
             trusted_origins: Arc::from([]),
             max_sessions: 1,
@@ -2808,6 +2882,7 @@ mod tests {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
+            advanced_tools: false,
             auth_token: None,
             trusted_origins: parse_trusted_origins(&["https://agent.example".into()]).unwrap(),
             max_sessions: 1,
@@ -2852,6 +2927,7 @@ mod tests {
         let serving = tokio::spawn(serve_stream(
             gateway.clone(),
             Caller::local("stream-test"),
+            false,
             server_input,
             server_output,
         ));

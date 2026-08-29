@@ -14,6 +14,12 @@ without translating it into a tool action. Rust method contracts validate
 allowed, required, and typed parameters and generate both the canonical JSON
 Schema branches and MCP tool input schemas.
 
+MCP discovery defaults to nine bounded tools for ordinary Agent debugging.
+Starting the server with `--advanced-tools` exposes the existing advanced
+target, mutation, value, tracking, batch, probe, and kernel projections;
+`--raw-admin` independently exposes the audited raw escape hatch. Hidden MCP
+projections do not remove methods from the canonical API.
+
 Stdio and Unix stream clients may attach `_meta.progressToken` to a request.
 GDB/AI emits ordered `notifications/progress` records before and after the
 operation while continuing to accept cancellation and I/O requests.

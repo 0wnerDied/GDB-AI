@@ -122,6 +122,11 @@ Single-client stdio:
 target/release/gdb-ai serve --stdio
 ```
 
+The default MCP catalog is the bounded nine-tool Agent surface below. Use
+`--advanced-tools` only when an Agent needs extended targets, mutations,
+variable objects, tracking, batches, probes, or kernel operations. The full
+canonical `gdb.ai/call` API remains available independently of MCP discovery.
+
 Multi-client local socket:
 
 ```sh
@@ -148,23 +153,22 @@ the tested message-level compatibility modes without claiming legacy HTTP+SSE.
 
 | Tool | Purpose |
 | --- | --- |
-| `gdb_session` | Sessions, leases, launch/attach/core/remote, lifecycle, capabilities |
+| `gdb_session` | Sessions, leases, local launch, lifecycle, and capabilities |
 | `gdb_run` | Continue, interrupt, source/instruction stepping, and waits |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
 | `gdb_evaluate` | Side-effect-denied one-shot expression evaluation |
-| `gdb_values` | Stop-scoped variable objects with paged children and updates |
-| `gdb_memory` | Bounded read, CAS write, compare, and explicit-range search |
-| `gdb_registers` | Semantic register roles and audited writes |
+| `gdb_memory` | Bounded stop-consistent memory reads |
 | `gdb_disassemble` | Normalized bounded instructions with source and bytes |
 | `gdb_io` | Separate PTY, MI target, console, and log I/O plus `send_eof` and resize |
-| `gdb_tracking` | Tracked expressions/memory and bounded histories |
-| `gdb_signals` | Structured stop/print/pass signal policy |
-| `gdb_batch` | Multiple reads constrained to one stop |
-| `gdb_agent` | Probes, experiments, hypothesis checks, and evidence budgets |
 | `gdb_events` | Finite event waits |
-| `gdb_kernel` | Conditional kernel inspection and allowlisted monitor operations |
-| `gdb_raw` | Audited MI/CLI escape hatch, registered only with `--raw-admin` |
+
+`--advanced-tools` additionally projects `gdb_values`, `gdb_registers`,
+`gdb_tracking`, `gdb_signals`, `gdb_batch`, `gdb_agent`, and `gdb_kernel`, plus
+extended-target and mutation actions on the core tools. `gdb_agent` currently
+projects only the stop-attributed bounded probe; experiment and hypothesis
+aliases remain canonical-only. `gdb_raw` is registered separately only with
+`--raw-admin`.
 
 Mutations require both the exact current `expected_revision` and `lease_id`,
 or an explicit `accept_latest_revision` where permitted. `session.create`
