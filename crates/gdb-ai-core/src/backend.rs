@@ -103,19 +103,11 @@ impl MiCommand {
 
 #[derive(Debug)]
 pub enum BackendInput {
-    Mi {
-        raw: Vec<u8>,
-        record: MiRecord,
-    },
+    Mi { raw: Vec<u8>, record: MiRecord },
     ProtocolError(Error),
     GdbStderr(Vec<u8>),
-    InferiorPty {
-        offset: u64,
-        length: usize,
-        dropped_bytes: u64,
-    },
+    InferiorPty,
     GdbEof,
-    PtyEof,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,14 +144,21 @@ impl PtyOutput {
         }
     }
 
-    fn append(&self, bytes: &[u8]) -> (u64, u64) {
+    fn append(&self, bytes: &[u8]) {
         self.closed.store(false, Ordering::Release);
         let mut ring = self
             .ring
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let offset = ring.append(bytes);
-        (offset, ring.dropped_bytes())
+        ring.append(bytes);
+    }
+
+    pub(crate) fn position(&self) -> (u64, u64) {
+        let ring = self
+            .ring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (ring.end_offset(), ring.dropped_bytes())
     }
 
     fn mark_closed(&self) -> bool {
@@ -415,7 +414,7 @@ impl GdbBackend {
         // independent backpressure and always poll control records first.
         let (control_sender, control) = mpsc::channel(256);
         let (stderr_sender, stderr_input) = mpsc::channel(32);
-        let (pty_sender, pty_input) = mpsc::channel(32);
+        let (pty_sender, pty_input) = mpsc::channel(1);
         let pty_output = Arc::new(PtyOutput::new(resource_limits.inferior_output_ring_bytes));
         tokio::spawn(read_mi(stdout, control_sender, mi_limits));
         tokio::spawn(read_stderr(stderr, stderr_sender));
@@ -712,9 +711,7 @@ where
         }
         match reader.read(&mut buffer).await {
             Ok(0) => {
-                if output.mark_closed() && sender.send(BackendInput::PtyEof).await.is_err() {
-                    break;
-                }
+                output.mark_closed();
                 // 2026-08-28: A closed reusable PTY master returns EOF/EIO
                 // immediately. Wait for the next run instead of polling it.
                 tokio::select! {
@@ -723,26 +720,16 @@ where
                 }
             }
             Ok(length) => {
-                // 2026-08-28: Copying every PTY chunk through the actor and
-                // base64 journal amplified noisy target output. The reader
-                // owns bulk delivery; the control path receives metadata only.
-                let (offset, dropped_bytes) = output.append(&buffer[..length]);
-                if sender
-                    .send(BackendInput::InferiorPty {
-                        offset,
-                        length,
-                        dropped_bytes,
-                    })
-                    .await
-                    .is_err()
-                {
+                output.append(&buffer[..length]);
+                // 2026-08-29: Awaiting one metadata message per PTY chunk let
+                // a slow actor stop PTY draining and eventually block target
+                // output. A full channel already contains a sufficient wakeup.
+                if !try_notify_pty(&sender, BackendInput::InferiorPty) {
                     break;
                 }
             }
             Err(error) if error.raw_os_error() == Some(libc::EIO) => {
-                if output.mark_closed() && sender.send(BackendInput::PtyEof).await.is_err() {
-                    break;
-                }
+                output.mark_closed();
                 // 2026-08-28: Linux reports PTY hangup as EIO. A target run
                 // explicitly rearms the reader when a new slave can appear.
                 tokio::select! {
@@ -752,6 +739,13 @@ where
             }
             Err(_) => break,
         }
+    }
+}
+
+fn try_notify_pty(sender: &mpsc::Sender<BackendInput>, input: BackendInput) -> bool {
+    match sender.try_send(input) {
+        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
     }
 }
 
@@ -901,13 +895,7 @@ mod tests {
             stderr_closed: false,
             pty_closed: false,
         };
-        pty_sender
-            .try_send(BackendInput::InferiorPty {
-                offset: 0,
-                length: 64 * 1024,
-                dropped_bytes: 0,
-            })
-            .unwrap();
+        pty_sender.try_send(BackendInput::InferiorPty).unwrap();
         control_sender
             .try_send(BackendInput::Mi {
                 raw: b"(gdb)\n".to_vec(),
@@ -925,17 +913,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pty_bytes_reach_ring_before_actor_notification() {
-        let (mut writer, reader) = tokio::io::duplex(64);
+    async fn full_notification_queue_does_not_stop_pty_drain() {
+        let (mut writer, reader) = tokio::io::duplex(8);
         let (sender, _receiver) = mpsc::channel(1);
-        sender.try_send(BackendInput::PtyEof).unwrap();
-        let output = Arc::new(PtyOutput::new(64));
+        sender.try_send(BackendInput::InferiorPty).unwrap();
+        let output = Arc::new(PtyOutput::new(256));
         let task = tokio::spawn(read_pty(reader, sender, output.clone()));
 
-        writer.write_all(b"marker reached\n").await.unwrap();
+        let expected = vec![b'x'; 128];
+        tokio::time::timeout(Duration::from_secs(1), writer.write_all(&expected))
+            .await
+            .unwrap()
+            .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
-                if !output.read(0, 64).bytes.is_empty() {
+                if output.position().0 == expected.len() as u64 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -943,23 +935,25 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(output.read(0, 64).bytes, b"marker reached\n");
+        assert_eq!(output.read(0, 256).bytes, expected);
         task.abort();
     }
 
     #[tokio::test]
     async fn closed_pty_waits_for_explicit_rearm() {
         let reads = Arc::new(AtomicUsize::new(0));
-        let (sender, mut receiver) = mpsc::channel(1);
+        let (sender, _receiver) = mpsc::channel(1);
         let output = Arc::new(PtyOutput::new(64));
         let task = tokio::spawn(read_pty(CountingEof(reads.clone()), sender, output.clone()));
 
-        assert!(matches!(receiver.recv().await, Some(BackendInput::PtyEof)));
+        output.wait_closed(Duration::from_secs(1)).await;
+        assert!(output.closed.load(Ordering::Acquire));
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(reads.load(Ordering::Relaxed), 1);
 
         output.reset();
-        assert!(matches!(receiver.recv().await, Some(BackendInput::PtyEof)));
+        output.wait_closed(Duration::from_secs(1)).await;
+        assert!(output.closed.load(Ordering::Acquire));
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(reads.load(Ordering::Relaxed), 2);
         task.abort();

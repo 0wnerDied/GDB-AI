@@ -975,6 +975,7 @@ struct SessionWorker {
     controls: mpsc::Receiver<ControlRequest>,
     controls_open: bool,
     inferior_output: Arc<PtyOutput>,
+    inferior_output_offset: u64,
     inferior_output_dropped: u64,
     target_output: ByteRing,
     console_output: ByteRing,
@@ -1108,6 +1109,7 @@ impl SessionWorker {
             controls,
             controls_open: true,
             inferior_output,
+            inferior_output_offset: 0,
             inferior_output_dropped: 0,
             target_output,
             console_output,
@@ -2285,11 +2287,16 @@ impl SessionWorker {
                 self.log_output.append(&bytes);
                 Ok(None)
             }
-            BackendInput::InferiorPty {
-                offset,
-                length,
-                dropped_bytes,
-            } => {
+            BackendInput::InferiorPty => {
+                // 2026-08-29: PTY notifications are coalesced high-water
+                // signals. Read the authoritative ring position here instead
+                // of trusting stale per-chunk metadata.
+                let (next_offset, dropped_bytes) = self.inferior_output.position();
+                let offset = self.inferior_output_offset.min(next_offset);
+                let length = next_offset.saturating_sub(offset) as usize;
+                if length == 0 && dropped_bytes == self.inferior_output_dropped {
+                    return Ok(None);
+                }
                 let appended = self
                     .journal
                     .append_inferior_output(offset, length, dropped_bytes);
@@ -2297,6 +2304,7 @@ impl SessionWorker {
                 self.metrics.inferior_output_dropped(
                     dropped_bytes.saturating_sub(self.inferior_output_dropped),
                 );
+                self.inferior_output_offset = next_offset;
                 self.inferior_output_dropped = dropped_bytes;
                 self.apply_event(DomainEvent::OutputAdvanced {
                     source: OutputSource::InferiorPty,
@@ -2329,7 +2337,6 @@ impl SessionWorker {
                 exited?;
                 Err(Error::new(ErrorCode::GdbExited, "GDB stdout closed"))
             }
-            BackendInput::PtyEof => Ok(None),
         }
     }
 
@@ -2566,14 +2573,7 @@ async fn wait_for_prompt(
             }
             BackendInput::ProtocolError(error) => return Err(error),
             BackendInput::GdbEof => return Err(Error::new(ErrorCode::GdbExited, "GDB exited")),
-            BackendInput::InferiorPty {
-                offset,
-                length,
-                dropped_bytes,
-            } => {
-                journal.append_inferior_output(offset, length, dropped_bytes)?;
-            }
-            BackendInput::PtyEof => {}
+            BackendInput::InferiorPty => {}
         }
     }
 }
