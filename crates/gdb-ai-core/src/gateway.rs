@@ -12,7 +12,7 @@ use crate::{
     config::Config,
     domain::{Address, SessionState, TargetOrigin, WriteLease},
     metrics::Metrics,
-    persistence::Store,
+    persistence::{ArtifactLimits, Store},
     policy::{Effect, Profile, effect_for_method},
     protocol::{API_VERSION, ApiRequest, ApiResponse},
     session::SessionHandle,
@@ -750,8 +750,11 @@ impl Gateway {
             bytes,
             session_id,
             sensitivity,
-            self.config.limits.session_artifact_bytes,
-            self.config.limits.total_artifact_bytes,
+            ArtifactLimits {
+                session_bytes: self.config.limits.session_artifact_bytes,
+                owner_bytes: self.config.limits.owner_artifact_bytes,
+                total_bytes: self.config.limits.total_artifact_bytes,
+            },
         )?;
         self.metrics.artifact_written(bytes.len());
         Ok(uri)
@@ -1176,6 +1179,10 @@ mod tests {
         };
         config.limits.tool_response_bytes = 1_024;
         let gateway = Gateway::new(config).unwrap();
+        gateway
+            .store
+            .set_session_owner(&crate::domain::SessionId("sess_bound".into()), "test")
+            .unwrap();
         let request = ApiRequest {
             api_version: API_VERSION.into(),
             request_id: "bounded".into(),

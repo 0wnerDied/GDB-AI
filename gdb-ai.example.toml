@@ -35,6 +35,7 @@ stack_frames = 64
 value_children = 1000
 value_depth = 8
 session_artifact_bytes = 536870912
+owner_artifact_bytes = 1073741824
 total_artifact_bytes = 4294967296
 journal_bytes = 67108864
 process_memory_bytes = 2147483648

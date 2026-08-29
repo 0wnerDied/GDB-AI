@@ -31,7 +31,7 @@ use crate::{
     metrics::Metrics,
     normalize::normalize,
     operations::{breakpoint_number_from_record, live_module_offset},
-    persistence::Store,
+    persistence::{ArtifactLimits, Store},
     policy::Profile,
     reducer::StateReducer,
     ring::{ByteRing, RingRead},
@@ -1015,6 +1015,7 @@ struct SessionWorker {
     module_rebind_needed: bool,
     tracking_memory_limit: usize,
     artifact_limit: usize,
+    owner_artifact_limit: usize,
     total_artifact_limit: usize,
     fatal: bool,
     metric_active: bool,
@@ -1156,6 +1157,7 @@ impl SessionWorker {
             module_rebind_needed: false,
             tracking_memory_limit: config.limits.memory_read_bytes,
             artifact_limit: config.limits.session_artifact_bytes,
+            owner_artifact_limit: config.limits.owner_artifact_bytes,
             total_artifact_limit: config.limits.total_artifact_bytes,
             fatal: false,
             metric_active: false,
@@ -1870,8 +1872,11 @@ impl SessionWorker {
                     &bytes,
                     Some(&self.reducer.state().session_id),
                     "target-io",
-                    self.artifact_limit,
-                    self.total_artifact_limit,
+                    ArtifactLimits {
+                        session_bytes: self.artifact_limit,
+                        owner_bytes: self.owner_artifact_limit,
+                        total_bytes: self.total_artifact_limit,
+                    },
                 )?;
                 self.metrics.artifact_written(bytes.len());
                 Ok(uri)

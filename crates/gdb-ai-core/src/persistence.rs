@@ -21,6 +21,13 @@ pub struct ArtifactRecord {
     pub sensitivity: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ArtifactLimits {
+    pub session_bytes: usize,
+    pub owner_bytes: usize,
+    pub total_bytes: usize,
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
@@ -397,8 +404,7 @@ impl Store {
         bytes: &[u8],
         session_id: Option<&SessionId>,
         sensitivity: &str,
-        session_limit: usize,
-        total_limit: usize,
+        limits: ArtifactLimits,
     ) -> Result<String> {
         let incoming_rank = artifact_sensitivity_rank(sensitivity).ok_or_else(|| {
             Error::new(
@@ -450,11 +456,59 @@ impl Store {
                         |row| row.get::<_, i64>(0),
                     )
                     .map_err(sql_error)?;
-                if (used.max(0) as usize).saturating_add(bytes.len()) > session_limit {
+                if (used.max(0) as usize).saturating_add(bytes.len()) > limits.session_bytes {
                     return Err(Error::new(
                         ErrorCode::OutputLimit,
                         "session artifact quota exceeded",
                     ));
+                }
+            }
+            if let Some(session_id) = session_id {
+                let owner = transaction
+                    .query_row(
+                        "SELECT owner FROM session_owners WHERE session_id=?1",
+                        params![session_id.0],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(sql_error)?
+                    .ok_or_else(|| {
+                        Error::new(ErrorCode::Internal, "artifact session has no owner")
+                    })?;
+                let owner_has_artifact = transaction
+                    .query_row(
+                        "SELECT 1
+                         FROM artifact_owners
+                         JOIN session_owners USING (session_id)
+                         WHERE artifact_owners.uri=?1 AND session_owners.owner=?2
+                         LIMIT 1",
+                        params![&uri, &owner],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map_err(sql_error)?
+                    .is_some();
+                if !owner_has_artifact {
+                    let used = transaction
+                        .query_row(
+                            "SELECT COALESCE(SUM(size), 0)
+                             FROM artifacts
+                             WHERE uri IN (
+                               SELECT DISTINCT artifact_owners.uri
+                               FROM artifact_owners
+                               JOIN session_owners USING (session_id)
+                               WHERE session_owners.owner=?1
+                             )",
+                            params![owner],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(sql_error)?;
+                    if (used.max(0) as usize).saturating_add(bytes.len()) > limits.owner_bytes {
+                        return Err(Error::new(
+                            ErrorCode::OutputLimit,
+                            "owner artifact quota exceeded",
+                        ));
+                    }
                 }
             }
             if existing.is_none() {
@@ -466,7 +520,7 @@ impl Store {
                 // 2026-08-29: Per-session limits allowed many sessions to
                 // exhaust the shared artifact filesystem. Reserve global
                 // capacity in the serialized metadata transaction first.
-                if (used.max(0) as usize).saturating_add(bytes.len()) > total_limit {
+                if (used.max(0) as usize).saturating_add(bytes.len()) > limits.total_bytes {
                     return Err(Error::new(
                         ErrorCode::OutputLimit,
                         "global artifact quota exceeded",
@@ -772,6 +826,12 @@ mod tests {
 
     use super::*;
 
+    const UNLIMITED_ARTIFACTS: ArtifactLimits = ArtifactLimits {
+        session_bytes: usize::MAX,
+        owner_bytes: usize::MAX,
+        total_bytes: usize::MAX,
+    };
+
     #[test]
     fn sqlite_wal_round_trips_state() {
         let directory = tempdir().unwrap();
@@ -798,14 +858,15 @@ mod tests {
         let artifacts = ArtifactStore::new(directory.path().join("artifacts")).unwrap();
         let first = SessionId("sess_first".into());
         let second = SessionId("sess_second".into());
+        store.set_session_owner(&first, "first-owner").unwrap();
+        store.set_session_owner(&second, "second-owner").unwrap();
         let uri = store
             .put_artifact(
                 &artifacts,
                 b"shared!",
                 Some(&first),
                 "target-memory",
-                usize::MAX,
-                usize::MAX,
+                UNLIMITED_ARTIFACTS,
             )
             .unwrap();
         store
@@ -814,8 +875,7 @@ mod tests {
                 b"shared!",
                 Some(&second),
                 "public",
-                usize::MAX,
-                usize::MAX,
+                UNLIMITED_ARTIFACTS,
             )
             .unwrap();
         assert_eq!(
@@ -829,10 +889,10 @@ mod tests {
             "target-memory"
         );
         store
-            .put_artifact(&artifacts, b"u", None, "public", usize::MAX, usize::MAX)
+            .put_artifact(&artifacts, b"u", None, "public", UNLIMITED_ARTIFACTS)
             .unwrap();
         let upgrade = store
-            .put_artifact(&artifacts, b"u", None, "secret", usize::MAX, usize::MAX)
+            .put_artifact(&artifacts, b"u", None, "secret", UNLIMITED_ARTIFACTS)
             .unwrap();
         assert_eq!(
             store.artifact(&upgrade).unwrap().unwrap().sensitivity,
@@ -840,14 +900,7 @@ mod tests {
         );
         assert!(
             store
-                .put_artifact(
-                    &artifacts,
-                    b"other",
-                    None,
-                    "unknown",
-                    usize::MAX,
-                    usize::MAX,
-                )
+                .put_artifact(&artifacts, b"other", None, "unknown", UNLIMITED_ARTIFACTS,)
                 .is_err()
         );
     }
@@ -859,23 +912,56 @@ mod tests {
         let artifacts = ArtifactStore::new(directory.path().join("artifacts")).unwrap();
         let first = SessionId("sess_first".into());
         let second = SessionId("sess_second".into());
+        let sibling = SessionId("sess_sibling".into());
+        store.set_session_owner(&first, "owner").unwrap();
+        store.set_session_owner(&sibling, "owner").unwrap();
+        store.set_session_owner(&second, "other").unwrap();
+        let limits = ArtifactLimits {
+            session_bytes: 4,
+            owner_bytes: 4,
+            total_bytes: 4,
+        };
         store
-            .put_artifact(&artifacts, b"1234", Some(&first), "public", 4, 4)
+            .put_artifact(&artifacts, b"1234", Some(&first), "public", limits)
             .unwrap();
         store
-            .put_artifact(&artifacts, b"1234", Some(&second), "public", 4, 4)
+            .put_artifact(&artifacts, b"1234", Some(&second), "public", limits)
             .unwrap();
         assert_eq!(store.total_artifact_bytes().unwrap(), 4);
         let global = store
-            .put_artifact(&artifacts, b"g", None, "public", 4, 4)
+            .put_artifact(&artifacts, b"g", None, "public", limits)
             .unwrap_err();
         assert_eq!(global.code, ErrorCode::OutputLimit);
         let session = store
-            .put_artifact(&artifacts, b"s", Some(&first), "public", 4, 8)
+            .put_artifact(
+                &artifacts,
+                b"s",
+                Some(&first),
+                "public",
+                ArtifactLimits {
+                    total_bytes: 8,
+                    ..limits
+                },
+            )
             .unwrap_err();
         assert_eq!(session.code, ErrorCode::OutputLimit);
+        let owner = store
+            .put_artifact(
+                &artifacts,
+                b"o",
+                Some(&sibling),
+                "public",
+                ArtifactLimits {
+                    session_bytes: 5,
+                    total_bytes: 8,
+                    ..limits
+                },
+            )
+            .unwrap_err();
+        assert_eq!(owner.code, ErrorCode::OutputLimit);
         assert!(artifacts.get(&ArtifactStore::uri(b"g"), 1).is_err());
         assert!(artifacts.get(&ArtifactStore::uri(b"s"), 1).is_err());
+        assert!(artifacts.get(&ArtifactStore::uri(b"o"), 1).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
