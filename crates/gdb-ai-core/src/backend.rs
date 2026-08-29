@@ -2,14 +2,20 @@ use async_trait::async_trait;
 use gdb_ai_mi::{MiFramer, MiLimits, MiRecord, encode_command, parse_record, quote_c_string};
 use nix::{pty::openpty, unistd::ttyname};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, Write},
     os::fd::AsRawFd,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc as std_mpsc,
     },
+    thread::JoinHandle,
     time::Duration,
 };
 use tokio::{
@@ -20,7 +26,7 @@ use tokio::{
 
 use crate::{
     Error, ErrorCode, Result,
-    config::{GdbConfig, Limits, SandboxMode},
+    config::{GdbConfig, Limits, OutputConfig, OutputEvidenceMode, SandboxMode},
     ring::{ByteRing, RingRead},
 };
 
@@ -127,21 +133,275 @@ pub struct SandboxOptions {
     pub allow_network: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct OutputEvidenceStatus {
+    pub mode: OutputEvidenceMode,
+    pub captured_bytes: u64,
+    pub spooled_bytes: u64,
+    pub dropped_bytes: u64,
+    pub complete: bool,
+    pub durability: &'static str,
+    pub sha256: Option<String>,
+    pub artifact_uri: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug)]
+struct OutputSpoolState {
+    captured: AtomicU64,
+    written: AtomicU64,
+    dropped: AtomicU64,
+    active: AtomicBool,
+    complete: AtomicBool,
+    finalized: AtomicBool,
+    failed: AtomicBool,
+    sha256: Mutex<Option<String>>,
+    artifact_uri: Mutex<Option<String>>,
+    error: Mutex<Option<String>>,
+}
+
+#[derive(Debug)]
+struct OutputSpool {
+    mode: OutputEvidenceMode,
+    path: PathBuf,
+    max_bytes: u64,
+    sender: Mutex<Option<std_mpsc::SyncSender<Vec<u8>>>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+    state: Arc<OutputSpoolState>,
+}
+
+impl OutputSpool {
+    fn create(session_dir: &Path, name: &str, config: &OutputConfig) -> Result<Self> {
+        // 2026-08-29: MI fallback starts a second backend in the same session
+        // directory. Give each attempt its own spool so create_new stays safe.
+        let path = session_dir.join(format!("inferior-output-{name}.spool"));
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)?;
+        let (sender, receiver) = std_mpsc::sync_channel::<Vec<u8>>(64);
+        let state = Arc::new(OutputSpoolState {
+            captured: AtomicU64::new(0),
+            written: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            active: AtomicBool::new(true),
+            complete: AtomicBool::new(false),
+            finalized: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            sha256: Mutex::new(None),
+            artifact_uri: Mutex::new(None),
+            error: Mutex::new(None),
+        });
+        let writer_state = state.clone();
+        let worker = std::thread::spawn(move || write_output_spool(file, receiver, writer_state));
+        Ok(Self {
+            mode: config.evidence,
+            path,
+            max_bytes: config.max_bytes as u64,
+            sender: Mutex::new(Some(sender)),
+            worker: Mutex::new(Some(worker)),
+            state,
+        })
+    }
+
+    fn capture(&self, bytes: &[u8]) {
+        if !self.state.active.load(Ordering::Acquire) {
+            self.state
+                .dropped
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            return;
+        }
+        let captured = self.state.captured.load(Ordering::Relaxed);
+        let length = (self.max_bytes.saturating_sub(captured) as usize).min(bytes.len());
+        let sent = length > 0
+            && self
+                .sender
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .is_some_and(|sender| sender.try_send(bytes[..length].to_vec()).is_ok());
+        if sent {
+            self.state
+                .captured
+                .fetch_add(length as u64, Ordering::Relaxed);
+        }
+        if !sent || length < bytes.len() {
+            // 2026-08-29: PTY offsets alone could outlive the ring without any
+            // recoverable bytes. Preserve a bounded prefix, but never block the
+            // target when storage is full or slow; mark the remainder dropped.
+            let dropped = bytes.len() - if sent { length } else { 0 };
+            self.state
+                .dropped
+                .fetch_add(dropped as u64, Ordering::Relaxed);
+            self.state.active.store(false, Ordering::Release);
+            self.sender
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+        }
+    }
+
+    fn finish(&self) -> OutputEvidenceStatus {
+        self.state.active.store(false, Ordering::Release);
+        self.sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(worker) = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            && worker.join().is_err()
+        {
+            self.state.failed.store(true, Ordering::Release);
+        }
+        self.status()
+    }
+
+    fn read(&self, after_offset: u64, max_bytes: usize) -> Option<RingRead> {
+        let written = self.state.written.load(Ordering::Acquire);
+        if after_offset >= written {
+            return None;
+        }
+        let mut file = File::open(&self.path).ok()?;
+        file.seek(std::io::SeekFrom::Start(after_offset)).ok()?;
+        let length = (written - after_offset).min(max_bytes as u64) as usize;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes).ok()?;
+        Some(RingRead {
+            requested_offset: after_offset,
+            available_from: 0,
+            next_offset: after_offset + length as u64,
+            gap: false,
+            bytes,
+        })
+    }
+
+    fn status(&self) -> OutputEvidenceStatus {
+        OutputEvidenceStatus {
+            mode: self.mode,
+            captured_bytes: self.state.captured.load(Ordering::Acquire),
+            spooled_bytes: self.state.written.load(Ordering::Acquire),
+            dropped_bytes: self.state.dropped.load(Ordering::Acquire),
+            complete: self.state.complete.load(Ordering::Acquire),
+            durability: if self
+                .state
+                .artifact_uri
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
+            {
+                "artifact"
+            } else if self.state.finalized.load(Ordering::Acquire) {
+                "synced"
+            } else {
+                "buffered"
+            },
+            sha256: self
+                .state
+                .sha256
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+            artifact_uri: self
+                .state
+                .artifact_uri
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+            error: self
+                .state
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .or_else(|| {
+                    self.state
+                        .failed
+                        .load(Ordering::Acquire)
+                        .then(|| "inferior output spool write failed".to_owned())
+                }),
+        }
+    }
+}
+
+fn write_output_spool(
+    mut file: File,
+    receiver: std_mpsc::Receiver<Vec<u8>>,
+    state: Arc<OutputSpoolState>,
+) {
+    let mut hasher = Sha256::new();
+    for bytes in receiver {
+        if file.write_all(&bytes).is_err() {
+            state.failed.store(true, Ordering::Release);
+            state.active.store(false, Ordering::Release);
+            return;
+        }
+        hasher.update(&bytes);
+        state
+            .written
+            .fetch_add(bytes.len() as u64, Ordering::Release);
+    }
+    if file.sync_data().is_err() {
+        state.failed.store(true, Ordering::Release);
+        return;
+    }
+    *state
+        .sha256
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(format!("{:x}", hasher.finalize()));
+    state.complete.store(
+        state.dropped.load(Ordering::Acquire) == 0,
+        Ordering::Release,
+    );
+    state.finalized.store(true, Ordering::Release);
+}
+
 pub struct PtyOutput {
     ring: Mutex<ByteRing>,
+    evidence_mode: OutputEvidenceMode,
+    spool: Option<OutputSpool>,
     closed: AtomicBool,
     closed_notify: Notify,
     rearm_notify: Notify,
 }
 
 impl PtyOutput {
+    #[cfg(test)]
     fn new(capacity: usize) -> Self {
         Self {
             ring: Mutex::new(ByteRing::new(capacity)),
+            evidence_mode: OutputEvidenceMode::EphemeralRing,
+            spool: None,
             closed: AtomicBool::new(false),
             closed_notify: Notify::new(),
             rearm_notify: Notify::new(),
         }
+    }
+
+    fn with_evidence(
+        capacity: usize,
+        config: &OutputConfig,
+        session_dir: &Path,
+        name: &str,
+    ) -> Result<Self> {
+        let spool = match config.evidence {
+            OutputEvidenceMode::EphemeralRing => None,
+            OutputEvidenceMode::BoundedSpool | OutputEvidenceMode::Artifact => {
+                Some(OutputSpool::create(session_dir, name, config)?)
+            }
+        };
+        Ok(Self {
+            ring: Mutex::new(ByteRing::new(capacity)),
+            evidence_mode: config.evidence,
+            spool,
+            closed: AtomicBool::new(false),
+            closed_notify: Notify::new(),
+            rearm_notify: Notify::new(),
+        })
     }
 
     fn append(&self, bytes: &[u8]) {
@@ -151,6 +411,10 @@ impl PtyOutput {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         ring.append(bytes);
+        drop(ring);
+        if let Some(spool) = &self.spool {
+            spool.capture(bytes);
+        }
     }
 
     pub(crate) fn position(&self) -> (u64, u64) {
@@ -186,10 +450,72 @@ impl PtyOutput {
     }
 
     pub fn read(&self, after_offset: u64, max_bytes: usize) -> RingRead {
-        self.ring
+        let ring = self
+            .ring
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .read(after_offset, max_bytes)
+            .read(after_offset, max_bytes);
+        if ring.gap
+            && let Some(read) = self
+                .spool
+                .as_ref()
+                .and_then(|spool| spool.read(after_offset, max_bytes))
+        {
+            return read;
+        }
+        ring
+    }
+
+    pub fn evidence_status(&self) -> OutputEvidenceStatus {
+        match &self.spool {
+            Some(spool) => spool.status(),
+            None => {
+                let (end, dropped) = self.position();
+                OutputEvidenceStatus {
+                    mode: self.evidence_mode,
+                    captured_bytes: end.saturating_sub(dropped),
+                    spooled_bytes: 0,
+                    dropped_bytes: dropped,
+                    complete: false,
+                    durability: "ephemeral",
+                    sha256: None,
+                    artifact_uri: None,
+                    error: None,
+                }
+            }
+        }
+    }
+
+    pub fn finish_evidence(&self) -> OutputEvidenceStatus {
+        match &self.spool {
+            Some(spool) => spool.finish(),
+            None => self.evidence_status(),
+        }
+    }
+
+    pub fn evidence_path(&self) -> Option<&Path> {
+        self.spool.as_ref().map(|spool| spool.path.as_path())
+    }
+
+    pub fn set_artifact_uri(&self, uri: String) {
+        if let Some(spool) = &self.spool {
+            *spool
+                .state
+                .artifact_uri
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(uri);
+        }
+    }
+
+    pub fn set_evidence_error(&self, error: String) {
+        if let Some(spool) = &self.spool {
+            spool.state.complete.store(false, Ordering::Release);
+            *spool
+                .state
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
+        }
     }
 
     pub fn dropped_bytes(&self) -> u64 {
@@ -275,6 +601,7 @@ impl GdbBackend {
         session_dir: &Path,
         mi_limits: MiLimits,
         resource_limits: &Limits,
+        output_config: &OutputConfig,
         sandbox: SandboxOptions,
     ) -> Result<Self> {
         std::fs::create_dir_all(session_dir)?;
@@ -415,7 +742,12 @@ impl GdbBackend {
         let (control_sender, control) = mpsc::channel(256);
         let (stderr_sender, stderr_input) = mpsc::channel(32);
         let (pty_sender, pty_input) = mpsc::channel(1);
-        let pty_output = Arc::new(PtyOutput::new(resource_limits.inferior_output_ring_bytes));
+        let pty_output = Arc::new(PtyOutput::with_evidence(
+            resource_limits.inferior_output_ring_bytes,
+            output_config,
+            session_dir,
+            mi_version,
+        )?);
         tokio::spawn(read_mi(stdout, control_sender, mi_limits));
         tokio::spawn(read_stderr(stderr, stderr_sender));
         tokio::spawn(read_pty(
@@ -957,5 +1289,32 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(reads.load(Ordering::Relaxed), 2);
         task.abort();
+    }
+
+    #[test]
+    fn bounded_spool_preserves_a_recoverable_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = PtyOutput::with_evidence(
+            2,
+            &OutputConfig {
+                evidence: OutputEvidenceMode::BoundedSpool,
+                max_bytes: 4,
+            },
+            directory.path(),
+            "test",
+        )
+        .unwrap();
+        output.append(b"abcdef");
+        let status = output.finish_evidence();
+        assert_eq!(status.captured_bytes, 4);
+        assert_eq!(status.spooled_bytes, 4);
+        assert_eq!(status.dropped_bytes, 2);
+        assert!(!status.complete);
+        assert_eq!(status.durability, "synced");
+        assert_eq!(output.read(0, 8).bytes, b"abcd");
+        assert_eq!(
+            status.sha256.as_deref(),
+            Some("88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589")
+        );
     }
 }

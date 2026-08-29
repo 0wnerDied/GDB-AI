@@ -129,6 +129,10 @@ impl Journal {
         )
     }
 
+    pub fn append_inferior_output_evidence(&mut self, evidence: Value) -> Result<u64> {
+        self.append("inferior.output.evidence", evidence)
+    }
+
     pub fn append_domain(&mut self, event: DomainEvent) -> Result<JournaledEvent> {
         let data = serde_json::to_value(&event)?;
         let seq = self.append("normalized.event", data)?;

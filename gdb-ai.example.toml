@@ -19,6 +19,10 @@ fallback_mi = "mi3"
 [journal]
 durability = "performance"
 
+[output]
+evidence = "ephemeral_ring" # ephemeral_ring, bounded_spool, or artifact
+max_bytes = 8388608
+
 [limits]
 mi_record_bytes = 8388608
 mi_depth = 128

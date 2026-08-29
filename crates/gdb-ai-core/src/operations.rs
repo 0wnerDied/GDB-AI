@@ -449,9 +449,14 @@ impl Gateway {
             }
         }
         let state = entry.handle.state();
+        let output_evidence = entry.handle.inferior_output_evidence();
         self.store.delete_lease(entry.handle.id())?;
         self.sessions.write().await.remove(&id);
-        Ok(json!({ "closed": true, "state": state }))
+        Ok(json!({
+            "closed": true,
+            "state": state,
+            "inferior_output_evidence": output_evidence
+        }))
     }
 
     async fn target_launch(&self, request: &ApiRequest) -> Result<Value> {
@@ -2455,6 +2460,8 @@ impl Gateway {
         };
         let read = entry.handle.read_output(ring, offset, max_bytes).await?;
         let text = std::str::from_utf8(&read.bytes).ok().map(str::to_owned);
+        let evidence =
+            matches!(ring, OutputRing::Inferior).then(|| entry.handle.inferior_output_evidence());
         Ok(json!({
             "requested_offset": read.requested_offset,
             "available_from": read.available_from,
@@ -2462,7 +2469,8 @@ impl Gateway {
             "gap": read.gap,
             "encoding": if text.is_some() { "utf-8" } else { "binary" },
             "text": text,
-            "data_base64": BASE64.encode(read.bytes)
+            "data_base64": BASE64.encode(read.bytes),
+            "evidence": evidence
         }))
     }
 

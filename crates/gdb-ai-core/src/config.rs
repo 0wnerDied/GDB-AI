@@ -11,6 +11,7 @@ pub struct Config {
     pub gdb: GdbConfig,
     pub limits: Limits,
     pub journal: JournalConfig,
+    pub output: OutputConfig,
     pub artifacts: ArtifactConfig,
     pub persistence: PersistenceConfig,
     pub security: SecurityConfig,
@@ -26,6 +27,7 @@ impl Default for Config {
             gdb: GdbConfig::default(),
             limits: Limits::default(),
             journal: JournalConfig::default(),
+            output: OutputConfig::default(),
             artifacts: ArtifactConfig {
                 path: data.join("artifacts"),
             },
@@ -50,6 +52,31 @@ pub enum JournalDurability {
 #[serde(default)]
 pub struct JournalConfig {
     pub durability: JournalDurability,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputEvidenceMode {
+    #[default]
+    EphemeralRing,
+    BoundedSpool,
+    Artifact,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    pub evidence: OutputEvidenceMode,
+    pub max_bytes: usize,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            evidence: OutputEvidenceMode::EphemeralRing,
+            max_bytes: 8 * 1024 * 1024,
+        }
+    }
 }
 
 impl Config {
@@ -90,7 +117,9 @@ impl Config {
             && self.limits.journal_bytes > 0
             && self.limits.process_memory_bytes > 0
             && self.limits.process_cpu_seconds > 0
-            && self.limits.process_open_files >= 32;
+            && self.limits.process_open_files >= 32
+            && self.output.max_bytes > 0
+            && self.output.max_bytes <= self.limits.session_artifact_bytes;
         if !timeouts_valid || !limits_valid || self.security.workspace_roots.is_empty() {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
@@ -288,7 +317,13 @@ mod tests {
 
     #[test]
     fn parses_explicit_journal_durability() {
-        let config: Config = toml::from_str("[journal]\ndurability = \"durable\"\n").unwrap();
+        let config: Config = toml::from_str(
+            "[journal]\ndurability = \"durable\"\n\
+             [output]\nevidence = \"bounded_spool\"\nmax_bytes = 4096\n",
+        )
+        .unwrap();
         assert_eq!(config.journal.durability, JournalDurability::Durable);
+        assert_eq!(config.output.evidence, OutputEvidenceMode::BoundedSpool);
+        assert_eq!(config.output.max_bytes, 4096);
     }
 }

@@ -17,11 +17,12 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
 use crate::{
     Error, ErrorCode, Result,
+    artifact::ArtifactStore,
     backend::{
-        BackendDescriptor, BackendInput, DebugBackend, GdbBackend, MiCommand, PtyOutput,
-        SandboxOptions, session_directory,
+        BackendDescriptor, BackendInput, DebugBackend, GdbBackend, MiCommand, OutputEvidenceStatus,
+        PtyOutput, SandboxOptions, session_directory,
     },
-    config::Config,
+    config::{Config, OutputEvidenceMode},
     domain::{
         BreakpointId, DomainEvent, InferiorStatus, JournaledEvent, OutputSource, SessionId,
         SessionState, SnapshotStatus, StopId, TrackingDefinition, ValueBinding, WaitBaseline,
@@ -246,6 +247,10 @@ impl SessionHandle {
 
     pub fn journal_path(&self) -> &PathBuf {
         &self.journal_path
+    }
+
+    pub fn inferior_output_evidence(&self) -> OutputEvidenceStatus {
+        self.inferior_output.evidence_status()
     }
 
     pub async fn command(&self, command: MiCommand) -> Result<CommandReply> {
@@ -977,6 +982,7 @@ struct PendingControl {
 struct SessionWorker {
     backend: Box<dyn DebugBackend>,
     journal: Journal,
+    artifacts: ArtifactStore,
     reducer: StateReducer,
     store: Arc<Store>,
     metrics: Arc<Metrics>,
@@ -990,6 +996,8 @@ struct SessionWorker {
     inferior_output: Arc<PtyOutput>,
     inferior_output_offset: u64,
     inferior_output_dropped: u64,
+    output_evidence_mode: OutputEvidenceMode,
+    output_evidence_finalized: bool,
     target_output: ByteRing,
     console_output: ByteRing,
     log_output: ByteRing,
@@ -1006,6 +1014,7 @@ struct SessionWorker {
     pending_module_breakpoints: BTreeMap<String, PendingModuleBreakpoint>,
     module_rebind_needed: bool,
     tracking_memory_limit: usize,
+    artifact_limit: usize,
     fatal: bool,
     metric_active: bool,
 }
@@ -1033,6 +1042,7 @@ impl SessionWorker {
         let mut last_error = None;
         let mut selected = None;
         let mut journal = journal;
+        let artifacts = ArtifactStore::new(&config.artifacts.path)?;
         let mut reducer = StateReducer::new(initial_state);
         let mut target_output = ByteRing::new(config.limits.inferior_output_ring_bytes);
         let mut console_output = ByteRing::new(config.limits.console_output_ring_bytes);
@@ -1050,6 +1060,7 @@ impl SessionWorker {
                     &session_dir,
                     limits,
                     &config.limits,
+                    &config.output,
                     SandboxOptions {
                         mode: config.security.sandbox,
                         allow_network: profile == Profile::RawAdmin
@@ -1112,6 +1123,7 @@ impl SessionWorker {
             })),
             backend,
             journal,
+            artifacts,
             reducer,
             store,
             metrics,
@@ -1124,6 +1136,8 @@ impl SessionWorker {
             inferior_output,
             inferior_output_offset: 0,
             inferior_output_dropped: 0,
+            output_evidence_mode: config.output.evidence,
+            output_evidence_finalized: false,
             target_output,
             console_output,
             log_output,
@@ -1140,6 +1154,7 @@ impl SessionWorker {
             pending_module_breakpoints: BTreeMap::new(),
             module_rebind_needed: false,
             tracking_memory_limit: config.limits.memory_read_bytes,
+            artifact_limit: config.limits.session_artifact_bytes,
             fatal: false,
             metric_active: false,
         };
@@ -1423,6 +1438,16 @@ impl SessionWorker {
                         break;
                     }
                 }
+            }
+        }
+        if !self.output_evidence_finalized {
+            let _ = self.backend.shutdown().await;
+            self.inferior_output
+                .wait_closed(Duration::from_secs(1))
+                .await;
+            if let Err(error) = self.finalize_output_evidence() {
+                tracing::error!(%error, "inferior output evidence finalization failed");
+                self.mark_failed();
             }
         }
         let _ = self.journal.flush();
@@ -1804,12 +1829,83 @@ impl SessionWorker {
         let shutdown = self.backend.shutdown().await;
         closing?;
         shutdown?;
+        self.inferior_output
+            .wait_closed(Duration::from_secs(1))
+            .await;
+        self.finalize_output_evidence()?;
         self.apply_event(DomainEvent::SessionClosed)?;
         if self.metric_active {
             self.metrics.session_closed();
             self.metric_active = false;
         }
         Ok(())
+    }
+
+    fn finalize_output_evidence(&mut self) -> Result<OutputEvidenceStatus> {
+        if self.output_evidence_finalized {
+            return Ok(self.inferior_output.evidence_status());
+        }
+        let mut status = self.inferior_output.finish_evidence();
+        if self.output_evidence_mode == OutputEvidenceMode::Artifact && status.error.is_none() {
+            let result = (|| {
+                let size = usize::try_from(status.spooled_bytes).map_err(|_| {
+                    Error::new(ErrorCode::OutputLimit, "inferior output spool is too large")
+                })?;
+                let used = self
+                    .store
+                    .artifact_bytes(&self.reducer.state().session_id)?;
+                if used.saturating_add(size) > self.artifact_limit {
+                    return Err(Error::new(
+                        ErrorCode::OutputLimit,
+                        "session artifact byte limit reached",
+                    ));
+                }
+                // ponytail: Output spools are operator-bounded and default to
+                // 8 MiB. Add streaming file ingestion only if that bound grows.
+                let path = self.inferior_output.evidence_path().ok_or_else(|| {
+                    Error::new(ErrorCode::Internal, "inferior output spool path is missing")
+                })?;
+                let bytes = std::fs::read(path)?;
+                if bytes.len() != size {
+                    return Err(Error::new(
+                        ErrorCode::Internal,
+                        "inferior output spool size changed during finalization",
+                    ));
+                }
+                let uri = self.artifacts.put(&bytes)?;
+                self.store.register_artifact(
+                    &uri,
+                    Some(&self.reducer.state().session_id),
+                    bytes.len(),
+                    "target-io",
+                )?;
+                self.metrics.artifact_written(bytes.len());
+                Ok(uri)
+            })();
+            match result {
+                Ok(uri) => {
+                    self.inferior_output.set_artifact_uri(uri.clone());
+                    status.artifact_uri = Some(uri);
+                    status.durability = "artifact";
+                    if let Some(path) = self.inferior_output.evidence_path() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                Err(error) => {
+                    // 2026-08-29: Keeping an artifact failure only in this
+                    // local result made the later close response claim complete
+                    // evidence. Persist the failure in the shared PTY status.
+                    status.complete = false;
+                    status.error = Some(error.to_string());
+                    self.inferior_output.set_evidence_error(error.to_string());
+                }
+            }
+        }
+        self.output_evidence_finalized = true;
+        let evidence = serde_json::to_value(&status)?;
+        let appended = self.journal.append_inferior_output_evidence(evidence);
+        self.journal_result(appended)?;
+        Ok(status)
     }
 
     async fn cleanup_one_stale_value(&mut self) {

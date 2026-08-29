@@ -34,6 +34,10 @@ SHA-256; a partial page is never labeled as the complete digest resource.
 Inferior PTY bytes currently share one session-scoped ring and are exposed as
 `gdbai://session/<session_id>/output/pty`. GDB/AI does not claim per-inferior
 output attribution until the backend can provide genuinely separate streams.
+The `output.evidence` setting selects an `ephemeral_ring`, a retained
+`bounded_spool`, or an `artifact` finalized when the session closes. I/O reads
+and close responses report captured, spooled, dropped, completeness, digest,
+and durability metadata; output capture never backpressures the inferior.
 
 Successful responses retain the method-specific `result` and also promote
 `warnings`, `truncated`, `continuation`, and artifact references into the
