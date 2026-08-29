@@ -7,38 +7,29 @@ unknown state-changing event taints consistency instead of being guessed.
 
 ## Verified on 2026-08-29
 
-- Required CI run
-  [33188007777](https://github.com/0wnerDied/GDB-AI/actions/runs/33188007777)
-  passed at implementation baseline `bec8b12` with Ubuntu GDB and gdbserver
-  15.1.
-- Local GDB and gdbserver 17.1 passed the full locked workspace tests,
-  including native launch, attach, core, gdbserver, raw reconciliation,
-  tracked state, Agent operations, and public session lifecycle paths.
-- A local Docker matrix built checksum-pinned GDB 9.2, 10.2, 11.2, and 12.1
-  for MI3 and GDB 13.2, 14.2, 15.2, 16.3, and 17.1 for MI4. Every version
-  passed the same local-launch vertical test.
-- AArch64 user-space debugging passed through qemu-user RSP and
-  gdb-multiarch, including a function breakpoint, resume, semantic register
-  roles, and disassembly.
-- QEMU TCG tests passed with checksum-pinned Debian 6.1.176 and 6.12.105
-  x86-64 kernels. They exercise legacy `core_layout`, current
-  `module_memory`, tasks, stacks, panic context, and allowlisted monitor
-  commands.
-- Rust 1.88, stable Rust, schemas, and the Python and TypeScript SDKs passed
-  required CI.
-- Required CI ran 60-second libFuzzer campaigns under
-  `nightly-2026-08-01` for the MI parser, MI framer, and state reducer. They
-  completed 5,846,778, 549,776, and 2,418,486 executions respectively with
-  no crash or reducer invariant failure.
+- Required CI
+  [run 33225096633](https://github.com/0wnerDied/GDB-AI/actions/runs/33225096633)
+  passed at functional baseline `4195050`.
+- The matrix built checksum-pinned GDB 9.2, 10.2, 11.2, and 12.1 for MI3 and
+  GDB 13.2, 14.2, 15.2, 16.3, and 17.1 for MI4. Every version passed the same
+  local-launch vertical test.
+- The full locked workspace passed native launch, attach, core, gdbserver,
+  raw reconciliation, tracked state, Agent operations, public session
+  lifecycle, delayed-result, disconnect, storage-failure, and noisy-PTY paths.
+- AArch64 passed qemu-user RSP inspection and a native Debian VM running
+  launch, attach, core, and gdbserver scenarios.
+- QEMU TCG tests passed checksum-pinned Debian 6.1.176 and 6.12.105 x86-64
+  kernels plus Debian 6.12.105 AArch64. They exercise architecture-specific
+  current-task resolution, both module layouts, tasks, stacks, panic context,
+  and allowlisted monitor commands.
+- Rust 1.88, stable Rust, schemas, both SDKs, and 60-second libFuzzer campaigns
+  for the MI parser, MI framer, and state reducer passed required CI.
+- A local 10,000-cycle session lifecycle soak completed in 777.71 seconds
+  with no session, startup, parser, timeout, or consistency failure.
 
-## Qualification still open
+Repeated paired Agent A/B/C/D effect evaluation is explicitly deferred. It is
+future product research, not a compatibility or correctness gate. Publishing
+a release tag still requires artifact hashes and provenance for that tag.
 
-- AArch64 native-host, core, gdbserver, and kernel paths;
-- delayed-result, disconnect, storage-failure, and noisy-I/O chaos runs;
-- the 10,000-cycle session lifecycle soak;
-- repeated paired Agent A/B/C/D effect evaluation; and
-- release artifact hashes and provenance tied to a release tag.
-
-The architecture and capability model contain these paths, but an open item
-is not reported as a verified host capability. Missing host facilities remain
-explicitly unavailable or conditional; they are never converted to success.
+Missing host facilities remain explicitly unavailable or conditional; they
+are never converted to success merely because another matrix entry passed.

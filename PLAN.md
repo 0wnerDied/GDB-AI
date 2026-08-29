@@ -1,6 +1,7 @@
 # GDB/AI Implementation Plan and Normative Specification
 
-Status: North-star implementation present; release qualification in progress
+Status: North-star implementation and runtime qualification complete;
+release packaging pending
 
 This document records the complete project requested for `GDB/AI`. It is the
 normative implementation and release checklist. Host-dependent functions are
@@ -1677,9 +1678,10 @@ The pilot exposed four concrete usability costs: stale-revision lease
 renewal, opaque enum errors, unresolved module-offset breakpoints for a
 loader-launched stripped PIE, and incomplete MCP workflow instructions.
 Each received a focused regression fix in `2183d57`, `a43719a`, `f15a3c7`,
-and `6b2c94e`, respectively. The statistically meaningful A/B/C/D gate
-remains open and requires repeated paired tasks, matching models and
-permissions, and the semantic-probe arm.
+and `6b2c94e`, respectively. A statistically meaningful A/B/C/D study would
+require repeated paired tasks, matching models and permissions, and the
+semantic-probe arm. That study is deferred by project direction and is not a
+current correctness or release gate.
 
 ### 52.2 Matched Sol completion trial
 
@@ -1714,7 +1716,8 @@ The matched result is a positive usability signal: GDB/AI reached full
 exploitation 4:25 sooner in this sample. It is not a statistical claim. The
 two Agents followed different valid exploit trajectories, and neither
 debugger interface uniquely caused success. Repeated paired tasks and the
-raw/structured/probe arms from section 52 remain required.
+raw/structured/probe arms from section 52 are deferred and are not part of
+the current completion criteria.
 
 Two actionable issues emerged. Relative `program` paths were resolved before
 the requested `cwd`; `b08bce7` fixes that shared launch path. A stripped-PIE
@@ -1773,19 +1776,18 @@ require explicit allowlists. Kernel inspection remains conditional on a
 configured KGDB/QEMU target and symbols.
 
 Release verification commands and deployment assets are maintained in
-`README.md`, `packaging/`, `schemas/`, `fuzz/`, and `tests/`. The 10,000-cycle
-soak and the remaining AArch64 native/core/kernel environments are release
-qualification gates; a development host that lacks those facilities reports
-the missing gate instead of claiming it ran.
+`README.md`, `packaging/`, `schemas/`, `fuzz/`, and `tests/`. Required CI and
+the local 10,000-cycle soak now cover the declared GDB, AArch64, kernel, and
+chaos gates. A development host that lacks those facilities still reports the
+missing capability instead of claiming it ran.
 
 ## 55. Current progress and resume point
 
-The 2026-08-29 runtime baseline is `a52e069`. A local immutable-container
-matrix built checksum-pinned GDB 9.2-12.1 for MI3 and GDB 13.2-17.1 for MI4;
-all nine versions passed the same local-launch vertical test. Local GDB 17.1
-passed the full workspace. Required CI run `33188007777` at the earlier
-`bec8b12` baseline passed Clippy, Rust 1.88, schema hashes, both SDKs, bounded
-fuzz campaigns, and two public Debian kernel jobs.
+The 2026-08-29 functional baseline is `4195050`. Required CI run
+`33225096633` passed the full workspace, Clippy, Rust 1.88, schema hashes,
+both SDKs, bounded fuzz campaigns, and checksum-pinned GDB 9.2-17.1 across
+MI3 and MI4. The same run qualified public Debian 6.1 and 6.12 x86-64 kernels,
+a Debian 6.12 AArch64 kernel, and a native Debian AArch64 VM.
 
 Completed correctness work includes:
 
@@ -1799,23 +1801,23 @@ Completed correctness work includes:
 - verified native, attach, core, gdbserver, raw, state-service, and lifecycle
   API paths;
 - bounded Linux kernel tasks, modules, stack, panic, and monitor operations
-  on Debian 6.1 and 6.12 under QEMU;
+  on Debian 6.1 and 6.12 x86-64 plus 6.12 AArch64 under QEMU;
 - required 60-second MI parser, MI framer, and state reducer fuzz campaigns
-  with no crash or state invariant failure; and
+  with no crash or state invariant failure;
 - real GDB 9.2-17.1 compatibility coverage across MI3 and MI4;
 - AArch64 qemu-user RSP coverage for break, run, semantic registers, and
-  disassembly; and
+  disassembly;
+- AArch64 native launch, attach, core, and gdbserver coverage in a full-system
+  Debian VM;
+- delayed-result, disconnect, storage-failure, and noisy-PTY chaos paths;
+- 10,000 create/launch/stop/close cycles in 777.71 seconds with zero session,
+  startup, parser, timeout, or consistency failure; and
 - two blind native-GDB versus GDB/AI Agent pilots, including one matched pair
   that completed target-side flag reads with replay and isolation evidence.
 
-Release qualification continues from this baseline. Remaining gates, in
-dependency order, are:
-
-1. run targeted chaos cases and the 10,000-cycle lifecycle soak;
-2. qualify AArch64 native-host, core, gdbserver, and kernel environments;
-3. repeat the paired Agent A/B/C/D evaluation from section 52; and
-4. produce release-tag provenance and rerun the complete final matrix.
-
-Until those gates pass, `gdb.ai/v1` identifies the implemented protocol
-major version; it is not evidence that every North-star release environment
-has been qualified.
+North-star implementation and runtime qualification are complete at this
+functional baseline. Repeated paired Agent A/B/C/D evaluation from section 52
+is explicitly deferred by project direction; it remains future product-effect
+research rather than a correctness or release gate. Creating a release tag
+and publishing artifact hashes/provenance remain separate packaging work.
+The `gdb.ai/v1` name identifies the protocol major version, not a release tag.

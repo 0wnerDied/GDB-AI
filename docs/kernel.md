@@ -58,12 +58,16 @@ GDB_AI_KERNEL_MODULE=/path/to/irqbypass.ko
 ```
 
 The image, debug symbols, and module must come from the same distribution
-build. The test also requires `busybox`, `cpio`, `gdb`, and
-`qemu-system-x86_64`.
+build. The test also requires `busybox`, `cpio`, GDB or gdb-multiarch, and the
+matching `qemu-system-x86_64` or `qemu-system-aarch64` executable.
 
 Required CI uses `tests/kernel/fetch-debian-kernel.sh` to verify pinned,
-checksum-validated Debian 6.1 and 6.12 builds. These exercise the legacy
-`core_layout` and current `module_memory` representations respectively.
+checksum-validated Debian 6.1 and 6.12 x86-64 builds plus Debian 6.12
+AArch64. These exercise both architecture-specific current-task mechanisms
+and the legacy `core_layout` and current `module_memory` representations.
+Required CI
+[run 33225096633](https://github.com/0wnerDied/GDB-AI/actions/runs/33225096633)
+passed all three jobs at functional baseline `4195050`.
 
 Kernel debugging exposes complete guest memory and register state. Bind remote
 stubs only on an authorized network boundary and treat transcripts, monitor

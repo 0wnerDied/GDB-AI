@@ -18,26 +18,26 @@ The repository is independently versioned as `gdb-ai`; the executable is
 
 ## Verification status
 
-The 2026-08-29 runtime baseline `a52e069` passed a local matrix built from
-checksum-pinned GNU releases: GDB 9.2-12.1 with MI3 and GDB 13.2-17.1 with
-MI4. Every version ran the same local-launch vertical test. The full locked
-workspace also passed with GDB/gdbserver 17.1, including native launch,
-attach, core, remote, Agent, state-service, and replay paths.
+The 2026-08-29 functional baseline `4195050` passed required CI
+[run 33225096633](https://github.com/0wnerDied/GDB-AI/actions/runs/33225096633).
+It exercised the full locked workspace, Clippy, Rust 1.88, schemas, both SDKs,
+bounded fuzz campaigns, and checksum-pinned GDB 9.2-12.1 with MI3 plus GDB
+13.2-17.1 with MI4.
 
-A real AArch64 user-space path passed through `qemu-aarch64` RSP and
-`gdb-multiarch`, covering remote connection, a function breakpoint, resume,
-semantic PC/SP/FP/return/argument registers, and disassembly. Required CI
-[run 33188007777](https://github.com/0wnerDied/GDB-AI/actions/runs/33188007777)
-at baseline `bec8b12` separately passed workspace tests, Clippy, Rust 1.88,
-schema hashes, both SDKs, bounded fuzz campaigns, and pinned Debian 6.1 and
-6.12 kernel tests.
+The same matrix covered x86-64 and AArch64 user space. AArch64 passed both
+qemu-user RSP inspection and a native Debian VM running launch, attach, core,
+and gdbserver scenarios. Public Debian 6.1 and 6.12 x86-64 kernels and a
+Debian 6.12 AArch64 kernel passed the conditional kernel-provider test under
+QEMU TCG. A local 10,000-cycle create/launch/stop/close soak of the same
+product code completed in 777.71 seconds with no session, startup, parser,
+timeout, or consistency failure.
 
-The North-star code surface is implemented, but release qualification is not
-complete. Remaining gates include targeted chaos, the 10,000-cycle soak,
-AArch64 native/core/kernel environments, repeated Agent A/B/C/D evaluation,
-and release provenance. See [compatibility status](docs/compatibility.md) and
-PLAN section 55. The `gdb.ai/v1` namespace does not turn an unexecuted matrix
-entry into support.
+The North-star code surface and declared runtime matrix are qualified at this
+functional baseline. Repeated paired Agent A/B/C/D evaluation is explicitly
+deferred and is not a current correctness or release gate; the existing blind
+pilots remain usability evidence only. Release-tag artifact hashes and
+provenance remain separate packaging work. See
+[compatibility status](docs/compatibility.md) and PLAN section 55.
 
 A matched blind Sol xhigh pilot completed SUCTF 2026 `SU_minivfs` with both
 native GDB and GDB/AI. GDB/AI finished in 20:31 and native GDB in 24:56; one
@@ -86,14 +86,17 @@ inferior restoration after GDB death.
   `required` fails closed); it is not a complete untrusted-code sandbox
 - A C compiler for integration tests
 - Optional: gdbserver, Python-enabled GDB, Node.js 18 or newer
-- AArch64 integration: gdb-multiarch, qemu-user, and an AArch64 C compiler
+- AArch64 RSP integration: gdb-multiarch, qemu-user, and an AArch64 C compiler
+- AArch64 system integration: Docker, qemu-system-aarch64,
+  qemu-user-static, and the AArch64 Rust/GCC targets
 
 ## Build and verify
 
 ```sh
 cargo build --locked --release
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+GDB_AI_REQUIRE_INTEGRATION=1 cargo test --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo +1.88.0 check --locked --workspace --all-targets
 cargo run -p gdb-ai -- doctor
 ```
 
