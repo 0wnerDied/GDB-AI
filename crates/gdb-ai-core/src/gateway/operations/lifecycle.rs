@@ -1,0 +1,739 @@
+use super::*;
+
+impl Gateway {
+    pub(super) async fn session_create(
+        &self,
+        request: &ApiRequest,
+        caller: &Caller,
+    ) -> Result<Value> {
+        // 2026-08-28: Concurrent creates checked the registry before either
+        // inserted its worker, allowing both to exceed max_sessions. Session
+        // startup is rare, so serialize its reservation and insertion.
+        // ponytail: shard reservations only if startup throughput matters.
+        let _creation = self.session_creation.lock().await;
+        let live_sessions = self.sessions.read().await.keys().cloned().collect();
+        self.maintain_storage(&live_sessions)?;
+        if self.sessions.read().await.len() >= self.config.server.max_sessions {
+            return Err(Error::new(ErrorCode::Conflict, "maximum sessions reached"));
+        }
+        #[derive(Deserialize)]
+        struct Parameters {
+            #[serde(default)]
+            profile: Option<Profile>,
+        }
+        let parameters: Parameters = parameters(request)?;
+        let profile = parameters
+            .profile
+            .unwrap_or(self.config.security.default_profile);
+        if profile != self.config.security.default_profile && !caller.admin {
+            return Err(Error::new(
+                ErrorCode::PolicyDenied,
+                "selecting a non-default profile requires an administrative caller",
+            ));
+        }
+        let handle = SessionHandle::start(
+            self.config.clone(),
+            profile,
+            self.store.clone(),
+            self.metrics.clone(),
+        )
+        .await?;
+        let id = handle.id().clone();
+        let lease = WriteLease {
+            lease_id: LeaseId::new(),
+            session_id: id.clone(),
+            owner: caller.identity.clone(),
+            expires_at_unix_ms: now_unix_ms()
+                .saturating_add(self.config.server.write_lease_ms.max(1)),
+            generation: 1,
+        };
+        if let Err(error) = self
+            .store
+            .set_session_owner(&id, &caller.identity)
+            .and_then(|()| self.store.upsert_lease(&lease))
+        {
+            let _ = handle.close().await;
+            return Err(error);
+        }
+        let entry = Arc::new(SessionEntry {
+            handle,
+            owner: caller.identity.clone(),
+            target_state: tokio::sync::RwLock::new(()),
+            mutation: tokio::sync::Mutex::new(()),
+            out_of_band_mutation: tokio::sync::Mutex::new(()),
+            lease: tokio::sync::Mutex::new(Some(lease.clone())),
+            lease_generation: std::sync::atomic::AtomicU64::new(1),
+        });
+        self.sessions
+            .write()
+            .await
+            .insert(id.0.clone(), entry.clone());
+        entry
+            .handle
+            .record_api(serde_json::to_value(request)?)
+            .await?;
+        Ok(json!({
+            "session_id": id,
+            "resource": format!("gdbai://session/{}/status", id.0),
+            "state": entry.handle.state(),
+            "backend": entry.handle.capabilities().backend,
+            "profile": profile,
+            "write_lease": lease,
+            "capabilities": entry.handle.capabilities(),
+        }))
+    }
+
+    pub(super) async fn session_acquire_write_lease(
+        &self,
+        request: &ApiRequest,
+        caller: &Caller,
+    ) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let now = now_unix_ms();
+        let mut current = entry.lease.lock().await;
+        let force =
+            request.parameters.get("force").and_then(Value::as_bool) == Some(true) && caller.admin;
+        if current
+            .as_ref()
+            .is_some_and(|lease| !lease.is_expired(now) && lease.owner != caller.identity && !force)
+        {
+            return Err(Error::new(
+                ErrorCode::Conflict,
+                "another caller holds the write lease",
+            ));
+        }
+        let generation = entry.lease_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let lease = WriteLease {
+            lease_id: LeaseId::new(),
+            session_id: entry.handle.id().clone(),
+            owner: caller.identity.clone(),
+            expires_at_unix_ms: now.saturating_add(self.config.server.write_lease_ms.max(1)),
+            generation,
+        };
+        self.store.upsert_lease(&lease)?;
+        current.replace(lease.clone());
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "write_lease_acquired".into(),
+            })
+            .await?;
+        Ok(serde_json::to_value(lease)?)
+    }
+
+    pub(super) async fn session_release_write_lease(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let released = entry
+            .lease
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "write lease not found"))?;
+        self.store.delete_lease(entry.handle.id())?;
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "write_lease_released".into(),
+            })
+            .await?;
+        Ok(json!({ "released": released.lease_id }))
+    }
+
+    pub(super) async fn session_attempt_recovery(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        self.reconcile_session(&entry, true).await
+    }
+
+    pub(super) async fn session_list(&self, caller: &Caller) -> Result<Value> {
+        let entries = self
+            .sessions
+            .read()
+            .await
+            .values()
+            .filter(|entry| caller.admin || same_principal(&entry.owner, &caller.identity))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut states = self
+            .store
+            .list_session_owners()?
+            .into_iter()
+            .filter(|(_, owner)| {
+                caller.admin
+                    || owner
+                        .as_deref()
+                        .is_some_and(|owner| same_principal(owner, &caller.identity))
+            })
+            .map(|(state, _)| (state.session_id.0.clone(), state))
+            .collect::<BTreeMap<_, _>>();
+        for entry in entries {
+            let state = entry.handle.state();
+            states.insert(state.session_id.0.clone(), state);
+        }
+        Ok(serde_json::to_value(
+            states.into_values().collect::<Vec<_>>(),
+        )?)
+    }
+
+    pub(super) async fn session_get(&self, request: &ApiRequest) -> Result<Value> {
+        let session_id = SessionId::parse(required_session(request)?)?;
+        if let Ok(entry) = self.entry(&session_id.0).await {
+            return Ok(serde_json::to_value(entry.handle.state())?);
+        }
+        self.store
+            .get_session(&session_id)?
+            .map(serde_json::to_value)
+            .transpose()?
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "session not found"))
+    }
+
+    pub(super) async fn session_providers(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        Ok(serde_json::to_value(crate::providers::descriptors(
+            &entry.handle.state(),
+            &entry.handle.capabilities(),
+            self.config.security.kernel_enabled,
+        ))?)
+    }
+
+    pub(super) async fn session_transcript(&self, request: &ApiRequest) -> Result<Value> {
+        use std::io::{Read as _, Seek as _};
+
+        let session_id = SessionId::parse(required_session(request)?)?;
+        let journal_path = self.session_journal_path(&session_id).await?;
+        let offset = request
+            .parameters
+            .get("offset")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let max_bytes = request
+            .parameters
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(64 * 1024)
+            .clamp(1, 64 * 1024) as usize;
+        let mut file = std::fs::File::open(journal_path)?;
+        let length = file.metadata()?.len();
+        let offset = offset.min(length);
+        file.seek(std::io::SeekFrom::Start(offset))?;
+        let mut bytes = vec![0; max_bytes.min((length - offset) as usize)];
+        file.read_exact(&mut bytes)?;
+        let text = std::str::from_utf8(&bytes).ok();
+        Ok(json!({
+            "offset": offset,
+            "next_offset": offset + bytes.len() as u64,
+            "total_bytes": length,
+            "text": text,
+            "data_base64": BASE64.encode(&bytes),
+            "truncated": offset + (bytes.len() as u64) < length
+        }))
+    }
+
+    pub(super) async fn session_event(&self, request: &ApiRequest) -> Result<Value> {
+        use std::io::BufRead as _;
+
+        let session_id = SessionId::parse(required_session(request)?)?;
+        let wanted = unsigned(&request.parameters, "event_seq")?;
+        if wanted == 0 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "event_seq must be positive",
+            ));
+        }
+        let path = self.session_journal_path(&session_id).await?;
+        for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
+            let entry: crate::journal::JournalEntry = serde_json::from_str(&line?)?;
+            if entry.seq == wanted {
+                return Ok(serde_json::to_value(entry)?);
+            }
+            if entry.seq > wanted {
+                break;
+            }
+        }
+        Err(Error::new(ErrorCode::NotFound, "journal event not found"))
+    }
+
+    pub(super) async fn session_journal_path(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<std::path::PathBuf> {
+        // 2026-08-28: Transcript and event reads previously required a live
+        // worker, making retained failure evidence inaccessible after close.
+        match self.entry(&session_id.0).await {
+            Ok(entry) => {
+                // 2026-08-28: Batched journal writes were not flushed before
+                // live transcript reads, so recently advertised evidence was missing.
+                entry.handle.flush_journal().await?;
+                Ok(entry.handle.journal_path().clone())
+            }
+            Err(_) if self.store.get_session(session_id)?.is_some() => Ok(self
+                .config
+                .persistence
+                .sessions
+                .join(&session_id.0)
+                .join("journal.jsonl")),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) async fn session_close(&self, request: &ApiRequest) -> Result<Value> {
+        let id = required_session(request)?.to_owned();
+        let entry = self.entry(&id).await?;
+        if let Err(error) = entry.handle.close().await {
+            // 2026-08-28: A failed worker closes its request channel, so close
+            // must still release registry and lease state after GDB death.
+            if entry.handle.state().lifecycle != crate::domain::SessionLifecycle::Failed {
+                return Err(error);
+            }
+        }
+        let state = entry.handle.state();
+        let output_evidence = entry.handle.inferior_output_evidence();
+        self.store.delete_lease(entry.handle.id())?;
+        self.sessions.write().await.remove(&id);
+        let live_sessions = self.sessions.read().await.keys().cloned().collect();
+        if let Err(error) = self.maintain_storage(&live_sessions) {
+            tracing::warn!(%error, "closed session retention failed");
+        }
+        Ok(json!({
+            "closed": true,
+            "state": state,
+            "inferior_output_evidence": output_evidence
+        }))
+    }
+
+    pub(super) async fn target_launch(&self, request: &ApiRequest) -> Result<Value> {
+        #[derive(Deserialize)]
+        #[serde(default)]
+        struct Parameters {
+            program: String,
+            argv: Vec<String>,
+            cwd: Option<String>,
+            environment: BTreeMap<String, String>,
+            environment_mode: String,
+            aslr: String,
+            stop: StartPolicy,
+            follow_fork: String,
+            detach_on_fork: bool,
+            follow_exec: String,
+            wait: Option<WaitSpec>,
+        }
+        impl Default for Parameters {
+            fn default() -> Self {
+                Self {
+                    program: String::new(),
+                    argv: Vec::new(),
+                    cwd: None,
+                    environment: BTreeMap::new(),
+                    environment_mode: "clean".into(),
+                    aslr: "preserve".into(),
+                    stop: StartPolicy::FirstInstruction,
+                    follow_fork: "parent".into(),
+                    detach_on_fork: true,
+                    follow_exec: "same-inferior".into(),
+                    wait: None,
+                }
+            }
+        }
+        let parameters: Parameters = parameters(request)?;
+        if parameters.program.is_empty() {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "program is required",
+            ));
+        }
+        let mut environment = match parameters.environment_mode.as_str() {
+            "clean" => BTreeMap::new(),
+            "inherited" => inherited_environment(&self.config.security.environment_allowlist)?,
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "environment_mode must be clean or inherited",
+                ));
+            }
+        };
+        environment.extend(parameters.environment);
+        validate_environment(&environment)?;
+        validate_argv(&parameters.argv)?;
+        // 2026-08-28: Launch canonicalized program before applying the
+        // requested cwd, so an otherwise valid relative executable failed.
+        let requested_cwd = parameters
+            .cwd
+            .as_deref()
+            .map(|cwd| self.workspace_path(cwd, true))
+            .transpose()?;
+        let requested_program = Path::new(&parameters.program);
+        let program_path = if requested_program.is_relative() {
+            requested_cwd.as_ref().map_or_else(
+                || requested_program.to_owned(),
+                |cwd| cwd.join(requested_program),
+            )
+        } else {
+            requested_program.to_owned()
+        };
+        let program = self.workspace_path(&program_path.to_string_lossy(), false)?;
+        let cwd = if let Some(cwd) = requested_cwd {
+            cwd
+        } else {
+            self.workspace_path(
+                &program.parent().unwrap_or(Path::new("/")).to_string_lossy(),
+                true,
+            )?
+        };
+        if !matches!(parameters.follow_fork.as_str(), "parent" | "child") {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "follow_fork must be parent or child",
+            ));
+        }
+        if parameters.follow_exec != "same-inferior" {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "follow_exec must be same-inferior",
+            ));
+        }
+        if let Some(wait) = &parameters.wait {
+            wait.validate()?;
+        }
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        let aslr = parameters.aslr.clone();
+        let disable_randomization = match aslr.as_str() {
+            "preserve" => "off",
+            "disable" => "on",
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "aslr must be preserve or disable",
+                ));
+            }
+        };
+        // 2026-08-29: GDB 9-10 evaluates ASLR support against the active
+        // target. Select native first, and accept its explicit unsupported
+        // result only when preserving the operating system's existing ASLR.
+        entry
+            .handle
+            .command(MiCommand::new("-target-select")?.bare("native")?)
+            .await?;
+        let aslr_managed = match entry
+            .handle
+            .command(
+                MiCommand::new("-gdb-set")?
+                    .bare("disable-randomization")?
+                    .bare(disable_randomization)?,
+            )
+            .await
+        {
+            Ok(_) => true,
+            Err(error)
+                if aslr == "preserve"
+                    && error.code == ErrorCode::GdbError
+                    && error.message.contains("randomization")
+                    && error.message.contains("unsupported") =>
+            {
+                false
+            }
+            Err(error) => return Err(error),
+        };
+        let mut setup = vec![
+            MiCommand::new("-file-exec-and-symbols")?
+                .string(program.as_os_str().as_encoded_bytes()),
+            MiCommand::new("-environment-cd")?.string(cwd.as_os_str().as_encoded_bytes()),
+            // 2026-08-28: Clearing GDB's own environment did not clear the
+            // inferior environment. Enforce environment_mode=clean explicitly.
+            MiCommand::new("-interpreter-exec")?
+                .bare("console")?
+                .string("unset environment"),
+        ];
+        let mut arguments = MiCommand::new("-exec-arguments")?;
+        for argument in parameters.argv {
+            // 2026-08-28: GDB 15 retains MI C-string quotes in argv when
+            // startup-with-shell is disabled. Keep simple arguments bare;
+            // newer GDB accepts that encoding and older GDB gets the exact
+            // path instead of a quoted, nonexistent one.
+            arguments = if !argument.is_empty()
+                && !argument
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'\'' | b'"'))
+            {
+                arguments.bare(argument)?
+            } else {
+                arguments.string(argument)
+            };
+        }
+        setup.push(arguments);
+        for (name, value) in environment {
+            setup.push(
+                MiCommand::new("-gdb-set")?
+                    .bare("environment")?
+                    .string(format!("{name}={value}")),
+            );
+        }
+        setup.push(
+            MiCommand::new("-gdb-set")?
+                .bare("follow-fork-mode")?
+                .bare(parameters.follow_fork)?,
+        );
+        setup.push(MiCommand::new("-gdb-set")?.bare("detach-on-fork")?.bare(
+            if parameters.detach_on_fork {
+                "on"
+            } else {
+                "off"
+            },
+        )?);
+        setup.push(
+            MiCommand::new("-gdb-set")?
+                .bare("follow-exec-mode")?
+                .bare("same")?,
+        );
+        let start_policy = parameters.stop;
+        let run = start_policy.command()?;
+        let reply = entry.handle.transaction(setup, run, Vec::new()).await?;
+        entry
+            .handle
+            .record_event(DomainEvent::TargetConfigured {
+                origin: TargetOrigin::Local,
+            })
+            .await?;
+        let state = wait_if_requested(&entry.handle, parameters.wait, Some(&baseline)).await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({
+            "command": reply,
+            "state": state,
+            "capabilities": capabilities,
+            "start_policy": start_policy.as_str(),
+            "aslr": {"requested": aslr, "backend_managed": aslr_managed}
+        }))
+    }
+
+    pub(super) async fn target_attach(&self, request: &ApiRequest) -> Result<Value> {
+        let pid = unsigned(&request.parameters, "pid")?;
+        let wait = wait_spec(&request.parameters)?.unwrap_or(WaitSpec {
+            until: "snapshot".into(),
+            timeout_ms: self.config.server.wait_timeout_ms,
+        });
+        if !self.config.security.attach_allowlist.contains(&pid) {
+            return Err(Error::new(
+                ErrorCode::PolicyDenied,
+                "PID is not in security.attach_allowlist",
+            ));
+        }
+        let target_identity = validate_attach_target(pid)?;
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        if let Some(executable) = request.parameters.get("executable").and_then(Value::as_str) {
+            let executable = self.workspace_path(executable, false)?;
+            entry
+                .handle
+                .command(
+                    MiCommand::new("-file-exec-and-symbols")?
+                        .string(executable.as_os_str().as_encoded_bytes()),
+                )
+                .await?;
+        }
+        // 2026-08-28: PID ownership was checked before optional setup, leaving
+        // time for exit and PID reuse before GDB attached. Revalidate the
+        // process identity immediately before and after the numeric attach.
+        target_identity.revalidate(pid)?;
+        let reply = entry
+            .handle
+            .command(MiCommand::new("-target-attach")?.bare(pid.to_string())?)
+            .await?;
+        if let Err(error) = target_identity.revalidate(pid) {
+            let _ = entry
+                .handle
+                .command(MiCommand::new("-target-detach")?)
+                .await;
+            return Err(error);
+        }
+        entry
+            .handle
+            .record_event(DomainEvent::TargetConfigured {
+                origin: TargetOrigin::Attach,
+            })
+            .await?;
+        let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({ "command": reply, "state": state, "capabilities": capabilities }))
+    }
+
+    pub(super) async fn target_connect_remote(&self, request: &ApiRequest) -> Result<Value> {
+        let mode = request
+            .parameters
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("remote");
+        if !matches!(mode, "remote" | "extended-remote") {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "remote mode must be remote or extended-remote",
+            ));
+        }
+        let endpoint = remote_endpoint(&request.parameters)?;
+        let wait = wait_spec(&request.parameters)?;
+        if !self.config.security.remote_allowlist.contains(&endpoint) {
+            return Err(Error::new(
+                ErrorCode::PolicyDenied,
+                "endpoint is not in security.remote_allowlist",
+            ));
+        }
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        if let Some(executable) = request.parameters.get("executable").and_then(Value::as_str) {
+            let executable = self.workspace_path(executable, false)?;
+            entry
+                .handle
+                .command(
+                    MiCommand::new("-file-exec-and-symbols")?
+                        .string(executable.as_os_str().as_encoded_bytes()),
+                )
+                .await?;
+        }
+        let reply = entry
+            .handle
+            .command(
+                MiCommand::new("-target-select")?
+                    .bare(mode)?
+                    // 2026-08-28: GDB retained MI string quotes in remote
+                    // endpoint parsing. SocketAddr normalization makes bare
+                    // encoding safe and avoids a quoted service name.
+                    .bare(&endpoint)?,
+            )
+            .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::TargetConfigured {
+                origin: TargetOrigin::Remote,
+            })
+            .await?;
+        let state = wait_if_requested(&entry.handle, wait, Some(&baseline)).await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({ "command": reply, "state": state, "capabilities": capabilities }))
+    }
+
+    pub(super) async fn target_open_core(&self, request: &ApiRequest) -> Result<Value> {
+        let executable = self.workspace_path(&string(&request.parameters, "executable")?, false)?;
+        let core = self.workspace_path(&string(&request.parameters, "core")?, false)?;
+        let entry = self.entry(required_session(request)?).await?;
+        let core_link = entry.handle.session_directory().join("target.core");
+        if let Err(error) = std::fs::remove_file(&core_link)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+        std::os::unix::fs::symlink(core, core_link)?;
+        let reply = entry
+            .handle
+            .transaction(
+                vec![
+                    MiCommand::new("-file-exec-and-symbols")?
+                        .string(executable.as_os_str().as_encoded_bytes()),
+                ],
+                // 2026-08-28: GDB 15 treats filename quotes literally while
+                // GDB 17 requires them for spaces. A session-local safe name
+                // gives both versions the same unquoted target argument.
+                MiCommand::new("-target-select")?
+                    .bare("core")?
+                    .bare("target.core")?,
+                Vec::new(),
+            )
+            .await?;
+        // 2026-08-28: Loading a core does not reliably emit *stopped. Build
+        // the immutable stop context explicitly so core inspection is usable.
+        let frame_reply = entry
+            .handle
+            .command(MiCommand::new("-stack-info-frame")?)
+            .await?;
+        let backend_id = entry
+            .handle
+            .state()
+            .inferiors
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "i1".into());
+        entry
+            .handle
+            .record_event(DomainEvent::TargetStopped {
+                backend_inferior: Some(backend_id.clone()),
+                backend_thread: None,
+                reason: "core".into(),
+                reason_detail: Some(StopReason::Core),
+                frame: frame_summary(&frame_reply.record),
+            })
+            .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::CoreOpened { backend_id })
+            .await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({
+            "command": reply,
+            "state": entry.handle.state(),
+            "capabilities": capabilities
+        }))
+    }
+
+    pub(super) async fn target_detach(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let reply = entry
+            .handle
+            .command(MiCommand::new("-target-detach")?)
+            .await?;
+        entry
+            .handle
+            .record_event(DomainEvent::TargetDetached)
+            .await?;
+        Ok(json!({ "command": reply, "state": entry.handle.state() }))
+    }
+
+    pub(super) async fn target_restart(&self, request: &ApiRequest) -> Result<Value> {
+        #[derive(Default, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        struct Parameters {
+            stop: Option<StartPolicy>,
+            stop_at_entry: Option<bool>,
+            wait: Option<WaitSpec>,
+        }
+        let parameters: Parameters = parameters(request)?;
+        if let Some(wait) = &parameters.wait {
+            wait.validate()?;
+        }
+        let start_policy = parameters.stop.unwrap_or_else(|| {
+            parameters.stop_at_entry.map_or(StartPolicy::Main, |stop| {
+                if stop {
+                    StartPolicy::Main
+                } else {
+                    StartPolicy::None
+                }
+            })
+        });
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        let reply = entry.handle.command(start_policy.command()?).await?;
+        let state = wait_if_requested(&entry.handle, parameters.wait, Some(&baseline)).await?;
+        let capabilities = entry.handle.refresh_target_capabilities().await?;
+        Ok(json!({
+            "command": reply,
+            "state": state,
+            "capabilities": capabilities,
+            "start_policy": start_policy.as_str()
+        }))
+    }
+
+    pub(super) async fn target_kill(&self, request: &ApiRequest) -> Result<Value> {
+        let wait = wait_spec(&request.parameters)?;
+        let entry = self.entry(required_session(request)?).await?;
+        let baseline = entry.handle.state();
+        // 2026-08-28: GDB 17 has no -exec-abort MI command. Use console kill
+        // after the handshake disables confirmation so exit events stay MI.
+        let reply = entry
+            .handle
+            .command(
+                MiCommand::new("-interpreter-exec")?
+                    .bare("console")?
+                    .string("kill"),
+            )
+            .await?;
+        let state = wait_if_requested(&entry.handle, wait, Some(&baseline)).await?;
+        Ok(json!({ "command": reply, "state": state }))
+    }
+}
