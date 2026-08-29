@@ -56,12 +56,6 @@ use mi::*;
 use reconciliation::*;
 use request::*;
 
-#[cfg(test)]
-use lifecycle::{
-    AttachIdentity, StartPolicy, inherited_environment, parse_process_start_time,
-    validate_attach_target,
-};
-
 impl Gateway {
     pub(crate) async fn execute_method(
         &self,
@@ -144,6 +138,3 @@ impl Gateway {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

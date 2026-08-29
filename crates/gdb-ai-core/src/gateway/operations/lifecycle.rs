@@ -939,3 +939,56 @@ pub(super) fn parse_process_start_time(stat: &str) -> Result<u64> {
             )
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_and_revalidates_attach_identity() {
+        let stat = "123 (worker name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242";
+        assert_eq!(parse_process_start_time(stat).unwrap(), 4242);
+
+        let pid = u64::from(std::process::id());
+        let identity = validate_attach_target(pid).unwrap();
+        identity.revalidate(pid).unwrap();
+        let changed = AttachIdentity {
+            start_time_ticks: identity.start_time_ticks.saturating_add(1),
+        };
+        assert_eq!(
+            changed.revalidate(pid).unwrap_err().code,
+            ErrorCode::Conflict
+        );
+    }
+
+    #[test]
+    fn start_policies_map_to_explicit_gdb_stops() {
+        let first: StartPolicy = serde_json::from_value(json!("entry")).unwrap();
+        assert_eq!(first.as_str(), "first_instruction");
+        assert_eq!(
+            first.command().unwrap().encoded(1),
+            b"1-interpreter-exec console \"starti\"\n"
+        );
+        assert_eq!(
+            StartPolicy::Main.command().unwrap().encoded(2),
+            b"2-exec-run --start\n"
+        );
+        assert_eq!(
+            StartPolicy::None.command().unwrap().encoded(3),
+            b"3-exec-run\n"
+        );
+    }
+
+    #[test]
+    fn inherits_only_allowlisted_environment_variables() {
+        let path = std::env::var("PATH").unwrap();
+        let environment = inherited_environment(&[
+            "PATH".into(),
+            "GDB_AI_TEST_VARIABLE_THAT_DOES_NOT_EXIST".into(),
+        ])
+        .unwrap();
+
+        assert_eq!(environment.len(), 1);
+        assert_eq!(environment.get("PATH"), Some(&path));
+    }
+}

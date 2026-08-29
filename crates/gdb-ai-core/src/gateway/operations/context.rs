@@ -309,3 +309,99 @@ pub(super) fn require_stopped_context(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        domain::{DomainEvent, FrameId, JournaledEvent, SessionId, SessionState, StopReason},
+        reducer::StateReducer,
+    };
+
+    #[test]
+    fn frame_context_encodes_its_thread_before_positional_arguments() {
+        let mut reducer = StateReducer::new(SessionState::creating(SessionId("sess_ctx".into())));
+        for (seq, event) in [
+            (
+                1,
+                DomainEvent::InferiorAdded {
+                    backend_id: "i1".into(),
+                    pid: Some(7),
+                },
+            ),
+            (
+                2,
+                DomainEvent::ThreadCreated {
+                    backend_inferior: "i1".into(),
+                    backend_thread: "1".into(),
+                },
+            ),
+            (
+                3,
+                DomainEvent::ThreadCreated {
+                    backend_inferior: "i1".into(),
+                    backend_thread: "2".into(),
+                },
+            ),
+            (
+                4,
+                DomainEvent::TargetStopped {
+                    backend_inferior: Some("i1".into()),
+                    backend_thread: Some("2".into()),
+                    reason: "breakpoint-hit".into(),
+                    reason_detail: Some(StopReason::Breakpoint {
+                        backend_number: Some("1".into()),
+                        disposition: Some("keep".into()),
+                    }),
+                    frame: None,
+                },
+            ),
+        ] {
+            reducer
+                .apply(&JournaledEvent::for_replay(seq, event))
+                .unwrap();
+        }
+        let state = reducer.state();
+        let stop = state.stop_id.as_ref().unwrap();
+        let stopped_thread = state.stopped_thread_id.as_ref().unwrap();
+        let frame = FrameId::new(stopped_thread, stop, 3);
+        let command = context_options(
+            MiCommand::new("-data-evaluate-expression")
+                .unwrap()
+                .string("$pc"),
+            &json!({"stop_id": stop, "frame_id": frame}),
+            state,
+        )
+        .unwrap();
+        assert_eq!(
+            command.encoded(1),
+            b"1-data-evaluate-expression --thread 2 --frame 3 \"$pc\"\n"
+        );
+
+        let other_thread = &state.inferiors["i1"].threads["1"].id;
+        let error = context_options(
+            MiCommand::new("-stack-info-frame").unwrap(),
+            &json!({
+                "stop_id": stop,
+                "thread_id": other_thread,
+                "frame_id": frame
+            }),
+            state,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StaleContext);
+
+        let focused = context_options(
+            MiCommand::new("-data-evaluate-expression")
+                .unwrap()
+                .string("$pc"),
+            &json!({"stop_id": stop}),
+            state,
+        )
+        .unwrap();
+        assert_eq!(
+            focused.encoded(2),
+            b"2-data-evaluate-expression --thread 2 --frame 0 \"$pc\"\n"
+        );
+    }
+}

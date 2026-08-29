@@ -66,3 +66,34 @@ pub(super) fn bounded_offset(value: &Value, maximum: usize, subject: &str) -> Re
     }
     Ok(offset as usize)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::operations::lifecycle::StartPolicy;
+
+    #[test]
+    fn strict_parameters_ignore_gateway_controls() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct StrictParameters {
+            stop: StartPolicy,
+        }
+
+        let request = ApiRequest {
+            api_version: crate::protocol::API_VERSION.into(),
+            request_id: "strict-parameters".into(),
+            session_id: Some("sess_test".into()),
+            method: CanonicalMethod::TargetRestart,
+            expected_revision: Some(1),
+            idempotency_key: None,
+            parameters: json!({
+                "stop": "main",
+                "lease_id": "lease_test",
+                "accept_latest_revision": true
+            }),
+        };
+        let decoded: StrictParameters = parameters(&request).unwrap();
+        assert_eq!(decoded.stop.as_str(), "main");
+    }
+}
