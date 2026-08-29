@@ -1,25 +1,5 @@
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::{
-    collections::HashMap,
-    error::Error as StdError,
-    io,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, Instant},
-};
+use std::{error::Error as StdError, io, net::SocketAddr, path::PathBuf};
 
-use axum::{
-    Json, Router,
-    body::Body,
-    extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-};
 use clap::{ArgGroup, Parser, Subcommand};
 use gdb_ai_core::{
     config::Config,
@@ -27,13 +7,8 @@ use gdb_ai_core::{
     gateway::{Caller, Gateway},
     protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod, canonical_request_schema},
 };
-use serde_json::{Map, Value, json};
-use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    net::{TcpListener, UnixListener},
-    sync::{RwLock, mpsc, oneshot},
-    task::JoinHandle,
-};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufRead, BufReader};
 
 mod server;
 mod storage_cli;
@@ -43,7 +18,7 @@ use server::{
     ErrorCodeName, MAX_MESSAGE_BYTES, MCP_VERSION, read_line_bounded, serve_http, serve_stdio,
     serve_unix, write_rpc,
 };
-use tool_catalog::{discriminator_for_tool, method_for_tool, tool_exists, tool_names, tools};
+use tool_catalog::tool_names;
 
 type AnyError = Box<dyn StdError + Send + Sync>;
 

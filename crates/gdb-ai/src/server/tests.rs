@@ -1,4 +1,5 @@
 use super::*;
+use crate::tool_catalog::tool_names;
 
 #[test]
 fn initialize_teaches_agents_the_stateful_workflow() {

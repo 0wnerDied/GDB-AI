@@ -1,4 +1,30 @@
-use super::*;
+use std::{
+    collections::HashMap,
+    io,
+    os::unix::fs::{FileTypeExt, PermissionsExt},
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicU64},
+};
+
+use gdb_ai_core::{
+    config::Config,
+    gateway::{Caller, Gateway},
+};
+use serde_json::{Value, json};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, BufReader},
+    net::UnixListener,
+    sync::mpsc,
+    task::JoinHandle,
+};
+
+use super::{
+    MAX_MESSAGE_BYTES, MAX_PENDING_REQUESTS, Phase, RequestCancellation, RpcOutput,
+    apply_cancel_mode, dispatch_rpc, initialize, progress_notification, progress_token,
+    read_line_bounded, request_cancellation, request_key, rpc_error, rpc_fault, rpc_result,
+    valid_request_id, write_rpc,
+};
+use crate::AnyError;
 
 struct StreamPending {
     waiter: JoinHandle<()>,
@@ -26,7 +52,7 @@ pub(crate) async fn serve_stdio(
     result
 }
 
-pub(super) async fn serve_stream<R, W>(
+async fn serve_stream<R, W>(
     gateway: Arc<Gateway>,
     mut caller: Caller,
     advanced_tools: bool,
@@ -297,8 +323,12 @@ fn handle_notification(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::read_json_line;
     use gdb_ai_core::config::{ArtifactConfig, PersistenceConfig};
     use tempfile::tempdir;
+    use tokio::io::AsyncWriteExt;
+
+    use super::super::{MCP_VERSION, call_tool};
 
     #[tokio::test]
     async fn bounds_stdio_messages() {
