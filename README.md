@@ -14,7 +14,9 @@ MI control traffic, and reduces asynchronous records into explicit state.
 
 The repository is independently versioned as `gdb-ai`; the executable is
 `gdb-ai`, the current protocol namespace is `gdb.ai/v1`, and resources use
-`gdbai://`. The complete normative design is in [PLAN.md](PLAN.md).
+`gdbai://`. Current release work is in [PLAN.md](PLAN.md); the completed
+North-star specification and implementation record are preserved in the
+[plan archive](docs/archive/north-star-plan-2026-08-29.md).
 
 ## Verification status
 
@@ -37,12 +39,14 @@ functional baseline. Repeated paired Agent A/B/C/D evaluation is explicitly
 deferred and is not a current correctness or release gate; the existing blind
 pilots remain usability evidence only. Release-tag artifact hashes and
 provenance remain separate packaging work. See
-[compatibility status](docs/compatibility.md) and PLAN section 55.
+[compatibility status](docs/compatibility.md), the [active release plan](PLAN.md),
+and the archived [baseline status](docs/archive/north-star-plan-2026-08-29.md#55-current-progress-and-resume-point).
 
 A matched blind Sol xhigh pilot completed SUCTF 2026 `SU_minivfs` with both
 native GDB and GDB/AI. GDB/AI finished in 20:31 and native GDB in 24:56; one
-paired task is evidence of usability, not a general effect claim. See PLAN
-section 52.2 for the controls, replay evidence, and observed limitations.
+paired task is evidence of usability, not a general effect claim. The
+controls, replay evidence, and observed limitations are recorded in archived
+[section 52.2](docs/archive/north-star-plan-2026-08-29.md#522-matched-sol-completion-trial).
 
 ## Implemented system
 
