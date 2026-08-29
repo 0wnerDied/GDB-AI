@@ -14,6 +14,12 @@ Use `interrupt_target` or `close_session` on a tool request when cancellation
 must enter the SessionActor control lane; both require `session_id` and
 `lease_id`.
 
+Dropping a Streamable HTTP connection does not imply MCP cancellation. The
+accepted operation continues to its deadline, owns removal of its pending
+entry, and discards its response if the network waiter is gone. Only an
+explicit cancellation notification or transport-session DELETE applies the
+request's `cancel_mode`.
+
 Journals are stored per session. Use `gdb-ai transcript inspect`, `transcript
 export`, and `replay` for diagnosis without executing the inferior again.
 Replay rejects gaps and mismatches among raw MI, adjacent normalized events,

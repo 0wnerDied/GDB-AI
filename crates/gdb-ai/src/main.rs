@@ -31,7 +31,7 @@ use serde_json::{Map, Value, json};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, UnixListener},
-    sync::{RwLock, mpsc},
+    sync::{RwLock, mpsc, oneshot},
     task::JoinHandle,
 };
 
@@ -42,6 +42,7 @@ use tool_catalog::{discriminator_for_tool, method_for_tool, tool_exists, tool_na
 const MCP_VERSION: &str = "2025-11-25";
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 128;
+const MAX_HTTP_PENDING_DURATION: Duration = Duration::from_secs(5 * 60);
 
 type AnyError = Box<dyn StdError + Send + Sync>;
 type RpcOutput = (Option<String>, Value);
@@ -65,10 +66,10 @@ struct StreamPending {
     cancellation: RequestCancellation,
 }
 
-#[derive(Clone)]
 struct HttpPending {
-    waiter: Option<tokio::task::AbortHandle>,
+    cancel_waiter: Option<oneshot::Sender<()>>,
     cancellation: RequestCancellation,
+    deadline: Instant,
 }
 
 #[derive(Parser)]
@@ -776,7 +777,6 @@ struct HttpState {
     idle_timeout: Duration,
 }
 
-#[derive(Clone)]
 struct HttpClient {
     phase: Phase,
     caller: Caller,
@@ -930,14 +930,14 @@ async fn http_mcp(
     else {
         return (StatusCode::BAD_REQUEST, "Mcp-Session-Id is required").into_response();
     };
-    let client = {
+    let (phase, caller) = {
         let mut sessions = state.sessions.write().await;
         evict_expired_http_clients(&mut sessions, Instant::now(), state.idle_timeout);
         let Some(client) = sessions.get_mut(session_id) else {
             return (StatusCode::NOT_FOUND, "MCP session not found").into_response();
         };
         client.last_active = Instant::now();
-        client.clone()
+        (client.phase, client.caller.clone())
     };
     if id.is_none() {
         let mut sessions = state.sessions.write().await;
@@ -960,7 +960,7 @@ async fn http_mcp(
             Some(session_id),
         );
     }
-    if method != "ping" && client.phase != Phase::Ready {
+    if method != "ping" && phase != Phase::Ready {
         return json_http_response(
             rpc_error(id, -32002, "server is not initialized"),
             Some(session_id),
@@ -971,6 +971,8 @@ async fn http_mcp(
         Ok(cancellation) => cancellation,
         Err(error) => return json_http_response(rpc_fault(id, error), Some(session_id)),
     };
+    let deadline = Instant::now() + MAX_HTTP_PENDING_DURATION;
+    let (cancel_waiter, cancelled) = oneshot::channel();
     let reserved = {
         let mut sessions = state.sessions.write().await;
         sessions.get_mut(session_id).is_some_and(|client| {
@@ -980,8 +982,9 @@ async fn http_mcp(
                 client.pending.insert(
                     key.clone(),
                     HttpPending {
-                        waiter: None,
+                        cancel_waiter: Some(cancel_waiter),
                         cancellation,
+                        deadline,
                     },
                 );
                 true
@@ -1000,57 +1003,90 @@ async fn http_mcp(
     }
     let gateway = state.gateway.clone();
     let sequence = state.sequence.clone();
-    let caller = client.caller;
     let method = method.to_owned();
     let response_id = id.clone();
     let operation =
         tokio::spawn(
             async move { dispatch_rpc(&gateway, &caller, &sequence, &method, params).await },
         );
-    let task = tokio::spawn(async move {
-        match operation.await {
-            Ok(result) => result.map_or_else(
-                |error| rpc_fault(response_id.clone(), error),
-                |result| rpc_result(response_id.clone(), result),
-            ),
-            Err(error) => rpc_error(response_id, -32603, error.to_string()),
-        }
-    });
-    let registered = {
-        let mut sessions = state.sessions.write().await;
-        sessions
-            .get_mut(session_id)
-            .and_then(|client| client.pending.get_mut(&key))
-            .is_some_and(|pending| {
-                pending.waiter = Some(task.abort_handle());
-                true
-            })
+    let (response_sender, mut response_receiver) = oneshot::channel();
+    tokio::spawn(complete_http_operation(
+        state.sessions.clone(),
+        session_id.to_owned(),
+        key,
+        response_id,
+        deadline,
+        operation,
+        response_sender,
+    ));
+    let mut cancelled = cancelled;
+    // 2026-08-29: Normal completion drops the stored cancellation sender.
+    // Only an explicit signal cancels the waiter; channel close awaits result.
+    let response = tokio::select! {
+        response = &mut response_receiver => response.unwrap_or_else(|_| {
+            rpc_error(id.clone(), -32603, "request completion channel closed")
+        }),
+        cancellation = &mut cancelled => match cancellation {
+            Ok(()) => rpc_error(id, -32800, "request waiter cancelled"),
+            Err(_) => response_receiver.await.unwrap_or_else(|_| {
+                rpc_error(id, -32603, "request completion channel closed")
+            }),
+        },
     };
-    if !registered {
-        task.abort();
-        return json_http_response(
-            rpc_error(
-                id,
-                -32600,
-                "duplicate request id or too many pending requests",
-            ),
-            Some(session_id),
-        );
-    }
-    let response = match task.await {
-        Ok(response) => response,
-        Err(error) if error.is_cancelled() => rpc_error(id, -32800, "request waiter cancelled"),
-        Err(error) => rpc_error(id, -32603, error.to_string()),
-    };
-    if let Some(client) = state.sessions.write().await.get_mut(session_id) {
-        client.pending.remove(&key);
-    }
     json_http_response(response, Some(session_id))
 }
 
+async fn complete_http_operation(
+    sessions: Arc<RwLock<HashMap<String, HttpClient>>>,
+    session_id: String,
+    key: String,
+    response_id: Value,
+    deadline: Instant,
+    operation: JoinHandle<Result<Value, RpcFault>>,
+    response: oneshot::Sender<Value>,
+) {
+    let completed =
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation).await;
+    let value = match completed {
+        Ok(Ok(result)) => result.map_or_else(
+            |error| rpc_fault(response_id.clone(), error),
+            |result| rpc_result(response_id.clone(), result),
+        ),
+        Ok(Err(error)) => rpc_error(response_id, -32603, error.to_string()),
+        Err(_) => rpc_error(response_id, -32001, "HTTP request deadline exceeded"),
+    };
+    // 2026-08-29: A dropped HTTP handler used to skip pending cleanup while
+    // its detached target operation completed. Completion now owns cleanup.
+    if let Some(client) = sessions.write().await.get_mut(&session_id) {
+        client.pending.remove(&key);
+    }
+    let _ = response.send(value);
+}
+
 async fn evict_http_sessions(state: &HttpState) {
-    let mut sessions = state.sessions.write().await;
-    evict_expired_http_clients(&mut sessions, Instant::now(), state.idle_timeout);
+    let now = Instant::now();
+    let expired = {
+        let mut sessions = state.sessions.write().await;
+        let mut expired = Vec::new();
+        for client in sessions.values_mut() {
+            let keys = client
+                .pending
+                .iter()
+                .filter(|(_, pending)| pending.deadline <= now)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in keys {
+                if let Some(pending) = client.pending.remove(&key) {
+                    expired.push((client.caller.clone(), pending));
+                }
+            }
+        }
+        evict_expired_http_clients(&mut sessions, now, state.idle_timeout);
+        expired
+    };
+    for (caller, pending) in expired {
+        cancel_http_waiter(state, caller, pending);
+    }
 }
 
 fn evict_expired_http_clients(
@@ -1061,16 +1097,7 @@ fn evict_expired_http_clients(
     // 2026-08-28: HTTP MCP sessions previously had no cap or idle eviction,
     // so reconnecting clients could retain transport state without bound.
     sessions.retain(|_, client| {
-        let active =
-            !client.pending.is_empty() || now.duration_since(client.last_active) < idle_timeout;
-        if !active {
-            for pending in client.pending.values() {
-                if let Some(waiter) = &pending.waiter {
-                    waiter.abort();
-                }
-            }
-        }
-        active
+        !client.pending.is_empty() || now.duration_since(client.last_active) < idle_timeout
     });
 }
 
@@ -1088,9 +1115,7 @@ async fn http_delete(State(state): State<HttpState>, headers: HeaderMap) -> Resp
         return StatusCode::NOT_FOUND.into_response();
     };
     for pending in client.pending.into_values() {
-        if let Some(waiter) = pending.waiter {
-            waiter.abort();
-        }
+        cancel_http_waiter(&state, client.caller.clone(), pending);
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1241,8 +1266,8 @@ fn handle_notification(
 }
 
 fn cancel_http_waiter(state: &HttpState, caller: Caller, pending: HttpPending) {
-    if let Some(waiter) = pending.waiter {
-        waiter.abort();
+    if let Some(waiter) = pending.cancel_waiter {
+        let _ = waiter.send(());
     }
     apply_cancel_mode(
         state.gateway.clone(),
@@ -1939,6 +1964,18 @@ mod tests {
     use gdb_ai_core::config::{ArtifactConfig, PersistenceConfig};
     use tempfile::tempdir;
 
+    fn detached_http_pending(waiter: oneshot::Sender<()>, deadline: Instant) -> HttpPending {
+        HttpPending {
+            cancel_waiter: Some(waiter),
+            cancellation: RequestCancellation {
+                mode: CancelMode::DetachWaiter,
+                session_id: None,
+                lease_id: None,
+            },
+            deadline,
+        }
+    }
+
     #[test]
     fn initialize_teaches_agents_the_stateful_workflow() {
         let mut phase = Phase::New;
@@ -2386,6 +2423,165 @@ mod tests {
         .await;
         assert_eq!(replaced.status(), StatusCode::OK);
         assert_eq!(state.sessions.read().await.len(), 1);
+        gateway.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn http_completion_cleans_pending_after_disconnect_and_panic() {
+        async fn panic_operation() -> Result<Value, RpcFault> {
+            panic!("operation panic")
+        }
+
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let caller = Caller::local("http-cleanup-test");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (cancel_waiter, _cancelled) = oneshot::channel();
+        sessions.write().await.insert(
+            "mcp_test".into(),
+            HttpClient {
+                phase: Phase::Ready,
+                caller: caller.clone(),
+                pending: HashMap::from([(
+                    "1".into(),
+                    detached_http_pending(cancel_waiter, deadline),
+                )]),
+                last_active: Instant::now(),
+            },
+        );
+
+        let (release, released) = oneshot::channel();
+        let operation = tokio::spawn(async move {
+            released.await.unwrap();
+            Ok(json!({"ok": true}))
+        });
+        let (response, disconnected) = oneshot::channel();
+        drop(disconnected);
+        let completion = tokio::spawn(complete_http_operation(
+            sessions.clone(),
+            "mcp_test".into(),
+            "1".into(),
+            json!(1),
+            deadline,
+            operation,
+            response,
+        ));
+        release.send(()).unwrap();
+        completion.await.unwrap();
+        assert!(sessions.read().await["mcp_test"].pending.is_empty());
+
+        let (cancel_waiter, _cancelled) = oneshot::channel();
+        sessions
+            .write()
+            .await
+            .get_mut("mcp_test")
+            .unwrap()
+            .pending
+            .insert("2".into(), detached_http_pending(cancel_waiter, deadline));
+        let (response, received) = oneshot::channel();
+        complete_http_operation(
+            sessions.clone(),
+            "mcp_test".into(),
+            "2".into(),
+            json!(2),
+            deadline,
+            tokio::spawn(panic_operation()),
+            response,
+        )
+        .await;
+        assert_eq!(received.await.unwrap()["error"]["code"], -32603);
+        assert!(sessions.read().await["mcp_test"].pending.is_empty());
+
+        let deadline = Instant::now() - Duration::from_millis(1);
+        let (cancel_waiter, _cancelled) = oneshot::channel();
+        sessions
+            .write()
+            .await
+            .get_mut("mcp_test")
+            .unwrap()
+            .pending
+            .insert("3".into(), detached_http_pending(cancel_waiter, deadline));
+        let operation = tokio::spawn(async {
+            std::future::pending::<()>().await;
+            Ok(json!({"unreachable": true}))
+        });
+        let abort = operation.abort_handle();
+        let (response, received) = oneshot::channel();
+        complete_http_operation(
+            sessions.clone(),
+            "mcp_test".into(),
+            "3".into(),
+            json!(3),
+            deadline,
+            operation,
+            response,
+        )
+        .await;
+        assert_eq!(received.await.unwrap()["error"]["code"], -32001);
+        assert!(sessions.read().await["mcp_test"].pending.is_empty());
+        abort.abort();
+    }
+
+    #[tokio::test]
+    async fn http_deadlines_and_delete_release_pending_waiters() {
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let gateway = Arc::new(Gateway::new(config).unwrap());
+        let state = HttpState {
+            gateway: gateway.clone(),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sequence: Arc::new(AtomicU64::new(1)),
+            raw_admin: false,
+            auth_token: None,
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(60),
+        };
+        let (expired_waiter, expired) = oneshot::channel();
+        state.sessions.write().await.insert(
+            "mcp_test".into(),
+            HttpClient {
+                phase: Phase::Ready,
+                caller: Caller::local("http-deadline-test"),
+                pending: HashMap::from([(
+                    "expired".into(),
+                    detached_http_pending(
+                        expired_waiter,
+                        Instant::now() - Duration::from_millis(1),
+                    ),
+                )]),
+                last_active: Instant::now(),
+            },
+        );
+        evict_http_sessions(&state).await;
+        expired.await.unwrap();
+        assert!(state.sessions.read().await["mcp_test"].pending.is_empty());
+
+        let (delete_waiter, deleted) = oneshot::channel();
+        state
+            .sessions
+            .write()
+            .await
+            .get_mut("mcp_test")
+            .unwrap()
+            .pending
+            .insert(
+                "delete".into(),
+                detached_http_pending(delete_waiter, Instant::now() + Duration::from_secs(60)),
+            );
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-session-id", HeaderValue::from_static("mcp_test"));
+        let response = http_delete(State(state.clone()), headers).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        deleted.await.unwrap();
+        assert!(state.sessions.read().await.is_empty());
         gateway.shutdown().await;
     }
 
