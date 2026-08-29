@@ -14,6 +14,7 @@ use std::{
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use ulid::Ulid;
 
 use crate::{Error, ErrorCode, Result};
 
@@ -65,9 +66,23 @@ impl From<&std::fs::Metadata> for ArtifactFingerprint {
 impl ArtifactStore {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        std::fs::create_dir_all(root.join("sha256"))?;
+        let digest_root = root.join("sha256");
+        std::fs::create_dir_all(&digest_root)?;
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(root.join("sha256"), std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&digest_root, std::fs::Permissions::from_mode(0o700))?;
+        // 2026-08-29: A crash while writing directly to the digest path left
+        // partial content permanently visible. Atomic publication now leaves
+        // only private temporary files, which a single store owner can reap.
+        for entry in std::fs::read_dir(&digest_root)? {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".gdb-ai-artifact-"))
+            {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
         Ok(Self {
             root: std::fs::canonicalize(root)?,
             verified: Arc::new(Mutex::new(HashMap::new())),
@@ -79,31 +94,45 @@ impl ArtifactStore {
     pub fn put(&self, bytes: &[u8]) -> Result<String> {
         let uri = Self::uri(bytes);
         let digest = uri.strip_prefix("gdbai://artifact/sha256:").unwrap();
-        let path = self.root.join("sha256").join(digest);
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                file.write_all(bytes)?;
-                file.sync_all()?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                // 2026-08-28: Treating any existing digest path as valid let a
-                // symlink or pre-created corrupt file escape content addressing.
-                let existing = read_artifact_file(&path, bytes.len())?;
-                if existing != bytes {
-                    return Err(Error::new(
-                        ErrorCode::Internal,
-                        "artifact digest path contains unexpected data",
-                    ));
+        let directory = self.root.join("sha256");
+        let path = directory.join(digest);
+        let temporary = directory.join(format!(".gdb-ai-artifact-{}", Ulid::new()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+
+            match std::fs::hard_link(&temporary, &path) {
+                Ok(()) => {
+                    OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                        .open(&directory)?
+                        .sync_all()?;
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // 2026-08-28: Treating any existing digest path as valid let a
+                    // symlink or pre-created corrupt file escape content addressing.
+                    let existing = read_artifact_file(&path, bytes.len())?;
+                    if existing != bytes {
+                        return Err(Error::new(
+                            ErrorCode::Internal,
+                            "artifact digest path contains unexpected data",
+                        ));
+                    }
+                }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
-        }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(temporary);
+        result?;
         Ok(uri)
     }
 
@@ -298,7 +327,11 @@ impl ArtifactStore {
 
 fn artifact_digest(uri: &str) -> Result<&str> {
     uri.strip_prefix("gdbai://artifact/sha256:")
-        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .filter(|digest| {
+            digest.len() == 64
+                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && !digest.bytes().any(|byte| byte.is_ascii_uppercase())
+        })
         .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "invalid artifact URI"))
 }
 
@@ -375,5 +408,46 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn concurrent_writers_publish_one_complete_artifact() {
+        let directory = tempdir().unwrap();
+        let store = ArtifactStore::new(directory.path()).unwrap();
+        let bytes = vec![0x5a; 128 * 1024];
+        let writers = (0..100)
+            .map(|_| {
+                let store = store.clone();
+                let bytes = bytes.clone();
+                std::thread::spawn(move || store.put(&bytes).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let uris = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert!(uris.iter().all(|uri| uri == &uris[0]));
+        assert_eq!(store.get(&uris[0], bytes.len()).unwrap(), bytes);
+        assert_eq!(store.inventory().unwrap().files.len(), 1);
+    }
+
+    #[test]
+    fn startup_removes_interrupted_temporary_publications() {
+        let directory = tempdir().unwrap();
+        let store = ArtifactStore::new(directory.path()).unwrap();
+        let temporary = store.root.join("sha256/.gdb-ai-artifact-interrupted");
+        std::fs::write(&temporary, b"partial").unwrap();
+
+        ArtifactStore::new(directory.path()).unwrap();
+
+        assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn artifact_uris_are_canonical_lowercase() {
+        let uri = ArtifactStore::uri(b"canonical");
+        assert!(artifact_digest(&uri).is_ok());
+        assert!(artifact_digest(&uri.to_ascii_uppercase()).is_err());
     }
 }

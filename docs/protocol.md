@@ -45,6 +45,8 @@ evidence never exceeds the response envelope. MCP `resources/read` returns a
 JSON manifest for the base artifact URI. Clients read complete bounded pages
 through `?offset=<n>&length=<m>` range URIs and verify the reconstructed
 SHA-256; a partial page is never labeled as the complete digest resource.
+Digest paths become visible only after complete content is synchronized and
+atomically published, so concurrent writers cannot expose a partial artifact.
 
 Inferior PTY bytes currently share one session-scoped ring and are exposed as
 `gdbai://session/<session_id>/output/pty`. GDB/AI does not claim per-inferior
