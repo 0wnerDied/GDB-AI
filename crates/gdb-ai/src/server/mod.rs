@@ -9,9 +9,6 @@ pub(super) use stream::{serve_stdio, serve_unix};
 
 use resources::{list_resources, read_resource, resource_templates};
 
-#[cfg(test)]
-use stream::serve_stream;
-
 pub(super) const MCP_VERSION: &str = "2025-11-25";
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 128;
