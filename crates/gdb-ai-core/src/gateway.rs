@@ -10,7 +10,7 @@ use crate::{
     Error, ErrorCode, Result,
     artifact::ArtifactStore,
     config::Config,
-    domain::WriteLease,
+    domain::{Address, SessionState, TargetOrigin, WriteLease},
     metrics::Metrics,
     persistence::Store,
     policy::{Effect, Profile, effect_for_method},
@@ -230,13 +230,6 @@ impl Gateway {
         self.check_rate(&caller.identity).await?;
 
         let mut effect = effect_for_method(request.method);
-        if matches!(
-            request.method.as_str(),
-            "memory.read" | "memory.search" | "memory.compare"
-        ) && request.parameters.get("volatile").and_then(Value::as_bool) == Some(true)
-        {
-            effect = Effect::VolatileTargetRead;
-        }
         let entry = self.entry_for_request(request).await;
         if let Some(session_id) = request
             .session_id
@@ -272,6 +265,47 @@ impl Gateway {
                     ErrorCode::PolicyDenied,
                     "session belongs to another principal",
                 ));
+            }
+        }
+        if let Some(entry) = &entry
+            && matches!(
+                request.method,
+                crate::protocol::CanonicalMethod::MemoryRead
+                    | crate::protocol::CanonicalMethod::MemorySearch
+                    | crate::protocol::CanonicalMethod::MemoryCompare
+            )
+        {
+            // 2026-08-29: The caller-controlled `volatile` flag previously
+            // decided whether a read might mutate a remote device. Classify
+            // the target range here and use the flag only as acknowledgement.
+            let range_effect = classify_memory_range(&entry.handle.state(), request)?;
+            if range_effect != MemoryRangeEffect::Ordinary {
+                effect = Effect::VolatileTargetRead;
+                let acknowledged = request
+                    .parameters
+                    .get("acknowledge_target_effects")
+                    .or_else(|| request.parameters.get("volatile"))
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                if !acknowledged {
+                    self.store.audit(
+                        &caller.identity,
+                        Some(entry.handle.id()),
+                        &request.method,
+                        effect,
+                        false,
+                        Some(entry.handle.state().revision),
+                        &serde_json::to_value(request)?,
+                        "denied",
+                    )?;
+                    return Err(Error::new(
+                        ErrorCode::PolicyDenied,
+                        format!(
+                            "{} memory range requires acknowledge_target_effects=true",
+                            range_effect.as_str()
+                        ),
+                    ));
+                }
             }
         }
         let profile = entry
@@ -760,6 +794,83 @@ fn requires_stable_target(method: &str) -> bool {
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryRangeEffect {
+    Ordinary,
+    Volatile,
+    Unknown,
+}
+
+impl MemoryRangeEffect {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ordinary => "ordinary",
+            Self::Volatile => "volatile",
+            Self::Unknown => "unknown-effect",
+        }
+    }
+}
+
+fn classify_memory_range(state: &SessionState, request: &ApiRequest) -> Result<MemoryRangeEffect> {
+    let address_field = if request.method == crate::protocol::CanonicalMethod::MemorySearch {
+        "start"
+    } else {
+        "address"
+    };
+    let address =
+        Address::parse(request.parameters[address_field].as_str().ok_or_else(|| {
+            Error::new(ErrorCode::InvalidArgument, "memory address is required")
+        })?)?;
+    let start = u64::from_str_radix(&address.as_str()[2..], 16)
+        .map_err(|_| Error::new(ErrorCode::InvalidArgument, "invalid memory address"))?;
+    let length = request.parameters["length"]
+        .as_u64()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "memory length is required"))?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "memory range overflows"))?;
+
+    match state.target_origin {
+        TargetOrigin::Core => Ok(MemoryRangeEffect::Ordinary),
+        TargetOrigin::Remote | TargetOrigin::Unknown => Ok(MemoryRangeEffect::Unknown),
+        TargetOrigin::Local | TargetOrigin::Attach => {
+            let Some(pid) = state.inferiors.values().find_map(|inferior| inferior.pid) else {
+                return Ok(MemoryRangeEffect::Unknown);
+            };
+            let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {
+                return Ok(MemoryRangeEffect::Unknown);
+            };
+            Ok(classify_linux_maps(&maps, start, end))
+        }
+    }
+}
+
+fn classify_linux_maps(maps: &str, start: u64, end: u64) -> MemoryRangeEffect {
+    for line in maps.lines() {
+        let mut fields = line.split_whitespace();
+        let Some((map_start, map_end)) = fields.next().and_then(|range| range.split_once('-'))
+        else {
+            continue;
+        };
+        let (Ok(map_start), Ok(map_end)) = (
+            u64::from_str_radix(map_start, 16),
+            u64::from_str_radix(map_end, 16),
+        ) else {
+            continue;
+        };
+        if start < map_start || end > map_end {
+            continue;
+        }
+        let path = fields.nth(4).unwrap_or_default();
+        return if path.starts_with("/dev/") {
+            MemoryRangeEffect::Volatile
+        } else {
+            MemoryRangeEffect::Ordinary
+        };
+    }
+    MemoryRangeEffect::Unknown
+}
+
 fn idempotency_key(request: &ApiRequest, caller: &Caller) -> String {
     format!(
         "{}:{}:{}:{}",
@@ -1129,6 +1240,47 @@ mod tests {
                     "stop_id": "stop_test"
                 })))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn classifies_linux_memory_ranges_without_client_input() {
+        let maps = concat!(
+            "00400000-00410000 r-xp 00000000 08:01 1 /workspace/target\n",
+            "70000000-70001000 rw-s 00000000 00:05 2 /dev/uio0\n",
+        );
+        assert_eq!(
+            classify_linux_maps(maps, 0x0040_0100, 0x0040_0200),
+            MemoryRangeEffect::Ordinary
+        );
+        assert_eq!(
+            classify_linux_maps(maps, 0x7000_0000, 0x7000_0004),
+            MemoryRangeEffect::Volatile
+        );
+        assert_eq!(
+            classify_linux_maps(maps, 0x5000_0000, 0x5000_0004),
+            MemoryRangeEffect::Unknown
+        );
+
+        let mut state = SessionState::creating(crate::domain::SessionId("sess_effect".into()));
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "effect".into(),
+            session_id: Some("sess_effect".into()),
+            method: crate::protocol::CanonicalMethod::MemoryRead,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({"address": "0x400000", "length": 4}),
+        };
+        state.target_origin = TargetOrigin::Remote;
+        assert_eq!(
+            classify_memory_range(&state, &request).unwrap(),
+            MemoryRangeEffect::Unknown
+        );
+        state.target_origin = TargetOrigin::Core;
+        assert_eq!(
+            classify_memory_range(&state, &request).unwrap(),
+            MemoryRangeEffect::Ordinary
         );
     }
 

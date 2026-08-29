@@ -710,6 +710,7 @@ impl CanonicalMethod {
                 required("address", String),
                 required("length", Unsigned),
                 optional("allow_partial", Boolean),
+                optional("acknowledge_target_effects", Boolean),
                 optional("volatile", Boolean),
             ]),
             MemoryWrite => MethodContract::contextual(vec![
@@ -724,12 +725,14 @@ impl CanonicalMethod {
                 required("length", Unsigned),
                 required("pattern", PATTERN_KIND),
                 optional("max_results", Unsigned),
+                optional("acknowledge_target_effects", Boolean),
                 optional("volatile", Boolean),
             ]),
             MemoryCompare => MethodContract::contextual(vec![
                 required("address", String),
                 required("length", Unsigned),
                 required("expected", EXPECTED_KIND),
+                optional("acknowledge_target_effects", Boolean),
                 optional("volatile", Boolean),
             ]),
             RegisterRead => MethodContract::contextual(vec![optional("roles", StringArray)]),

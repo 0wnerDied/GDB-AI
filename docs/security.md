@@ -13,6 +13,12 @@ operator-enabled transport. Raw console uses an explicit host-safe verb
 allowlist, and raw MI cannot bypass workspace, attach, remote endpoint,
 inferior TTY, startup-setting, or process-lifecycle policy.
 
+Memory reads are classified by the server. Core and proven ordinary local
+mappings remain read effects; remote, unknown, and local device mappings
+require `acknowledge_target_effects=true` and the `lab_mutation` profile.
+The legacy `volatile=true` field is accepted only as the same acknowledgement,
+not as the source of the classification.
+
 HTTP is loopback-only without a token. Unix sockets are mode `0600`. Memory,
 register, input, raw, and policy mutations are audited with sensitive payloads
 redacted. Never place secrets in configuration committed to this repository.

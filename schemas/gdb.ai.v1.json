@@ -2092,6 +2092,9 @@
               "accept_latest_revision": {
                 "type": "boolean"
               },
+              "acknowledge_target_effects": {
+                "type": "boolean"
+              },
               "address": {
                 "type": "string"
               },
@@ -2258,6 +2261,9 @@
               "accept_latest_revision": {
                 "type": "boolean"
               },
+              "acknowledge_target_effects": {
+                "type": "boolean"
+              },
               "frame_id": {
                 "type": "string"
               },
@@ -2363,6 +2369,9 @@
                 "type": "boolean"
               },
               "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "acknowledge_target_effects": {
                 "type": "boolean"
               },
               "address": {
