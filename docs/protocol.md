@@ -40,6 +40,10 @@ Successful responses retain the method-specific `result` and also promote
 canonical response envelope. Clients can therefore handle pagination and
 bounded-output metadata without knowing each result's internal shape.
 
+Canonical selector and binary-input shapes are deterministic: breakpoint
+locations, expected memory, search patterns, memory writes, and PTY writes
+accept exactly one supported representation. Source line numbers start at 1.
+
 `events.wait` reports `EVENT_GAP` with the requested cursor, dropped event
 count, current resumption cursor, and a status resource for resynchronization.
 `STREAM_CLOSED` instead means the session event source has terminated.

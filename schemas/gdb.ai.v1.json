@@ -953,6 +953,47 @@
         "properties": {
           "parameters": {
             "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "location"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "function"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "address"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "expression"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "module_offset"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "catch"
+                    ]
+                  }
+                ]
+              }
+            ],
             "properties": {
               "accept_latest_revision": {
                 "type": "boolean"
@@ -1012,6 +1053,33 @@
               "location": {
                 "additionalProperties": false,
                 "minProperties": 1,
+                "oneOf": [
+                  {
+                    "required": [
+                      "function"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "address"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "expression"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "module_offset"
+                    ]
+                  }
+                ],
                 "properties": {
                   "address": {
                     "type": "string"
@@ -1042,7 +1110,7 @@
                     "additionalProperties": false,
                     "properties": {
                       "line": {
-                        "minimum": 0,
+                        "minimum": 1,
                         "type": "integer"
                       },
                       "path": {
@@ -1082,7 +1150,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "line": {
-                    "minimum": 0,
+                    "minimum": 1,
                     "type": "integer"
                   },
                   "path": {
@@ -1289,7 +1357,7 @@
                 "type": "integer"
               },
               "line": {
-                "minimum": 0,
+                "minimum": 1,
                 "type": "integer"
               },
               "offset": {
@@ -1597,7 +1665,7 @@
                       "type": "integer"
                     },
                     "line": {
-                      "minimum": 0,
+                      "minimum": 1,
                       "type": "integer"
                     },
                     "name": {
@@ -2081,6 +2149,22 @@
         "properties": {
           "parameters": {
             "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "text"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "data_base64"
+                    ]
+                  }
+                ]
+              }
+            ],
             "properties": {
               "accept_current_stop": {
                 "type": "boolean"
@@ -2096,7 +2180,8 @@
               },
               "expected": {
                 "additionalProperties": false,
-                "anyOf": [
+                "minProperties": 1,
+                "oneOf": [
                   {
                     "required": [
                       "bytes_base64"
@@ -2108,7 +2193,6 @@
                     ]
                   }
                 ],
-                "minProperties": 1,
                 "properties": {
                   "bytes_base64": {
                     "type": "string"
@@ -2197,7 +2281,8 @@
               },
               "pattern": {
                 "additionalProperties": false,
-                "anyOf": [
+                "minProperties": 1,
+                "oneOf": [
                   {
                     "required": [
                       "hex"
@@ -2214,7 +2299,6 @@
                     ]
                   }
                 ],
-                "minProperties": 1,
                 "properties": {
                   "data_base64": {
                     "type": "string"
@@ -2286,7 +2370,8 @@
               },
               "expected": {
                 "additionalProperties": false,
-                "anyOf": [
+                "minProperties": 1,
+                "oneOf": [
                   {
                     "required": [
                       "bytes_base64"
@@ -2298,7 +2383,6 @@
                     ]
                   }
                 ],
-                "minProperties": 1,
                 "properties": {
                   "bytes_base64": {
                     "type": "string"
@@ -2611,6 +2695,22 @@
         "properties": {
           "parameters": {
             "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "text"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "data_base64"
+                    ]
+                  }
+                ]
+              }
+            ],
             "properties": {
               "accept_latest_revision": {
                 "type": "boolean"
@@ -3041,6 +3141,42 @@
         "properties": {
           "parameters": {
             "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "location"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "function"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "address"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "expression"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "module_offset"
+                    ]
+                  }
+                ]
+              }
+            ],
             "properties": {
               "accept_current_stop": {
                 "type": "boolean"
@@ -3150,6 +3286,33 @@
               "location": {
                 "additionalProperties": false,
                 "minProperties": 1,
+                "oneOf": [
+                  {
+                    "required": [
+                      "function"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "address"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "expression"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "module_offset"
+                    ]
+                  }
+                ],
                 "properties": {
                   "address": {
                     "type": "string"
@@ -3180,7 +3343,7 @@
                     "additionalProperties": false,
                     "properties": {
                       "line": {
-                        "minimum": 0,
+                        "minimum": 1,
                         "type": "integer"
                       },
                       "path": {
@@ -3221,7 +3384,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "line": {
-                    "minimum": 0,
+                    "minimum": 1,
                     "type": "integer"
                   },
                   "path": {
@@ -3269,6 +3432,42 @@
         "properties": {
           "parameters": {
             "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "location"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "function"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "address"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "expression"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "module_offset"
+                    ]
+                  }
+                ]
+              }
+            ],
             "properties": {
               "accept_current_stop": {
                 "type": "boolean"
@@ -3378,6 +3577,33 @@
               "location": {
                 "additionalProperties": false,
                 "minProperties": 1,
+                "oneOf": [
+                  {
+                    "required": [
+                      "function"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "address"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "expression"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "module_offset"
+                    ]
+                  }
+                ],
                 "properties": {
                   "address": {
                     "type": "string"
@@ -3408,7 +3634,7 @@
                     "additionalProperties": false,
                     "properties": {
                       "line": {
-                        "minimum": 0,
+                        "minimum": 1,
                         "type": "integer"
                       },
                       "path": {
@@ -3449,7 +3675,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "line": {
-                    "minimum": 0,
+                    "minimum": 1,
                     "type": "integer"
                   },
                   "path": {

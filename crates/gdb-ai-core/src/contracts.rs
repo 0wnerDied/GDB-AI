@@ -117,19 +117,19 @@ const fn required(name: &'static str, kind: ParameterKind) -> ParameterField {
 struct ObjectContract {
     fields: &'static [ParameterField],
     min_properties: usize,
-    any_of: &'static [&'static str],
+    exactly_one_of: &'static [&'static str],
 }
 
 impl ObjectContract {
     const fn new(
         fields: &'static [ParameterField],
         min_properties: usize,
-        any_of: &'static [&'static str],
+        exactly_one_of: &'static [&'static str],
     ) -> Self {
         Self {
             fields,
             min_properties,
-            any_of,
+            exactly_one_of,
         }
     }
 
@@ -143,8 +143,13 @@ impl ObjectContract {
                 .iter()
                 .filter(|field| field.required)
                 .any(|field| !object.contains_key(field.name))
-            || (!self.any_of.is_empty()
-                && !self.any_of.iter().any(|field| object.contains_key(*field)))
+            || (!self.exactly_one_of.is_empty()
+                && self
+                    .exactly_one_of
+                    .iter()
+                    .filter(|field| object.contains_key(**field))
+                    .count()
+                    != 1)
         {
             return false;
         }
@@ -174,9 +179,12 @@ impl ObjectContract {
         if self.min_properties > 0 {
             schema["minProperties"] = Value::from(self.min_properties);
         }
-        if !self.any_of.is_empty() {
-            schema["anyOf"] = Value::Array(
-                self.any_of
+        if !self.exactly_one_of.is_empty() {
+            // 2026-08-29: anyOf accepted multiple selectors and let handlers
+            // silently choose one by implementation order. oneOf makes the
+            // runtime and published contract reject ambiguous evidence input.
+            schema["oneOf"] = Value::Array(
+                self.exactly_one_of
                     .iter()
                     .map(|field| json!({"required": [field]}))
                     .collect(),
@@ -211,7 +219,7 @@ const ENDPOINT_KIND: ParameterKind = ParameterKind::OneOf(ENDPOINT_KINDS);
 
 const SOURCE_FIELDS: &[ParameterField] = &[
     required("path", ParameterKind::String),
-    required("line", ParameterKind::Unsigned),
+    required("line", ParameterKind::Positive),
 ];
 const SOURCE_OBJECT: ObjectContract = ObjectContract::new(SOURCE_FIELDS, 0, &[]);
 const SOURCE_KIND: ParameterKind = ParameterKind::Shape(&SOURCE_OBJECT);
@@ -230,7 +238,17 @@ const LOCATION_FIELDS: &[ParameterField] = &[
     optional("source", SOURCE_KIND),
     optional("module_offset", MODULE_OFFSET_KIND),
 ];
-const LOCATION_OBJECT: ObjectContract = ObjectContract::new(LOCATION_FIELDS, 1, &[]);
+const LOCATION_OBJECT: ObjectContract = ObjectContract::new(
+    LOCATION_FIELDS,
+    1,
+    &[
+        "function",
+        "address",
+        "expression",
+        "source",
+        "module_offset",
+    ],
+);
 const LOCATION_KIND: ParameterKind = ParameterKind::Shape(&LOCATION_OBJECT);
 
 const AROUND_FIELDS: &[ParameterField] = &[
@@ -331,7 +349,7 @@ const INSPECTION_BATCH_ITEM_FIELDS: &[ParameterField] = &[
     optional("offset", ParameterKind::Unsigned),
     optional("roles", ParameterKind::StringArray),
     optional("path", ParameterKind::String),
-    optional("line", ParameterKind::Unsigned),
+    optional("line", ParameterKind::Positive),
     optional("before_lines", ParameterKind::Unsigned),
     optional("after_lines", ParameterKind::Unsigned),
     optional(
@@ -387,6 +405,7 @@ const CONTEXT_FIELDS: &[ParameterField] = &[
 struct MethodContract {
     fields: Vec<ParameterField>,
     context: bool,
+    exactly_one_of: Vec<Vec<&'static str>>,
 }
 
 impl MethodContract {
@@ -394,6 +413,7 @@ impl MethodContract {
         Self {
             fields,
             context: false,
+            exactly_one_of: Vec::new(),
         }
     }
 
@@ -401,7 +421,13 @@ impl MethodContract {
         Self {
             fields,
             context: true,
+            exactly_one_of: Vec::new(),
         }
+    }
+
+    fn exactly_one(mut self, fields: &[&'static str]) -> Self {
+        self.exactly_one_of.push(fields.to_vec());
+        self
     }
 
     fn fields(&self) -> impl Iterator<Item = &ParameterField> {
@@ -420,12 +446,28 @@ impl MethodContract {
                 required.push(field.name);
             }
         }
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": properties,
             "required": required,
             "additionalProperties": false
-        })
+        });
+        if !self.exactly_one_of.is_empty() {
+            schema["allOf"] = Value::Array(
+                self.exactly_one_of
+                    .iter()
+                    .map(|fields| {
+                        json!({
+                            "oneOf": fields
+                                .iter()
+                                .map(|field| json!({"required": [field]}))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        schema
     }
 
     fn validate(&self, parameters: &Value) -> Result<()> {
@@ -454,6 +496,19 @@ impl MethodContract {
                 return Err(Error::new(
                     ErrorCode::InvalidArgument,
                     format!("{} is required", field.name),
+                ));
+            }
+        }
+        for fields in &self.exactly_one_of {
+            if fields
+                .iter()
+                .filter(|field| object.contains_key(**field))
+                .count()
+                != 1
+            {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    format!("exactly one of {} is required", fields.join(", ")),
                 ));
             }
         }
@@ -585,6 +640,15 @@ impl CanonicalMethod {
                 optional("ignore_count", Unsigned),
                 optional("thread_id", String),
                 optional("inferior_id", String),
+            ])
+            .exactly_one(&[
+                "location",
+                "function",
+                "address",
+                "expression",
+                "source",
+                "module_offset",
+                "catch",
             ]),
             BreakpointUpdate => MethodContract::plain(vec![
                 optional("breakpoint_id", String),
@@ -603,7 +667,7 @@ impl CanonicalMethod {
                 optional("offset", Unsigned),
                 optional("roles", StringArray),
                 optional("path", String),
-                optional("line", Unsigned),
+                optional("line", Positive),
                 optional("before_lines", Unsigned),
                 optional("after_lines", Unsigned),
                 optional("profile", Enum(&["minimal", "brief", "standard", "deep"])),
@@ -653,7 +717,8 @@ impl CanonicalMethod {
                 optional("text", String),
                 optional("data_base64", String),
                 required("expected", EXPECTED_KIND),
-            ]),
+            ])
+            .exactly_one(&["text", "data_base64"]),
             MemorySearch => MethodContract::contextual(vec![
                 required("start", String),
                 required("length", Unsigned),
@@ -687,7 +752,8 @@ impl CanonicalMethod {
             InferiorIoWrite => MethodContract::plain(vec![
                 optional("text", String),
                 optional("data_base64", String),
-            ]),
+            ])
+            .exactly_one(&["text", "data_base64"]),
             InferiorIoResize => MethodContract::plain(vec![
                 required("rows", Unsigned),
                 required("columns", Unsigned),
@@ -733,6 +799,14 @@ impl CanonicalMethod {
                     Enum(&["on_condition", "continue_after_capture"]),
                 ),
                 optional("budget", BUDGET_KIND),
+            ])
+            .exactly_one(&[
+                "location",
+                "function",
+                "address",
+                "expression",
+                "source",
+                "module_offset",
             ]),
             KernelInspect => MethodContract::contextual(vec![
                 required(
@@ -918,5 +992,66 @@ mod tests {
             .validate_parameters(&json!({"expression": "$rax", "side_effects": "forbid"}))
             .unwrap_err();
         assert!(side_effects.message.contains("one of deny"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_selector_and_binary_shapes() {
+        for (method, parameters) in [
+            (
+                CanonicalMethod::BreakpointCreate,
+                json!({"location": {"function": "main", "address": "0x1"}}),
+            ),
+            (
+                CanonicalMethod::BreakpointCreate,
+                json!({"location": {"function": "main"}, "address": "0x1"}),
+            ),
+            (
+                CanonicalMethod::MemoryWrite,
+                json!({
+                    "address": "0x1000",
+                    "text": "A",
+                    "data_base64": "QQ==",
+                    "expected": {"sha256": "0"}
+                }),
+            ),
+            (
+                CanonicalMethod::MemoryCompare,
+                json!({
+                    "address": "0x1000",
+                    "length": 1,
+                    "expected": {"bytes_base64": "QQ==", "sha256": "0"}
+                }),
+            ),
+            (
+                CanonicalMethod::MemorySearch,
+                json!({
+                    "start": "0x1000",
+                    "length": 16,
+                    "pattern": {"hex": "41", "text": "A"}
+                }),
+            ),
+            (
+                CanonicalMethod::InferiorIoWrite,
+                json!({"text": "A", "data_base64": "QQ=="}),
+            ),
+            (
+                CanonicalMethod::BreakpointCreate,
+                json!({"source": {"path": "/tmp/a.c", "line": 0}}),
+            ),
+        ] {
+            assert!(
+                method.validate_parameters(&parameters).is_err(),
+                "accepted ambiguous {method}: {parameters}"
+            );
+        }
+
+        CanonicalMethod::MemoryWrite
+            .validate_parameters(&json!({
+                "address": "0x1000",
+                "data_base64": "QQ==",
+                "expected": {"bytes_base64": "AA=="}
+            }))
+            .unwrap();
+        assert!(CanonicalMethod::MemoryWrite.parameter_schema()["allOf"][0]["oneOf"].is_array());
     }
 }
