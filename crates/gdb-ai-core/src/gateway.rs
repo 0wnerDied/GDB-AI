@@ -35,26 +35,26 @@ impl Caller {
     }
 }
 
-pub(crate) struct SessionEntry {
-    pub handle: SessionHandle,
-    pub owner: String,
-    pub target_state: tokio::sync::RwLock<()>,
-    pub mutation: Mutex<()>,
-    pub out_of_band_mutation: Mutex<()>,
-    pub lease: Mutex<Option<WriteLease>>,
-    pub lease_generation: AtomicU64,
+struct SessionEntry {
+    handle: SessionHandle,
+    owner: String,
+    target_state: tokio::sync::RwLock<()>,
+    mutation: Mutex<()>,
+    out_of_band_mutation: Mutex<()>,
+    lease: Mutex<Option<WriteLease>>,
+    lease_generation: AtomicU64,
 }
 
 pub struct Gateway {
-    pub(crate) config: Arc<Config>,
-    pub(crate) store: Arc<Store>,
-    pub(crate) artifacts: ArtifactStore,
-    pub(crate) sessions: RwLock<BTreeMap<String, Arc<SessionEntry>>>,
-    pub(crate) metrics: Arc<Metrics>,
+    config: Arc<Config>,
+    store: Arc<Store>,
+    artifacts: ArtifactStore,
+    sessions: RwLock<BTreeMap<String, Arc<SessionEntry>>>,
+    metrics: Arc<Metrics>,
     idempotency: Mutex<BTreeMap<String, (String, ApiResponse)>>,
     idempotency_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     rates: Mutex<BTreeMap<String, RateWindow>>,
-    pub(crate) session_creation: Mutex<()>,
+    session_creation: Mutex<()>,
     _storage_lock: StorageLock,
 }
 
@@ -671,7 +671,7 @@ impl Gateway {
         Ok(())
     }
 
-    pub(crate) async fn entry(&self, session_id: &str) -> Result<Arc<SessionEntry>> {
+    async fn entry(&self, session_id: &str) -> Result<Arc<SessionEntry>> {
         self.sessions
             .read()
             .await
@@ -687,7 +687,7 @@ impl Gateway {
         }
     }
 
-    pub(crate) fn maintain_storage(&self, live_sessions: &BTreeSet<String>) -> Result<()> {
+    fn maintain_storage(&self, live_sessions: &BTreeSet<String>) -> Result<()> {
         // 2026-08-29: Per-session journal limits did not bound the number of
         // retained session directories after daemon restarts. Apply the same
         // age/count policy at startup and normal lifecycle boundaries.
@@ -779,7 +779,7 @@ impl Gateway {
         }
     }
 
-    pub(crate) fn put_artifact(
+    fn put_artifact(
         &self,
         session_id: Option<&crate::domain::SessionId>,
         bytes: &[u8],
@@ -936,7 +936,7 @@ fn idempotency_fingerprint(request: &ApiRequest) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-pub(crate) fn now_unix_ms() -> u64 {
+fn now_unix_ms() -> u64 {
     std::time::SystemTime::UNIX_EPOCH
         .elapsed()
         .unwrap_or_default()
@@ -944,7 +944,7 @@ pub(crate) fn now_unix_ms() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
-pub(crate) fn same_principal(left: &str, right: &str) -> bool {
+fn same_principal(left: &str, right: &str) -> bool {
     fn principal(identity: &str) -> &str {
         identity.split_once("/mcp:").map_or(identity, |part| part.0)
     }
