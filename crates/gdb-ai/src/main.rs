@@ -1563,10 +1563,147 @@ fn resource_templates() -> Value {
         },
         {
             "uriTemplate": "gdbai://artifact/sha256:{digest}",
-            "name": "Content-addressed artifact",
+            "name": "Content-addressed artifact manifest",
+            "mimeType": "application/vnd.gdb-ai.artifact-manifest+json"
+        },
+        {
+            "uriTemplate": "gdbai://artifact/sha256:{digest}?offset={offset}&length={length}",
+            "name": "Content-addressed artifact range",
             "mimeType": "application/octet-stream"
         }
     ]})
+}
+
+#[derive(Debug, PartialEq)]
+enum ArtifactResource {
+    Manifest {
+        uri: String,
+        digest: String,
+    },
+    Range {
+        uri: String,
+        artifact_uri: String,
+        digest: String,
+        offset: u64,
+        length: u64,
+    },
+}
+
+fn parse_artifact_resource(uri: &str) -> Result<ArtifactResource, RpcFault> {
+    let (artifact_uri, query) = match uri.split_once('?') {
+        Some(parts) => (parts.0, Some(parts.1)),
+        None => (uri, None),
+    };
+    let digest = artifact_uri
+        .strip_prefix("gdbai://artifact/sha256:")
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+        .ok_or_else(|| RpcFault::invalid("invalid artifact resource URI"))?
+        .to_owned();
+    let Some(query) = query else {
+        return Ok(ArtifactResource::Manifest {
+            uri: artifact_uri.to_owned(),
+            digest,
+        });
+    };
+    let (offset, length) = query
+        .strip_prefix("offset=")
+        .and_then(|query| query.split_once("&length="))
+        .ok_or_else(|| RpcFault::invalid("artifact range requires offset and length"))?;
+    let offset = offset
+        .parse::<u64>()
+        .ok()
+        .filter(|value| value.to_string() == offset)
+        .ok_or_else(|| RpcFault::invalid("artifact range offset is invalid"))?;
+    let length = length
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0 && value.to_string() == length)
+        .ok_or_else(|| RpcFault::invalid("artifact range length is invalid"))?;
+    Ok(ArtifactResource::Range {
+        uri: uri.to_owned(),
+        artifact_uri: artifact_uri.to_owned(),
+        digest,
+        offset,
+        length,
+    })
+}
+
+fn artifact_resource_contents(
+    resource: ArtifactResource,
+    result: Value,
+) -> Result<Value, RpcFault> {
+    let size = result
+        .get("size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| RpcFault::invalid("artifact response contained no size"))?;
+    let page_size = result
+        .get("max_page_bytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| RpcFault::invalid("artifact response contained no page limit"))?;
+    match resource {
+        ArtifactResource::Manifest { uri, digest } => {
+            let manifest = json!({
+                "uri": uri,
+                "sha256": digest,
+                "size": size,
+                "mime_type": "application/octet-stream",
+                "sensitivity": result.get("sensitivity").cloned().unwrap_or(Value::Null),
+                "page_size": page_size,
+                "range_uri_template": format!(
+                    "gdbai://artifact/sha256:{digest}?offset={{offset}}&length={{length}}"
+                )
+            });
+            let text = serde_json::to_string(&manifest)
+                .map_err(|error| RpcFault::invalid(error.to_string()))?;
+            Ok(json!({"contents": [{
+                "uri": uri,
+                "mimeType": "application/vnd.gdb-ai.artifact-manifest+json",
+                "text": text
+            }]}))
+        }
+        ArtifactResource::Range {
+            uri,
+            digest,
+            offset,
+            length,
+            ..
+        } => {
+            let end = offset
+                .checked_add(length)
+                .filter(|end| *end <= size)
+                .ok_or_else(|| RpcFault::invalid("artifact range is outside the artifact"))?;
+            if length > page_size {
+                return Err(RpcFault::invalid("artifact range exceeds the page limit"));
+            }
+            let returned_offset = result.get("offset").and_then(Value::as_u64);
+            let returned_end = result.get("next_offset").and_then(Value::as_u64);
+            if returned_offset != Some(offset) || returned_end != Some(end) {
+                return Err(RpcFault::invalid(
+                    "artifact response did not contain the exact range",
+                ));
+            }
+            let blob = result
+                .get("data_base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| RpcFault::invalid("artifact response contained no data"))?;
+            Ok(json!({"contents": [{
+                "uri": uri,
+                "mimeType": "application/octet-stream",
+                "blob": blob,
+                "_meta": {
+                    "sha256": digest,
+                    "artifactSize": size,
+                    "offset": offset,
+                    "length": length
+                }
+            }]}))
+        }
+    }
 }
 
 async fn read_resource(
@@ -1580,30 +1717,32 @@ async fn read_resource(
         .and_then(Value::as_str)
         .ok_or_else(|| RpcFault::invalid("resources/read requires uri"))?;
     if uri.starts_with("gdbai://artifact/sha256:") {
+        let resource = parse_artifact_resource(uri)?;
+        let parameters = match &resource {
+            ArtifactResource::Manifest { uri, .. } => json!({"uri": uri, "max_bytes": 1}),
+            ArtifactResource::Range {
+                artifact_uri,
+                offset,
+                length,
+                ..
+            } => json!({"uri": artifact_uri, "offset": offset, "max_bytes": length}),
+        };
         let response = gateway
             .dispatch(
-                canonical_request(
-                    sequence,
-                    None,
-                    CanonicalMethod::ArtifactGet,
-                    json!({"uri": uri}),
-                ),
+                canonical_request(sequence, None, CanonicalMethod::ArtifactGet, parameters),
                 caller,
             )
             .await;
         if let Some(error) = response.error {
             return Err(core_fault(error.code.code_name(), error.message));
         }
-        let blob = response
+        let result = response
             .result
-            .and_then(|result| result.get("data_base64").cloned())
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .ok_or_else(|| RpcFault::invalid("artifact response contained no data"))?;
-        return Ok(json!({"contents": [{
-            "uri": uri,
-            "mimeType": "application/octet-stream",
-            "blob": blob
-        }]}));
+            .ok_or_else(|| RpcFault::invalid("artifact response contained no result"))?;
+        // 2026-08-29: resources/read previously discarded artifact paging
+        // metadata and mislabeled the first page as the complete digest URI.
+        // Return a manifest or an exact URI-bound range so evidence is whole.
+        return artifact_resource_contents(resource, result);
     }
     let path = uri
         .strip_prefix("gdbai://session/")
@@ -1864,6 +2003,96 @@ mod tests {
         assert!(!tool_names(false).contains(&"gdb_raw"));
         assert!(tool_names(true).contains(&"gdb_raw"));
         assert!(!valid_request_id(&Value::String("x".repeat(129))));
+    }
+
+    #[test]
+    fn artifact_resources_are_manifests_or_exact_ranges() {
+        let digest = "a".repeat(64);
+        let uri = format!("gdbai://artifact/sha256:{digest}");
+        let result = json!({
+            "size": 8,
+            "sensitivity": "target-memory",
+            "max_page_bytes": 4,
+            "offset": 0,
+            "next_offset": 1,
+            "data_base64": "AA==",
+            "truncated": true
+        });
+        let manifest =
+            artifact_resource_contents(parse_artifact_resource(&uri).unwrap(), result.clone())
+                .unwrap();
+        assert_eq!(
+            manifest["contents"][0]["mimeType"],
+            "application/vnd.gdb-ai.artifact-manifest+json"
+        );
+        let manifest: Value =
+            serde_json::from_str(manifest["contents"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(manifest["sha256"], digest);
+        assert_eq!(manifest["size"], 8);
+        assert_eq!(manifest["page_size"], 4);
+
+        let range_uri = format!("{uri}?offset=4&length=4");
+        let range = artifact_resource_contents(
+            parse_artifact_resource(&range_uri).unwrap(),
+            json!({
+                "size": 8,
+                "sensitivity": "target-memory",
+                "max_page_bytes": 4,
+                "offset": 4,
+                "next_offset": 8,
+                "data_base64": "BAUGBw==",
+                "truncated": false
+            }),
+        )
+        .unwrap();
+        assert_eq!(range["contents"][0]["uri"], range_uri);
+        assert_eq!(range["contents"][0]["blob"], "BAUGBw==");
+        assert_eq!(range["contents"][0]["_meta"]["offset"], 4);
+        assert_eq!(range["contents"][0]["_meta"]["length"], 4);
+
+        assert!(
+            artifact_resource_contents(
+                parse_artifact_resource(&format!("{uri}?offset=4&length=4")).unwrap(),
+                result,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn artifact_resource_ranges_reject_ambiguous_or_invalid_bounds() {
+        let uri = format!("gdbai://artifact/sha256:{}", "b".repeat(64));
+        for invalid in [
+            format!("{uri}?length=1&offset=0"),
+            format!("{uri}?offset=00&length=1"),
+            format!("{uri}?offset=0&length=0"),
+            format!("{uri}?offset=0&length=1&extra=1"),
+        ] {
+            assert!(parse_artifact_resource(&invalid).is_err(), "{invalid}");
+        }
+        let response = json!({
+            "size": 8,
+            "sensitivity": "target-memory",
+            "max_page_bytes": 4,
+            "offset": 7,
+            "next_offset": 8,
+            "data_base64": "AA==",
+            "truncated": false
+        });
+        assert!(
+            artifact_resource_contents(
+                parse_artifact_resource(&format!("{uri}?offset=7&length=2")).unwrap(),
+                response.clone(),
+            )
+            .is_err()
+        );
+        assert!(
+            artifact_resource_contents(
+                parse_artifact_resource(&format!("{uri}?offset=0&length=5")).unwrap(),
+                response,
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

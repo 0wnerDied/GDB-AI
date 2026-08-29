@@ -21,7 +21,10 @@ operation while continuing to accept cancellation and I/O requests.
 Large results return `gdbai://artifact/sha256:...`. Artifact reads re-check
 session ownership; the URI itself is not authorization. `artifact.get` uses
 `offset` and `max_bytes` and reports `next_offset` plus `truncated` so binary
-evidence never exceeds the response envelope.
+evidence never exceeds the response envelope. MCP `resources/read` returns a
+JSON manifest for the base artifact URI. Clients read complete bounded pages
+through `?offset=<n>&length=<m>` range URIs and verify the reconstructed
+SHA-256; a partial page is never labeled as the complete digest resource.
 
 Successful responses retain the method-specific `result` and also promote
 `warnings`, `truncated`, `continuation`, and artifact references into the

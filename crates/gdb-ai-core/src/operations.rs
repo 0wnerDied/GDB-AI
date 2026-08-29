@@ -3504,6 +3504,7 @@ impl Gateway {
             "uri": uri,
             "size": total_bytes,
             "sensitivity": metadata.sensitivity,
+            "max_page_bytes": inline_maximum,
             "offset": offset,
             "next_offset": next_offset,
             "data_base64": BASE64.encode(bytes),
