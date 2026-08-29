@@ -145,6 +145,9 @@ npm --prefix sdk/typescript run build
 
 ## Serve MCP and JSON-RPC
 
+Connect Codex CLI, Claude Code, OpenHands, Kimi Code, DeepSeek Harness, or
+another MCP client using the [Agent connection guide](docs/mcp-clients.md).
+
 Single-client stdio:
 
 ```sh
