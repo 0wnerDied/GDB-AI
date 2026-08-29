@@ -309,9 +309,10 @@ jobs:
             "gdb-ai-$version-x86_64-unknown-linux-musl"
           gzip -n "$release/gdb-ai-$version-x86_64-unknown-linux-musl.tar"
           cargo install cargo-cyclonedx --version 0.5.9 --locked
+          # 2026-08-29: cargo-cyclonedx rejects override-filename when
+          # describe selects binary components. Normalize the output below.
           cargo cyclonedx --format json --spec-version 1.5 \
-            --describe binaries --manifest-path crates/gdb-ai/Cargo.toml \
-            --override-filename gdb-ai
+            --describe binaries --manifest-path crates/gdb-ai/Cargo.toml
           sbom=$(find crates/gdb-ai -maxdepth 1 -name 'gdb-ai*.cdx.json' \
             -print -quit)
           test -n "$sbom"
