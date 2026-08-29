@@ -1850,6 +1850,9 @@ impl SessionWorker {
             return Ok(self.inferior_output.evidence_status());
         }
         let mut status = self.inferior_output.finish_evidence();
+        // 2026-08-29: Drop metrics alone hid successfully preserved PTY
+        // evidence, so count each finalized spool exactly once.
+        self.metrics.inferior_output_spooled(status.spooled_bytes);
         if self.output_evidence_mode == OutputEvidenceMode::Artifact && status.error.is_none() {
             let result = (|| {
                 let size = usize::try_from(status.spooled_bytes).map_err(|_| {
@@ -1879,6 +1882,10 @@ impl SessionWorker {
                     },
                 )?;
                 self.metrics.artifact_written(bytes.len());
+                if let Ok(stored) = self.store.total_artifact_bytes() {
+                    self.metrics
+                        .artifact_storage(stored, self.total_artifact_limit);
+                }
                 Ok(uri)
             })();
             match result {

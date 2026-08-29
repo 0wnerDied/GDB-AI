@@ -1215,7 +1215,20 @@ async fn http_metrics(State(state): State<HttpState>, headers: HeaderMap) -> Res
     if !authorize_http(&state, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let mut response = Response::new(Body::from(state.gateway.metrics()));
+    // 2026-08-29: Pending work lived in transport state and was absent from
+    // daemon metrics, so leaked or saturated HTTP sessions were invisible.
+    let pending = state
+        .sessions
+        .read()
+        .await
+        .values()
+        .map(|client| client.pending.len())
+        .sum::<usize>();
+    let body = format!(
+        "{}gdbai_http_pending_requests {pending}\n",
+        state.gateway.metrics()
+    );
+    let mut response = Response::new(Body::from(body));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/plain; version=0.0.4"),

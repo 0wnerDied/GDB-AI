@@ -29,6 +29,7 @@ struct StorageScan {
     size_mismatches: Vec<String>,
     corrupt_artifacts: Vec<Value>,
     sqlite_quick_check: String,
+    verified_artifacts: usize,
 }
 
 impl StorageScan {
@@ -60,7 +61,16 @@ impl StorageScan {
             "unowned_artifacts": self.unowned_artifacts,
             "size_mismatches": self.size_mismatches,
             "corrupt_artifacts": self.corrupt_artifacts,
+            "verified_artifacts": self.verified_artifacts,
         })
+    }
+
+    fn database_bytes(&self) -> usize {
+        self.database.iter().map(|artifact| artifact.size).sum()
+    }
+
+    fn filesystem_bytes(&self) -> u64 {
+        self.files.iter().map(|artifact| artifact.size).sum()
     }
 }
 
@@ -70,10 +80,40 @@ pub fn run(config: Config, command: StorageCommand) -> Result<()> {
     let artifacts = ArtifactStore::new(&config.artifacts.path)?;
     match command {
         StorageCommand::Status => {
-            let mut report = scan(&store, &artifacts, false)?.json();
+            let scan = scan(&store, &artifacts, false)?;
+            let artifact_bytes = scan.database_bytes();
+            let mut report = scan.json();
             report["retained_sessions"] = json!(store.list_sessions()?.len());
             let (audit, audit_results) = store.audit_counts()?;
             report["audit_rows"] = json!({"requests": audit, "results": audit_results});
+            // 2026-08-29: Hard caps rejected writes safely but status omitted
+            // their current watermarks, leaving operators unable to act early.
+            report["watermarks"] = json!({
+                "artifact_bytes": {
+                    "used": artifact_bytes,
+                    "hard_limit": config.limits.total_artifact_bytes,
+                },
+                "retained_sessions": {
+                    "used": report["retained_sessions"],
+                    "hard_limit": config.storage.max_closed_sessions,
+                },
+                "audit_rows": {
+                    "requests": audit,
+                    "results": audit_results,
+                    "hard_limit_each": config.storage.max_audit_rows,
+                }
+            });
+            report["limits"] = json!({
+                "artifact_bytes_per_session": config.limits.session_artifact_bytes,
+                "artifact_bytes_per_owner": config.limits.owner_artifact_bytes,
+                "artifact_bytes_total": config.limits.total_artifact_bytes,
+                "journal_bytes_per_session": config.limits.journal_bytes,
+                "output_spool_bytes_per_session": config.output.max_bytes,
+                "snapshots_per_session": config.storage.max_snapshots_per_session,
+                "operations_per_session": config.storage.max_operations_per_session,
+                "closed_session_retention_ms": config.storage.closed_session_retention_ms,
+                "audit_retention_ms": config.storage.audit_retention_ms,
+            });
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         StorageCommand::Verify => {
@@ -88,6 +128,7 @@ pub fn run(config: Config, command: StorageCommand) -> Result<()> {
         }
         StorageCommand::Gc { execute } => {
             let before = scan(&store, &artifacts, false)?;
+            let bytes_before = before.filesystem_bytes();
             let session_candidates = store.retention_candidates(
                 now_unix_ms(),
                 config.storage.closed_session_retention_ms,
@@ -113,6 +154,12 @@ pub fn run(config: Config, command: StorageCommand) -> Result<()> {
             let after = execute
                 .then(|| scan(&store, &artifacts, false))
                 .transpose()?;
+            // 2026-08-29: GC reported removed object counts but not reclaimed
+            // artifact capacity, so storage pressure could not be verified.
+            let reclaimed_artifact_bytes = after
+                .as_ref()
+                .map(|scan| bytes_before.saturating_sub(scan.filesystem_bytes()))
+                .unwrap_or(0);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
@@ -121,6 +168,7 @@ pub fn run(config: Config, command: StorageCommand) -> Result<()> {
                         "sessions": removed_sessions,
                         "session_artifacts": removed_session_artifacts,
                         "orphan_artifacts": removed_orphans,
+                        "artifact_bytes": reclaimed_artifact_bytes,
                     },
                     "planned": {
                         "sessions": session_candidates,
@@ -176,6 +224,11 @@ fn scan(store: &Store, artifacts: &ArtifactStore, verify: bool) -> Result<Storag
         .map(|uri| (*uri).to_owned())
         .collect();
     let mut corrupt_artifacts = Vec::new();
+    let verified_artifacts = if verify {
+        database_uris.intersection(&file_uris).count()
+    } else {
+        0
+    };
     if verify {
         for uri in database_uris.intersection(&file_uris) {
             if let Err(error) = artifacts.verify(uri) {
@@ -193,6 +246,7 @@ fn scan(store: &Store, artifacts: &ArtifactStore, verify: bool) -> Result<Storag
         size_mismatches,
         corrupt_artifacts,
         sqlite_quick_check: store.quick_check()?,
+        verified_artifacts,
     })
 }
 
@@ -245,8 +299,12 @@ mod tests {
         let orphan = artifacts.put(b"orphan").unwrap();
         let before = scan(&store, &artifacts, false).unwrap();
         assert_eq!(before.untracked_files, std::slice::from_ref(&orphan));
+        let bytes_before = before.filesystem_bytes();
         assert_eq!(collect_garbage(&store, &artifacts, &before).unwrap(), 1);
         assert!(artifacts.verify(&owned).is_ok());
         assert!(artifacts.verify(&orphan).is_err());
+        let after = scan(&store, &artifacts, true).unwrap();
+        assert_eq!(bytes_before - after.filesystem_bytes(), 6);
+        assert_eq!(after.verified_artifacts, 1);
     }
 }

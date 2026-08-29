@@ -6,7 +6,10 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use serde::Serialize;
@@ -18,6 +21,8 @@ use crate::{Error, ErrorCode, Result};
 pub struct ArtifactStore {
     root: PathBuf,
     verified: Arc<Mutex<HashMap<String, ArtifactFingerprint>>>,
+    verification_hits: Arc<AtomicU64>,
+    verification_misses: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +71,8 @@ impl ArtifactStore {
         Ok(Self {
             root: std::fs::canonicalize(root)?,
             verified: Arc::new(Mutex::new(HashMap::new())),
+            verification_hits: Arc::new(AtomicU64::new(0)),
+            verification_misses: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -153,7 +160,12 @@ impl ArtifactStore {
             .get(digest)
             .copied()
             == Some(fingerprint);
-        if !verified {
+        // 2026-08-29: Cached range verification fixed paging cost but exposed
+        // no evidence that the cache was effective or repeatedly missing.
+        if verified {
+            self.verification_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.verification_misses.fetch_add(1, Ordering::Relaxed);
             // 2026-08-29: Rehashing the complete artifact for every range made
             // sequential paging O(n^2). Reuse verification while the file
             // identity and timestamps are unchanged.
@@ -201,6 +213,13 @@ impl ArtifactStore {
             ));
         }
         Ok((bytes, metadata.len()))
+    }
+
+    pub fn verification_counts(&self) -> (u64, u64) {
+        (
+            self.verification_hits.load(Ordering::Relaxed),
+            self.verification_misses.load(Ordering::Relaxed),
+        )
     }
 
     pub fn inventory(&self) -> Result<ArtifactInventory> {
@@ -345,6 +364,7 @@ mod tests {
             store.get_range(&uri, 64 * 1024, 16).unwrap().0,
             vec![b'a'; 16]
         );
+        assert_eq!(store.verification_counts(), (1, 1));
         assert!(store.verified.lock().unwrap().contains_key(digest));
 
         std::fs::write(store.root.join("sha256").join(digest), b"corrupt").unwrap();

@@ -701,7 +701,18 @@ impl Gateway {
         if sessions > 0 {
             self.store.checkpoint_wal()?;
         }
+        self.refresh_artifact_storage_metric();
         Ok(())
+    }
+
+    fn refresh_artifact_storage_metric(&self) {
+        // 2026-08-29: Quotas failed safely but operators could not observe the
+        // managed store approaching its hard cap. Metrics must not change the
+        // result of an otherwise successful storage operation.
+        if let Ok(stored) = self.store.total_artifact_bytes() {
+            self.metrics
+                .artifact_storage(stored, self.config.limits.total_artifact_bytes);
+        }
     }
 
     async fn entry_for_request(&self, request: &ApiRequest) -> Option<Arc<SessionEntry>> {
@@ -784,11 +795,17 @@ impl Gateway {
             },
         )?;
         self.metrics.artifact_written(bytes.len());
+        self.refresh_artifact_storage_metric();
         Ok(uri)
     }
 
     pub fn metrics(&self) -> String {
-        self.metrics.render()
+        let (verification_hits, verification_misses) = self.artifacts.verification_counts();
+        format!(
+            "{}gdbai_artifact_verification_cache_hits_total {verification_hits}\n\
+             gdbai_artifact_verification_cache_misses_total {verification_misses}\n",
+            self.metrics.render()
+        )
     }
 }
 

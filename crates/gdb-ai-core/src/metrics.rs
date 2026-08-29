@@ -21,7 +21,11 @@ pub struct Metrics {
     consistency_lost: AtomicU64,
     response_truncations: AtomicU64,
     artifact_bytes: AtomicU64,
+    artifact_stored_bytes: AtomicU64,
+    artifact_capacity_bytes: AtomicU64,
+    inferior_output_spooled_bytes: AtomicU64,
     inferior_output_dropped_bytes: AtomicU64,
+    event_gaps: AtomicU64,
 }
 
 impl Metrics {
@@ -97,9 +101,25 @@ impl Metrics {
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    pub fn artifact_storage(&self, stored: usize, capacity: usize) {
+        self.artifact_stored_bytes
+            .store(stored as u64, Ordering::Relaxed);
+        self.artifact_capacity_bytes
+            .store(capacity as u64, Ordering::Relaxed);
+    }
+
+    pub fn inferior_output_spooled(&self, bytes: u64) {
+        self.inferior_output_spooled_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
     pub fn inferior_output_dropped(&self, bytes: u64) {
         self.inferior_output_dropped_bytes
             .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn event_gap(&self) {
+        self.event_gaps.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn render(&self) -> String {
@@ -125,7 +145,11 @@ impl Metrics {
                 "gdbai_consistency_lost_total {}\n",
                 "gdbai_response_truncations_total {}\n",
                 "gdbai_artifact_bytes_total {}\n",
-                "gdbai_inferior_output_dropped_bytes_total {}\n"
+                "gdbai_artifact_stored_bytes {}\n",
+                "gdbai_artifact_capacity_bytes {}\n",
+                "gdbai_inferior_output_spooled_bytes_total {}\n",
+                "gdbai_inferior_output_dropped_bytes_total {}\n",
+                "gdbai_event_gaps_total {}\n"
             ),
             value(&self.sessions_total),
             value(&self.sessions_active),
@@ -146,7 +170,11 @@ impl Metrics {
             value(&self.consistency_lost),
             value(&self.response_truncations),
             value(&self.artifact_bytes),
-            value(&self.inferior_output_dropped_bytes)
+            value(&self.artifact_stored_bytes),
+            value(&self.artifact_capacity_bytes),
+            value(&self.inferior_output_spooled_bytes),
+            value(&self.inferior_output_dropped_bytes),
+            value(&self.event_gaps)
         )
     }
 }
@@ -159,10 +187,17 @@ mod tests {
     fn reports_snapshot_latency() {
         let metrics = Metrics::default();
         metrics.snapshot(125_000, true);
+        metrics.artifact_storage(4, 8);
+        metrics.inferior_output_spooled(3);
+        metrics.event_gap();
 
         let rendered = metrics.render();
         assert!(rendered.contains("gdbai_snapshot_total 1\n"));
         assert!(rendered.contains("gdbai_snapshot_latency_seconds 0.125\n"));
         assert!(rendered.contains("gdbai_snapshot_partial_total 1\n"));
+        assert!(rendered.contains("gdbai_artifact_stored_bytes 4\n"));
+        assert!(rendered.contains("gdbai_artifact_capacity_bytes 8\n"));
+        assert!(rendered.contains("gdbai_inferior_output_spooled_bytes_total 3\n"));
+        assert!(rendered.contains("gdbai_event_gaps_total 1\n"));
     }
 }

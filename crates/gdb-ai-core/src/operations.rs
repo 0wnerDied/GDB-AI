@@ -3557,6 +3557,11 @@ impl Gateway {
             .map_err(|_| Error::new(ErrorCode::Timeout, "event wait timed out").retryable())?
             .map_err(|error| {
                 let current = entry.handle.state();
+                // 2026-08-29: Typed EVENT_GAP errors were visible to callers
+                // but absent from operational metrics, hiding resync pressure.
+                if matches!(&error, tokio::sync::broadcast::error::RecvError::Lagged(_)) {
+                    self.metrics.event_gap();
+                }
                 event_receive_error(error, &current.session_id.0, after, current.event_seq)
             })?;
         Ok(serde_json::to_value(event)?)

@@ -46,3 +46,8 @@ Live SQLite histories are bounded at their shared writers. Audit request and
 result rows obey `storage.max_audit_rows` and `storage.audit_retention_ms`;
 snapshots and operations obey their per-session limits. `storage status`
 reports current audit row counts alongside artifact and session inventory.
+
+`storage status` also reports hard-cap watermarks, `storage verify` reports
+the number of artifacts checked, and executed GC reports reclaimed artifact
+bytes. HTTP metrics include pending requests, artifact usage and verification
+cache activity, finalized PTY spool bytes, and event gaps.
