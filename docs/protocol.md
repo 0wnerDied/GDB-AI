@@ -31,6 +31,10 @@ JSON manifest for the base artifact URI. Clients read complete bounded pages
 through `?offset=<n>&length=<m>` range URIs and verify the reconstructed
 SHA-256; a partial page is never labeled as the complete digest resource.
 
+Inferior PTY bytes currently share one session-scoped ring and are exposed as
+`gdbai://session/<session_id>/output/pty`. GDB/AI does not claim per-inferior
+output attribution until the backend can provide genuinely separate streams.
+
 Successful responses retain the method-specific `result` and also promote
 `warnings`, `truncated`, `continuation`, and artifact references into the
 canonical response envelope. Clients can therefore handle pagination and

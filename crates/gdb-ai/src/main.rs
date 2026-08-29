@@ -1689,8 +1689,8 @@ fn resource_templates() -> Value {
             "mimeType": "application/json"
         },
         {
-            "uriTemplate": "gdbai://session/{session_id}/inferior/{inferior_id}/output",
-            "name": "Paged inferior output",
+            "uriTemplate": "gdbai://session/{session_id}/output/pty",
+            "name": "Paged session PTY output",
             "mimeType": "application/json"
         },
         {
@@ -1911,7 +1911,9 @@ async fn read_resource(
             CanonicalMethod::InspectionSnapshotGet,
             json!({"snapshot_id": snapshot_id}),
         ),
-        [_, "inferior", _, "output"] => (
+        // 2026-08-29: The PTY ring is session-scoped. The old per-inferior
+        // resource URI ignored its inferior ID and promised false isolation.
+        [_, "output", "pty"] => (
             CanonicalMethod::InferiorIoRead,
             json!({"stream": "pty", "after_offset": 0, "max_bytes": 65536}),
         ),
@@ -2242,6 +2244,13 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn resource_templates_describe_session_scoped_pty_output() {
+        let templates = resource_templates().to_string();
+        assert!(templates.contains("gdbai://session/{session_id}/output/pty"));
+        assert!(!templates.contains("/inferior/{inferior_id}/output"));
     }
 
     #[tokio::test]
