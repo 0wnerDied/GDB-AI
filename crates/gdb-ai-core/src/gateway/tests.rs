@@ -6,11 +6,7 @@ use crate::config::{ArtifactConfig, PersistenceConfig};
 
 #[tokio::test]
 async fn expired_lease_keeps_owner_cleanup_reachable() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -123,11 +119,7 @@ async fn expired_lease_keeps_owner_cleanup_reachable() {
 
 #[tokio::test]
 async fn lost_session_recovery_does_not_require_a_business_lease() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -204,11 +196,7 @@ async fn lost_session_recovery_does_not_require_a_business_lease() {
 
 #[tokio::test]
 async fn concurrent_idempotent_create_runs_once() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -260,11 +248,7 @@ async fn concurrent_idempotent_create_runs_once() {
 
 #[tokio::test]
 async fn concurrent_creates_respect_the_session_limit() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -308,11 +292,7 @@ async fn concurrent_creates_respect_the_session_limit() {
 
 #[tokio::test]
 async fn isolates_active_and_persisted_sessions_by_principal() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();

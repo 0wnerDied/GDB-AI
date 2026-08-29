@@ -10,11 +10,7 @@ use crate::{
 };
 
 async fn control_test_session() -> Option<SessionHandle> {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return None;
     }
     let directory = tempdir().unwrap();
@@ -130,11 +126,7 @@ fn exit_wait_ignores_an_already_terminal_inferior() {
 
 #[tokio::test]
 async fn starts_secure_gdb_and_closes_cleanly() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -185,11 +177,7 @@ async fn starts_secure_gdb_and_closes_cleanly() {
 
 #[tokio::test]
 async fn timeout_fences_late_result() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -243,12 +231,7 @@ async fn timeout_fences_late_result() {
 
 #[tokio::test]
 async fn late_execution_error_requires_reconciliation() {
-    if ["gdb", "cc"].iter().any(|command| {
-        std::process::Command::new(command)
-            .arg("--version")
-            .output()
-            .is_err()
-    }) {
+    if !crate::test_support::require_commands(&["gdb", "cc"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -351,11 +334,7 @@ async fn state_wait_returns_when_gdb_exits() {
 
 #[tokio::test]
 async fn safe_evaluate_restores_settings_after_a_late_result() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -417,11 +396,7 @@ async fn safe_evaluate_restores_settings_after_a_late_result() {
 
 #[tokio::test]
 async fn stale_value_cleanup_does_not_consume_the_business_deadline() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -500,11 +475,7 @@ async fn stale_value_cleanup_does_not_consume_the_business_deadline() {
 
 #[tokio::test]
 async fn queue_wait_counts_toward_command_deadline() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -737,12 +708,18 @@ async fn close_preempts_blocked_command() {
 
 #[tokio::test]
 async fn loads_hash_pinned_python_extension() {
-    if std::process::Command::new("gdb")
+    let python_enabled = std::process::Command::new("gdb")
         .arg("--configuration")
         .output()
         .ok()
-        .is_none_or(|output| !String::from_utf8_lossy(&output.stdout).contains("--with-python"))
-    {
+        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).contains("--with-python"));
+    if !python_enabled {
+        // 2026-08-29: Required CI previously skipped extension loading when
+        // its GDB lacked Python, hiding a missing release prerequisite.
+        if std::env::var_os("GDB_AI_REQUIRE_INTEGRATION").is_some() {
+            panic!("required GDB Python support is unavailable");
+        }
+        eprintln!("skipped GDB Python extension test; Python support is unavailable");
         return;
     }
     let directory = tempdir().unwrap();
@@ -778,11 +755,7 @@ async fn loads_hash_pinned_python_extension() {
 
 #[tokio::test]
 async fn starts_compatible_mi3_backend() {
-    if std::process::Command::new("gdb")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();

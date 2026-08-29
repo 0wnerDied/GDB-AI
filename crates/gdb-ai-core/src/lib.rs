@@ -17,4 +17,7 @@ pub mod replay;
 pub mod ring;
 pub mod session;
 
+#[cfg(test)]
+mod test_support;
+
 pub use error::{Error, ErrorCode, Result};

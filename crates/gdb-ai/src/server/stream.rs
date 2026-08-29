@@ -382,11 +382,17 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tool_gates_and_audits_raw_session() {
-        if std::process::Command::new("gdb")
+        let gdb_available = std::process::Command::new("gdb")
             .arg("--version")
             .output()
-            .is_err()
-        {
+            .is_ok();
+        if !gdb_available {
+            // 2026-08-29: This server test bypassed the integration helper,
+            // allowing required CI to pass without exercising MCP over GDB.
+            if std::env::var_os("GDB_AI_REQUIRE_INTEGRATION").is_some() {
+                panic!("required GDB executable is unavailable");
+            }
+            eprintln!("skipped MCP GDB test; GDB is unavailable");
             return;
         }
         let directory = tempdir().unwrap();

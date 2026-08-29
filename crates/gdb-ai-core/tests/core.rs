@@ -56,6 +56,12 @@ async fn opens_and_inspects_core_without_execution() {
         .status()
         .unwrap();
     if !generated.success() || !core.is_file() {
+        // 2026-08-29: Core generation failure silently skipped a required
+        // integration path even after its debugger prerequisites were found.
+        if std::env::var_os("GDB_AI_REQUIRE_INTEGRATION").is_some() {
+            panic!("required core-file fixture generation failed");
+        }
+        eprintln!("skipped core-file test; fixture generation failed");
         return;
     }
 
