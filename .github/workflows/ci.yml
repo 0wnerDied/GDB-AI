@@ -243,7 +243,9 @@ jobs:
 
   release-bundle:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify, kernel, aarch64-system, compatibility, soak]
+    # 2026-08-29: Keep the long soak as release evidence without making
+    # otherwise-qualified binary packaging wait for it.
+    needs: [verify, kernel, aarch64-system, compatibility]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
