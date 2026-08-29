@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    domain::{FrameId, InferiorId, JournaledEvent, SessionState, StopId, ThreadId},
+    domain::{FrameId, JournaledEvent, SessionState},
     reducer::StateReducer,
 };
 
@@ -56,57 +56,6 @@ fn safe_expression_rejects_calls_and_mutations() {
             "accepted unsafe expression: {expression}"
         );
     }
-}
-
-#[test]
-fn probe_accepts_only_its_breakpoint_and_scope() {
-    let mut baseline = SessionState::creating(SessionId("sess_probe".into()));
-    baseline.stop_id = Some(StopId("stop_before".into()));
-    baseline.execution_epoch = 4;
-    let mut stopped = baseline.clone();
-    stopped.stop_id = Some(StopId("stop_after".into()));
-    stopped.execution_epoch = 5;
-    stopped.stop_reason = Some("breakpoint-hit".into());
-    stopped.stop_reason_detail = Some(StopReason::Breakpoint {
-        backend_number: Some("7.2".into()),
-        disposition: Some("keep".into()),
-    });
-    stopped.stopped_inferior_id = Some(InferiorId("inf_expected".into()));
-    stopped.stopped_thread_id = Some(ThreadId("thr_expected".into()));
-    let scope = json!({
-        "inferior_id": "inf_expected",
-        "thread_id": "thr_expected"
-    });
-
-    require_probe_hit(&scope, &baseline, &stopped, "7").unwrap();
-
-    stopped.stop_reason = Some("signal-received".into());
-    stopped.stop_reason_detail = Some(StopReason::Signal {
-        name: Some("SIGSEGV".into()),
-        meaning: Some("Segmentation fault".into()),
-    });
-    assert_eq!(
-        require_probe_hit(&scope, &baseline, &stopped, "7")
-            .unwrap_err()
-            .code,
-        ErrorCode::InvalidState
-    );
-}
-
-#[test]
-fn probe_rejects_an_unrelated_breakpoint() {
-    let mut baseline = SessionState::creating(SessionId("sess_probe".into()));
-    baseline.stop_id = Some(StopId("stop_before".into()));
-    let mut stopped = baseline.clone();
-    stopped.stop_id = Some(StopId("stop_after".into()));
-    stopped.execution_epoch = 1;
-    stopped.stop_reason = Some("breakpoint-hit".into());
-    stopped.stop_reason_detail = Some(StopReason::Breakpoint {
-        backend_number: Some("8".into()),
-        disposition: None,
-    });
-
-    assert!(require_probe_hit(&json!({}), &baseline, &stopped, "7").is_err());
 }
 
 #[test]

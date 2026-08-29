@@ -1,4 +1,158 @@
 use super::*;
+use crate::domain::StopReason;
+use serde::Deserialize;
+
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+struct ObservationBudget {
+    max_calls: usize,
+    max_frames: usize,
+    max_values: usize,
+    max_memory_bytes: usize,
+    max_instructions: usize,
+    max_context_bytes: usize,
+    wall_time_ms: u64,
+}
+
+impl Default for ObservationBudget {
+    fn default() -> Self {
+        Self {
+            max_calls: 32,
+            max_frames: 16,
+            max_values: 16,
+            max_memory_bytes: 64 * 1024,
+            max_instructions: 64,
+            max_context_bytes: 64 * 1024,
+            wall_time_ms: 10_000,
+        }
+    }
+}
+
+impl ObservationBudget {
+    fn validate(&self, config: &crate::config::Config) -> Result<()> {
+        if self.max_calls == 0
+            || self.max_calls > 256
+            || self.max_frames == 0
+            || self.max_frames > config.limits.stack_frames
+            || self.max_values == 0
+            || self.max_values > 1_000
+            || self.max_memory_bytes == 0
+            || self.max_memory_bytes > config.limits.memory_read_bytes
+            || self.max_instructions == 0
+            || self.max_instructions > 1_024
+            || self.max_context_bytes == 0
+            || self.max_context_bytes > config.limits.tool_response_bytes
+            || self.wall_time_ms == 0
+            || self.wall_time_ms > 60_000
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "observation budget is outside configured limits",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn compare_observation(actual: &str, operator: &str, expected: &str) -> Result<bool> {
+    match operator {
+        "equals" => Ok(actual == expected),
+        "not_equals" => Ok(actual != expected),
+        "contains" => Ok(actual.contains(expected)),
+        "greater_than" | "less_than" => {
+            let actual = parse_observed_integer(actual)?;
+            let expected = parse_observed_integer(expected)?;
+            Ok(if operator == "greater_than" {
+                actual > expected
+            } else {
+                actual < expected
+            })
+        }
+        _ => Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "operator must be equals, not_equals, contains, greater_than, or less_than",
+        )),
+    }
+}
+
+// 2026-08-28: Probes previously counted every new stop as their own hit,
+// turning signals, interrupts, and unrelated breakpoints into false evidence.
+fn require_probe_hit(
+    parameters: &Value,
+    baseline: &crate::domain::SessionState,
+    stopped: &crate::domain::SessionState,
+    expected_breakpoint: &str,
+) -> Result<()> {
+    let new_stop = stopped.stop_id.is_some()
+        && stopped.stop_id != baseline.stop_id
+        && stopped.execution_epoch > baseline.execution_epoch;
+    let breakpoint_matches = matches!(
+        &stopped.stop_reason_detail,
+        Some(StopReason::Breakpoint {
+            backend_number: Some(actual),
+            ..
+        }) if same_breakpoint_number(expected_breakpoint, actual)
+    );
+    let inferior_matches = parameters
+        .get("inferior_id")
+        .and_then(Value::as_str)
+        .is_none_or(|expected| {
+            stopped
+                .stopped_inferior_id
+                .as_ref()
+                .is_some_and(|actual| actual.0 == expected)
+        });
+    let thread_matches = parameters
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .is_none_or(|expected| {
+            stopped
+                .stopped_thread_id
+                .as_ref()
+                .is_some_and(|actual| actual.0 == expected)
+        });
+    if new_stop && breakpoint_matches && inferior_matches && thread_matches {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::InvalidState,
+        "target stopped somewhere other than the probe breakpoint",
+    )
+    .with_details(json!({
+        "expected_breakpoint": expected_breakpoint,
+        "actual_reason": stopped.stop_reason_detail,
+        "raw_reason": stopped.stop_reason,
+        "stop_id": stopped.stop_id,
+        "stopped_inferior_id": stopped.stopped_inferior_id,
+        "stopped_thread_id": stopped.stopped_thread_id
+    })))
+}
+
+fn same_breakpoint_number(expected: &str, actual: &str) -> bool {
+    actual == expected
+        || actual
+            .strip_prefix(expected)
+            .and_then(|suffix| suffix.strip_prefix('.'))
+            .is_some_and(|location| {
+                !location.is_empty() && location.bytes().all(|byte| byte.is_ascii_digit())
+            })
+}
+
+fn parse_observed_integer(value: &str) -> Result<i128> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix("0x") {
+        i128::from_str_radix(hex, 16)
+    } else {
+        value.parse()
+    }
+    .map_err(|_| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            format!("observation is not an integer: {value}"),
+        )
+    })
+}
 
 struct ProbeBreakpoint {
     handle: SessionHandle,
@@ -289,7 +443,7 @@ impl Gateway {
         }
     }
 
-    pub(super) async fn capture_probe_observation(
+    async fn capture_probe_observation(
         &self,
         request: &ApiRequest,
         entry: &SessionEntry,
@@ -363,5 +517,62 @@ impl Gateway {
             "reason": state.stop_reason,
             "observations": observations
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{InferiorId, SessionId, SessionState, StopId, ThreadId};
+
+    #[test]
+    fn accepts_only_the_probe_breakpoint_and_scope() {
+        let mut baseline = SessionState::creating(SessionId("sess_probe".into()));
+        baseline.stop_id = Some(StopId("stop_before".into()));
+        baseline.execution_epoch = 4;
+        let mut stopped = baseline.clone();
+        stopped.stop_id = Some(StopId("stop_after".into()));
+        stopped.execution_epoch = 5;
+        stopped.stop_reason = Some("breakpoint-hit".into());
+        stopped.stop_reason_detail = Some(StopReason::Breakpoint {
+            backend_number: Some("7.2".into()),
+            disposition: Some("keep".into()),
+        });
+        stopped.stopped_inferior_id = Some(InferiorId("inf_expected".into()));
+        stopped.stopped_thread_id = Some(ThreadId("thr_expected".into()));
+        let scope = json!({
+            "inferior_id": "inf_expected",
+            "thread_id": "thr_expected"
+        });
+
+        require_probe_hit(&scope, &baseline, &stopped, "7").unwrap();
+
+        stopped.stop_reason = Some("signal-received".into());
+        stopped.stop_reason_detail = Some(StopReason::Signal {
+            name: Some("SIGSEGV".into()),
+            meaning: Some("Segmentation fault".into()),
+        });
+        assert_eq!(
+            require_probe_hit(&scope, &baseline, &stopped, "7")
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidState
+        );
+    }
+
+    #[test]
+    fn rejects_an_unrelated_breakpoint() {
+        let mut baseline = SessionState::creating(SessionId("sess_probe".into()));
+        baseline.stop_id = Some(StopId("stop_before".into()));
+        let mut stopped = baseline.clone();
+        stopped.stop_id = Some(StopId("stop_after".into()));
+        stopped.execution_epoch = 1;
+        stopped.stop_reason = Some("breakpoint-hit".into());
+        stopped.stop_reason_detail = Some(StopReason::Breakpoint {
+            backend_number: Some("8".into()),
+            disposition: None,
+        });
+
+        assert!(require_probe_hit(&json!({}), &baseline, &stopped, "7").is_err());
     }
 }
