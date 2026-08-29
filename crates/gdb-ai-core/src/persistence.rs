@@ -397,8 +397,31 @@ impl Store {
         size: usize,
         sensitivity: &str,
     ) -> Result<()> {
+        let incoming_rank = artifact_sensitivity_rank(sensitivity).ok_or_else(|| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                format!("unknown artifact sensitivity {sensitivity}"),
+            )
+        })?;
         self.with_connection(|connection| {
             let transaction = connection.transaction().map_err(sql_error)?;
+            let existing = transaction
+                .query_row(
+                    "SELECT sensitivity FROM artifacts WHERE uri=?1",
+                    params![uri],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(sql_error)?;
+            // 2026-08-29: A later registration unconditionally replaced the
+            // sensitivity of a shared digest and could downgrade secret target
+            // evidence to a public label. Global labels only move upward.
+            let sensitivity = existing
+                .as_deref()
+                .filter(|existing| {
+                    artifact_sensitivity_rank(existing).unwrap_or(u8::MAX) >= incoming_rank
+                })
+                .unwrap_or(sensitivity);
             transaction
                 .execute(
                     "INSERT INTO artifacts
@@ -605,6 +628,19 @@ impl Store {
     }
 }
 
+fn artifact_sensitivity_rank(sensitivity: &str) -> Option<u8> {
+    Some(match sensitivity {
+        "public" => 0,
+        "source" => 1,
+        "transcript" => 2,
+        "target-io" => 3,
+        "protocol-response" | "probe-observations" | "target-value" | "tracked-memory"
+        | "target-memory" => 4,
+        "secret" => 5,
+        _ => return None,
+    })
+}
+
 fn redact(mut value: Value) -> Value {
     match &mut value {
         Value::Object(object) => {
@@ -689,10 +725,15 @@ mod tests {
         let first = SessionId("sess_first".into());
         let second = SessionId("sess_second".into());
         store
-            .register_artifact("gdbai://artifact/sha256:test", Some(&first), 7, "test")
+            .register_artifact(
+                "gdbai://artifact/sha256:test",
+                Some(&first),
+                7,
+                "target-memory",
+            )
             .unwrap();
         store
-            .register_artifact("gdbai://artifact/sha256:test", Some(&second), 7, "test")
+            .register_artifact("gdbai://artifact/sha256:test", Some(&second), 7, "public")
             .unwrap();
         assert_eq!(
             store
@@ -702,6 +743,33 @@ mod tests {
         );
         assert_eq!(store.artifact_bytes(&first).unwrap(), 7);
         assert_eq!(store.artifact_bytes(&second).unwrap(), 7);
+        assert_eq!(
+            store
+                .artifact("gdbai://artifact/sha256:test")
+                .unwrap()
+                .unwrap()
+                .sensitivity,
+            "target-memory"
+        );
+        store
+            .register_artifact("gdbai://artifact/sha256:upgrade", None, 1, "public")
+            .unwrap();
+        store
+            .register_artifact("gdbai://artifact/sha256:upgrade", None, 1, "secret")
+            .unwrap();
+        assert_eq!(
+            store
+                .artifact("gdbai://artifact/sha256:upgrade")
+                .unwrap()
+                .unwrap()
+                .sensitivity,
+            "secret"
+        );
+        assert!(
+            store
+                .register_artifact("gdbai://artifact/sha256:other", None, 1, "unknown")
+                .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

@@ -11,6 +11,10 @@ Journal durability is explicit. `performance` batches buffered flushes;
 `durable` additionally calls `sync_data` at API, state, snapshot, periodic
 flush, and close boundaries. Both modes preserve journal-before-reducer order.
 
+Artifact sensitivity is global and monotonic for each content digest. A later
+owner can raise a label but cannot downgrade evidence registered by an earlier
+owner.
+
 The production boundary is `Agent -> MCP/JSON-RPC -> Gateway -> SessionWorker
 -> DebugBackend -> GDB`. The current backend is GDB/MI; its command strings and
 record classes do not appear in the canonical API.
