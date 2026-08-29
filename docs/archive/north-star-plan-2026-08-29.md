@@ -2,18 +2,19 @@
 
 Archived: 2026-08-29
 
-This immutable snapshot preserves the completed North-star architecture,
-implementation record, qualification evidence, and the release audit that
-opened the current closure gates. Active work is tracked in
-[PLAN.md](../../PLAN.md).
+This historical snapshot preserves the completed North-star architecture,
+implementation record, qualification evidence, and its release audit.
+Editorial correction on 2026-08-29 removed an unapproved numbered gate label;
+implementation evidence is unchanged. Current status and deferred work are
+tracked in [PLAN.md](../../PLAN.md).
 
 ## Archived specification
 
-Status: North-star functional baseline qualified; production-stable v1
-release gates remain open
+Status: historical North-star functional baseline; G1-G5 completion records
+are linked from the active plan
 
 This document records the complete project requested for `GDB/AI`. It is the
-normative implementation and release checklist. Host-dependent functions are
+historical implementation and release checklist. Host-dependent functions are
 reported as supported only when runtime probes and tests agree; unavailable
 kernel, architecture, sandbox, Python, and remote facilities remain explicit
 capability results rather than simulated success.
@@ -2064,17 +2065,17 @@ combined with protocol or concurrency fixes.
 The gates are dependency ordered. Passing a later test does not waive an
 earlier invariant.
 
-### G0: Auditable release identity
+### Distribution provenance note
 
-Create a signed release tag, deterministic source archive, binary checksums,
-SBOM, toolchain inventory, and CI attestation. Exclude interpreter caches,
-local SDK build output, fuzz corpora generated at runtime, and temporary test
-files. `gdb-ai doctor` reports build commit, dirty state, software version,
-Rust version, GDB/MI version, and MCP version.
+This historical release-operator checklist was not approved as a numbered
+project gate. It does not extend the archived G1-G7 plan.
 
-Exit condition: a downloader can prove that source, tested commit, and binary
-belong to one provenance chain. This gate is a release operation, not a reason
-to change the `gdb.ai/v1` protocol namespace.
+The proposed release-owner checklist covered a signed tag, deterministic
+source archive, binary checksums, SBOM, toolchain inventory, and CI
+attestation. It would exclude interpreter caches, local SDK build output,
+runtime fuzz corpora, and temporary test files. Its intended result was a
+provable source, tested-commit, and binary provenance chain. It was not a
+project gate or a reason to change the `gdb.ai/v1` protocol namespace.
 
 ### G1: MCP and HTTP release blockers
 
@@ -2131,6 +2132,9 @@ GC never deletes content with a live owner, and a hard-cap condition fails
 new work safely without damaging existing evidence.
 
 ### G5: Behavior-preserving module split
+
+This gate was subsequently completed; the implementation and verification
+record is in the [G5 archive](behavior-preserving-refactor-g5-2026-08-29.md).
 
 After G1-G4 and golden replay/schema/tool-catalog tests, split one domain per
 commit:
@@ -2202,7 +2206,7 @@ kernel              kernel inspection and monitor
 raw-admin           raw MI and controlled CLI
 ```
 
-Before G1-G4 and G0 release provenance pass, acceptable claims are limited to:
+Before G1-G4 pass, acceptable claims are limited to:
 
 - GDB/AI provides a stateful Agent Interface above GDB and GDB/MI;
 - the qualified control core separates MI from inferior I/O;

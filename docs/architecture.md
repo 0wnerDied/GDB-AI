@@ -27,7 +27,7 @@ crates/
 │       │   └── tests.rs       Gateway boundary regressions
 │       ├── session.rs         public SessionHandle and session data types
 │       └── session/
-│           ├── actor.rs       actor loop, scheduler, control lane, MI input
+│           ├── actor.rs       SessionWorker loop, control lane, MI input
 │           └── tests.rs       session facade and wait regressions
 └── gdb-ai/                    executable, CLI, MCP and JSON-RPC adapters
     └── src/
@@ -75,7 +75,7 @@ Agent
   -> Gateway validation, policy, lease, revision, and audit
   -> canonical operation
   -> SessionHandle
-  -> SessionActor control or normal channel
+  -> session actor (`SessionWorker`) control or normal channel
   -> GDB/MI backend
   -> GNU GDB
 ```
@@ -98,7 +98,7 @@ starve debugger state events.
 
 ## Ownership and dependency rules
 
-- Only `SessionActor` sends commands to one GDB process or mutates its
+- Only `SessionWorker` sends commands to one GDB process or mutates its
   authoritative reducer state.
 - `SessionHandle` is the public facade. Multi-command observations hold its
   command-sequence guard and verify one `stop_id` and `execution_epoch`.
@@ -115,8 +115,8 @@ starve debugger state events.
   base URIs return manifests; range URIs return exactly the bytes they name.
 - A Streamable HTTP operation owns removal of its pending entry. Disconnecting
   a response waiter does not silently cancel an accepted debugger operation.
-- GDB-specific command strings and record classes remain below the backend
-  boundary and never enter the canonical protocol.
+- GDB-specific command strings and record classes remain inside the core and
+  backend implementation and never enter the canonical protocol.
 
 ## State and evidence invariants
 
@@ -157,4 +157,4 @@ Unix transports remain the simplest local deployment boundary.
 The optional `gdb-extension/gdb_ai.py` exposes only small, trusted GDB Python
 MI helpers; it never owns session truth. Python and TypeScript SDKs are client
 projections of the canonical API. Benchmarks and test targets may use Python,
-C, C++, or Rust, but cannot bypass Gateway or SessionActor ownership.
+C, C++, or Rust, but cannot bypass Gateway or `SessionWorker` ownership.

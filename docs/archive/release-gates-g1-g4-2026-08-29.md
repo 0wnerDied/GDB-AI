@@ -11,8 +11,8 @@ stateful Agent interface above it.
 The earlier qualified functional baseline remains `4195050`, with required
 CI run `33225096633`. G1-G4 were verified on their final source tree with 88
 core unit tests, 15 server unit tests, formatting checks, and workspace
-Clippy with warnings denied. A signed release tag must repeat the full GDB,
-architecture, kernel, fuzz, chaos, and soak matrix.
+Clippy with warnings denied. This evidence is bound to the named baselines;
+later release-owner distribution work is outside this archive.
 
 ## G1: MCP and HTTP release blockers
 
@@ -210,8 +210,9 @@ Implementation: `eca9806` (`metrics: Expose storage and evidence pressure`).
 
 ## Preserved boundaries
 
-G1-G4 completion does not create release provenance. Signed tags, deterministic
-source archives, binary checksums, SBOM, and CI attestation remain G0 work.
-Behavior-preserving module decomposition remains G5 maintenance. Repeated
-paired Agent A/B/C/D evaluation remains explicitly deferred and is required
-only before comparative Agent-effect claims.
+G1-G4 completion does not create release provenance. Signed tags,
+deterministic source archives, binary checksums, SBOM, and CI attestation are
+release-owner distribution concerns, not an additional project gate.
+Behavior-preserving module decomposition was subsequently completed as G5.
+Repeated paired Agent A/B/C/D evaluation remains explicitly deferred and is
+required only before comparative Agent-effect claims.

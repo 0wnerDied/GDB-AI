@@ -12,8 +12,8 @@ close. A timeout never means the inferior exited.
 MCP cancellation defaults to `cancel_mode: "detach_waiter"`: it stops the
 client wait while the accepted debugger operation finishes in the background.
 Use `interrupt_target` or `close_session` on a tool request when cancellation
-must enter the SessionActor control lane; both require `session_id` and
-`lease_id`.
+must enter the session actor (`SessionWorker`) control lane; both require
+`session_id` and `lease_id`.
 
 Dropping a Streamable HTTP connection does not imply MCP cancellation. The
 accepted operation continues to its deadline, owns removal of its pending
