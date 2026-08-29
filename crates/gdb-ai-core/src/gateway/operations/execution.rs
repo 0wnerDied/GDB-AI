@@ -1,5 +1,80 @@
 use super::*;
 
+pub(super) fn breakpoint_location(parameters: &Value) -> Result<String> {
+    let location = parameters.get("location").unwrap_or(parameters);
+    if let Some(function) = location.get("function").and_then(Value::as_str) {
+        return Ok(function.to_owned());
+    }
+    if let Some(address) = location.get("address").and_then(Value::as_str) {
+        crate::domain::Address::parse(address)?;
+        return Ok(format!("*{address}"));
+    }
+    if let Some(expression) = location.get("expression").and_then(Value::as_str) {
+        return Ok(expression.to_owned());
+    }
+    if let Some(module) = location.get("module_offset") {
+        return Ok(format!(
+            "{}+{}",
+            string(module, "module")?,
+            string(module, "offset")?
+        ));
+    }
+    Err(Error::new(
+        ErrorCode::InvalidArgument,
+        "breakpoint location is required",
+    ))
+}
+
+pub(super) fn breakpoint_scope(
+    mut command: MiCommand,
+    parameters: &Value,
+    state: &crate::domain::SessionState,
+) -> Result<MiCommand> {
+    let thread = parameters.get("thread_id").and_then(Value::as_str);
+    let inferior = parameters.get("inferior_id").and_then(Value::as_str);
+    if (thread.is_some() || inferior.is_some()) && command.name != "-break-insert" {
+        return Err(Error::new(
+            ErrorCode::CapabilityMissing,
+            "this GDB target only supports scoped software or hardware breakpoints",
+        ));
+    }
+    if let Some(thread_id) = thread {
+        let backend_thread = state
+            .inferiors
+            .values()
+            .flat_map(|inferior| inferior.threads.values())
+            .find(|thread| thread.id.0 == thread_id)
+            .map(|thread| thread.backend_id.clone())
+            .ok_or_else(|| Error::new(ErrorCode::StaleContext, "thread handle is not current"))?;
+        command = command.bare("-p")?.bare(backend_thread)?;
+    }
+    if let Some(inferior_id) = inferior {
+        let backend_inferior = state
+            .inferiors
+            .values()
+            .find(|inferior| inferior.id.0 == inferior_id)
+            .map(|inferior| inferior.backend_id.clone())
+            .ok_or_else(|| Error::new(ErrorCode::StaleContext, "inferior handle is not current"))?;
+        command = command.bare("--thread-group")?.bare(backend_inferior)?;
+    }
+    Ok(command)
+}
+
+pub(super) fn breakpoint_number(entry: &SessionEntry, parameters: &Value) -> Result<String> {
+    if let Some(number) = parameters.get("backend_number").and_then(Value::as_str) {
+        return Ok(number.to_owned());
+    }
+    let public = string(parameters, "breakpoint_id")?;
+    entry
+        .handle
+        .state()
+        .breakpoints
+        .values()
+        .find(|breakpoint| breakpoint.id.0 == public)
+        .map(|breakpoint| breakpoint.backend_number.clone())
+        .ok_or_else(|| Error::new(ErrorCode::NotFound, "breakpoint not found"))
+}
+
 impl Gateway {
     pub(super) async fn execution_control(&self, request: &ApiRequest) -> Result<Value> {
         let action = string(&request.parameters, "action")?;
