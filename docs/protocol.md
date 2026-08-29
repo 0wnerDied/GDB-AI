@@ -23,6 +23,11 @@ session ownership; the URI itself is not authorization. `artifact.get` uses
 `offset` and `max_bytes` and reports `next_offset` plus `truncated` so binary
 evidence never exceeds the response envelope.
 
+Successful responses retain the method-specific `result` and also promote
+`warnings`, `truncated`, `continuation`, and artifact references into the
+canonical response envelope. Clients can therefore handle pagination and
+bounded-output metadata without knowing each result's internal shape.
+
 The implemented registry currently contains 61 canonical methods. The
 conditional `kernel.inspect` contract accepts `capabilities`, `version`,
 `base`, `current_task`, `init_task`, `tasks`, `modules`, `stack`, and `panic`.
