@@ -15,6 +15,7 @@ use serde_json::Value;
 use crate::{
     Error, ErrorCode, Result,
     artifact::ArtifactStore,
+    config::StorageConfig,
     domain::{OperationRecord, SessionId, SessionState, TrackingDefinition, WriteLease},
     policy::{Effect, Profile},
     protocol::ApiResponse,
@@ -22,6 +23,7 @@ use crate::{
 
 pub struct Store {
     connection: Mutex<Connection>,
+    storage: StorageConfig,
 }
 
 pub struct StorageLock {
@@ -52,6 +54,10 @@ pub struct ArtifactLimits {
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_storage(path, &StorageConfig::default())
+    }
+
+    pub fn open_with_storage(path: impl AsRef<Path>, storage: &StorageConfig) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
             // 2026-08-28: SQLite, journals, and artifacts contain target
@@ -137,7 +143,15 @@ impl Store {
                      request_hash TEXT NOT NULL,
                      response_json TEXT NOT NULL,
                      updated_unix_ms INTEGER NOT NULL
-                 );",
+                 );
+                 CREATE INDEX IF NOT EXISTS audit_created_idx
+                   ON audit(created_unix_ms, id);
+                 CREATE INDEX IF NOT EXISTS audit_results_created_idx
+                   ON audit_results(created_unix_ms, id);
+                 CREATE INDEX IF NOT EXISTS snapshots_session_created_idx
+                   ON snapshots(session_id, created_unix_ms);
+                 CREATE INDEX IF NOT EXISTS operations_session_updated_idx
+                   ON operations(session_id, updated_unix_ms);",
             )
             .map_err(sql_error)?;
         // 2026-08-28: A content digest may be produced by multiple sessions;
@@ -151,6 +165,7 @@ impl Store {
             .map_err(sql_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            storage: storage.clone(),
         })
     }
 
@@ -439,6 +454,7 @@ impl Store {
         snapshot_id: &str,
         snapshot: &Value,
     ) -> Result<()> {
+        let maximum = self.storage.max_snapshots_per_session;
         self.with_connection(|connection| {
             connection
                 .execute(
@@ -453,6 +469,18 @@ impl Store {
                         serde_json::to_string(snapshot)?,
                         unix_ms()
                     ],
+                )
+                .map_err(sql_error)?;
+            // 2026-08-29: Repeated stops retained every snapshot for a live
+            // session, so enforce the configured bound at the shared writer.
+            connection
+                .execute(
+                    "DELETE FROM snapshots WHERE rowid IN (
+                       SELECT rowid FROM snapshots WHERE session_id=?1
+                       ORDER BY created_unix_ms DESC, rowid DESC
+                       LIMIT -1 OFFSET ?2
+                     )",
+                    params![session_id.0, maximum as i64],
                 )
                 .map_err(sql_error)?;
             Ok(())
@@ -476,6 +504,7 @@ impl Store {
     }
 
     pub fn upsert_operation(&self, operation: &OperationRecord) -> Result<()> {
+        let maximum = self.storage.max_operations_per_session;
         self.with_connection(|connection| {
             connection
                 .execute(
@@ -491,6 +520,18 @@ impl Store {
                         serde_json::to_string(operation)?,
                         unix_ms()
                     ],
+                )
+                .map_err(sql_error)?;
+            // 2026-08-29: Completed operations accumulated for the lifetime
+            // of a live session, so keep only its configured recent history.
+            connection
+                .execute(
+                    "DELETE FROM operations WHERE operation_id IN (
+                       SELECT operation_id FROM operations WHERE session_id=?1
+                       ORDER BY updated_unix_ms DESC, operation_id DESC
+                       LIMIT -1 OFFSET ?2
+                     )",
+                    params![operation.session_id.0, maximum as i64],
                 )
                 .map_err(sql_error)?;
             Ok(())
@@ -879,6 +920,8 @@ impl Store {
         outcome: &str,
     ) -> Result<()> {
         let request = redact(request.clone());
+        let retention_ms = self.storage.audit_retention_ms;
+        let maximum = self.storage.max_audit_rows;
         self.with_connection(|connection| {
             connection
                 .execute(
@@ -899,6 +942,7 @@ impl Store {
                     ],
                 )
                 .map_err(sql_error)?;
+            prune_time_series(connection, "audit", retention_ms, maximum)?;
             Ok(())
         })
     }
@@ -910,6 +954,8 @@ impl Store {
         result: &Value,
     ) -> Result<()> {
         let result = redact(result.clone());
+        let retention_ms = self.storage.audit_retention_ms;
+        let maximum = self.storage.max_audit_rows;
         self.with_connection(|connection| {
             connection
                 .execute(
@@ -924,9 +970,52 @@ impl Store {
                     ],
                 )
                 .map_err(sql_error)?;
+            prune_time_series(connection, "audit_results", retention_ms, maximum)?;
             Ok(())
         })
     }
+
+    pub fn audit_counts(&self) -> Result<(usize, usize)> {
+        self.with_connection(|connection| {
+            let audit = connection
+                .query_row("SELECT COUNT(*) FROM audit", [], |row| row.get::<_, i64>(0))
+                .map_err(sql_error)?;
+            let results = connection
+                .query_row("SELECT COUNT(*) FROM audit_results", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(sql_error)?;
+            Ok((audit.max(0) as usize, results.max(0) as usize))
+        })
+    }
+}
+
+fn prune_time_series(
+    connection: &Connection,
+    table: &str,
+    retention_ms: u64,
+    maximum: usize,
+) -> Result<()> {
+    let cutoff = unix_ms().saturating_sub(retention_ms.min(i64::MAX as u64) as i64);
+    connection
+        .execute(
+            &format!("DELETE FROM {table} WHERE created_unix_ms < ?1"),
+            params![cutoff],
+        )
+        .map_err(sql_error)?;
+    // 2026-08-29: Audit and result rows grew without bound during a long-lived
+    // daemon even though every individual value was size-limited.
+    connection
+        .execute(
+            &format!(
+                "DELETE FROM {table} WHERE id IN (
+                   SELECT id FROM {table} ORDER BY id DESC LIMIT -1 OFFSET ?1
+                 )"
+            ),
+            params![maximum as i64],
+        )
+        .map_err(sql_error)?;
+    Ok(())
 }
 
 impl StorageLock {
@@ -1296,6 +1385,62 @@ mod tests {
         );
         assert!(!sessions.join(&live.0).exists());
         assert!(artifacts.verify(&uri).is_err());
+    }
+
+    #[test]
+    fn sqlite_histories_stay_within_configured_limits() {
+        let directory = tempdir().unwrap();
+        let storage = StorageConfig {
+            max_audit_rows: 2,
+            max_snapshots_per_session: 2,
+            max_operations_per_session: 2,
+            ..StorageConfig::default()
+        };
+        let store =
+            Store::open_with_storage(directory.path().join("state.sqlite"), &storage).unwrap();
+        let session = SessionId("sess_bounded".into());
+        for index in 0..3 {
+            let snapshot_id = format!("snap_{index}");
+            store
+                .upsert_snapshot(&session, &snapshot_id, &serde_json::json!({"index": index}))
+                .unwrap();
+            store
+                .upsert_operation(&OperationRecord {
+                    operation_id: crate::domain::OperationId(format!("op_{index}")),
+                    session_id: session.clone(),
+                    kind: "test".into(),
+                    status: crate::domain::OperationStatus::Completed,
+                    created_revision: 0,
+                    wait_baseline: None,
+                    expected_execution_epoch: None,
+                    accepted_event_seq: None,
+                    completed_event_seq: None,
+                    error: None,
+                })
+                .unwrap();
+            store
+                .audit(
+                    "caller",
+                    Some(&session),
+                    "session.get",
+                    Effect::Read,
+                    true,
+                    None,
+                    &serde_json::json!({"index": index}),
+                    "allowed",
+                )
+                .unwrap();
+            store
+                .audit_result(
+                    Some(&session),
+                    "session.get",
+                    &serde_json::json!({"index": index}),
+                )
+                .unwrap();
+        }
+        assert!(store.get_snapshot(&session, "snap_0").unwrap().is_none());
+        assert!(store.get_operation("op_0").unwrap().is_none());
+        assert_eq!(store.audit_counts().unwrap(), (2, 2));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

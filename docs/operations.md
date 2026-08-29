@@ -41,3 +41,8 @@ daemon process is historical, including state left by a previous crash.
 Retention runs at daemon startup and session create/close boundaries; it
 removes the exact session directory, stop-scoped rows, leases, operations, and
 artifact ownership. Shared content remains until its final owner expires.
+
+Live SQLite histories are bounded at their shared writers. Audit request and
+result rows obey `storage.max_audit_rows` and `storage.audit_retention_ms`;
+snapshots and operations obey their per-session limits. `storage status`
+reports current audit row counts alongside artifact and session inventory.

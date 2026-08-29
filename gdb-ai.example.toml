@@ -26,6 +26,10 @@ max_bytes = 8388608
 [storage]
 max_closed_sessions = 256
 closed_session_retention_ms = 604800000
+max_audit_rows = 100000
+audit_retention_ms = 2592000000
+max_snapshots_per_session = 256
+max_operations_per_session = 4096
 
 [limits]
 mi_record_bytes = 8388608

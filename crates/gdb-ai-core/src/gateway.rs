@@ -65,7 +65,10 @@ impl Gateway {
     pub fn new(config: Config) -> Result<Self> {
         config.validate()?;
         let storage_lock = StorageLock::acquire(config.persistence.sqlite.with_extension("lock"))?;
-        let store = Arc::new(Store::open(&config.persistence.sqlite)?);
+        let store = Arc::new(Store::open_with_storage(
+            &config.persistence.sqlite,
+            &config.storage,
+        )?);
         let artifacts = ArtifactStore::new(&config.artifacts.path)?;
         let metrics = Arc::new(Metrics::default());
         let gateway = Self {

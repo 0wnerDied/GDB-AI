@@ -66,12 +66,14 @@ impl StorageScan {
 
 pub fn run(config: Config, command: StorageCommand) -> Result<()> {
     let _lock = StorageLock::acquire(config.persistence.sqlite.with_extension("lock"))?;
-    let store = Store::open(&config.persistence.sqlite)?;
+    let store = Store::open_with_storage(&config.persistence.sqlite, &config.storage)?;
     let artifacts = ArtifactStore::new(&config.artifacts.path)?;
     match command {
         StorageCommand::Status => {
             let mut report = scan(&store, &artifacts, false)?.json();
             report["retained_sessions"] = json!(store.list_sessions()?.len());
+            let (audit, audit_results) = store.audit_counts()?;
+            report["audit_rows"] = json!({"requests": audit, "results": audit_results});
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         StorageCommand::Verify => {

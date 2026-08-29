@@ -100,7 +100,8 @@ impl Config {
             && self.server.wait_timeout_ms <= 300_000
             && self.server.write_lease_ms > 0
             && self.server.http_session_idle_ms >= 1_000
-            && self.storage.closed_session_retention_ms >= 1_000;
+            && self.storage.closed_session_retention_ms >= 1_000
+            && self.storage.audit_retention_ms >= 1_000;
         let limits_valid = self.server.max_sessions > 0
             && self.server.max_sessions <= 1_024
             && self.server.max_http_sessions > 0
@@ -126,6 +127,10 @@ impl Config {
             && self.limits.process_cpu_seconds > 0
             && self.limits.process_open_files >= 32
             && self.storage.max_closed_sessions > 0
+            && self.storage.max_audit_rows > 0
+            && self.storage.max_audit_rows <= i64::MAX as usize
+            && self.storage.max_snapshots_per_session > 0
+            && self.storage.max_operations_per_session > 0
             && self.output.max_bytes > 0
             && self.output.max_bytes <= self.limits.session_artifact_bytes;
         if !timeouts_valid || !limits_valid || self.security.workspace_roots.is_empty() {
@@ -162,6 +167,10 @@ impl Config {
 pub struct StorageConfig {
     pub max_closed_sessions: usize,
     pub closed_session_retention_ms: u64,
+    pub max_audit_rows: usize,
+    pub audit_retention_ms: u64,
+    pub max_snapshots_per_session: usize,
+    pub max_operations_per_session: usize,
 }
 
 impl Default for StorageConfig {
@@ -169,6 +178,10 @@ impl Default for StorageConfig {
         Self {
             max_closed_sessions: 256,
             closed_session_retention_ms: 7 * 24 * 60 * 60 * 1_000,
+            max_audit_rows: 100_000,
+            audit_retention_ms: 30 * 24 * 60 * 60 * 1_000,
+            max_snapshots_per_session: 256,
+            max_operations_per_session: 4_096,
         }
     }
 }
