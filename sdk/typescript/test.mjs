@@ -21,6 +21,9 @@ await client.disconnect();
 
 assert.equal(requests.at(-1).init.method, "DELETE");
 assert.equal(requests.at(-1).init.headers["Mcp-Session-Id"], "mcp_test");
+assert.ok(requests.slice(1).every(
+  ({ init }) => init.headers["Mcp-Protocol-Version"] === "2025-11-25",
+));
 
 const calls = [];
 const fakeClient = {

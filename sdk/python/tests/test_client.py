@@ -42,6 +42,10 @@ class ClientTest(unittest.TestCase):
 
         self.assertEqual(requests[-1].get_method(), "DELETE")
         self.assertEqual(requests[-1].get_header("Mcp-session-id"), "mcp_test")
+        for request in requests[1:]:
+            self.assertEqual(
+                request.get_header("Mcp-protocol-version"), "2025-11-25"
+            )
 
     def test_renew_accepts_the_latest_revision(self) -> None:
         calls = []

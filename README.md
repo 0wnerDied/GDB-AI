@@ -140,8 +140,9 @@ target/release/gdb-ai serve --http 127.0.0.1:8080 \
 
 HTTP endpoints are `/mcp`, `/healthz`, and `/metrics`. The same connection
 accepts MCP tools and the canonical `gdb.ai/call` JSON-RPC method. Supported
-MCP protocol versions are `2025-11-25`, `2025-06-18`, `2025-03-26`, and
-`2024-11-05`.
+Streamable HTTP uses MCP `2025-11-25`; every request after initialization must
+carry that negotiated `Mcp-Protocol-Version`. Stdio and Unix streams retain
+the tested message-level compatibility modes without claiming legacy HTTP+SSE.
 
 ## Tools
 

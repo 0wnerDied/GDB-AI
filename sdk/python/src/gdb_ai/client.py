@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.request import Request, urlopen
 
+MCP_VERSION = "2025-11-25"
+
 
 class ApiError(RuntimeError):
     def __init__(self, error: dict[str, Any]) -> None:
@@ -30,19 +32,21 @@ class Client:
         self.allow_raw = allow_raw
         self.timeout = timeout
         self._mcp_session: str | None = None
+        self._mcp_version: str | None = None
         self._next_id = 1
 
     def connect(self) -> None:
         result, headers = self._request(
             "initialize",
             {
-                "protocolVersion": "2025-11-25",
+                "protocolVersion": MCP_VERSION,
                 "clientInfo": {"name": "gdb-ai-python", "version": "0.1.0"},
             },
             include_session=False,
         )
-        if result.get("protocolVersion") is None:
-            raise RuntimeError("server returned no MCP protocol version")
+        if result.get("protocolVersion") != MCP_VERSION:
+            raise RuntimeError("server returned an unsupported MCP protocol version")
+        self._mcp_version = MCP_VERSION
         self._mcp_session = headers.get("Mcp-Session-Id")
         if not self._mcp_session:
             raise RuntimeError("server returned no MCP session ID")
@@ -54,6 +58,7 @@ class Client:
         if not self._mcp_session:
             return
         headers = {"Mcp-Session-Id": self._mcp_session}
+        headers["Mcp-Protocol-Version"] = self._mcp_version or MCP_VERSION
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         with urlopen(
@@ -61,6 +66,7 @@ class Client:
             timeout=self.timeout,
         ):
             self._mcp_session = None
+            self._mcp_version = None
 
     def call(
         self,
@@ -106,6 +112,9 @@ class Client:
             if not self._mcp_session:
                 raise RuntimeError("connect() must be called first")
             headers["Mcp-Session-Id"] = self._mcp_session
+            # 2026-08-29: HTTP clients previously omitted the negotiated
+            # version, so the server could not bind later requests to it.
+            headers["Mcp-Protocol-Version"] = self._mcp_version or MCP_VERSION
         with urlopen(
             Request(self.endpoint, data=payload, headers=headers, method="POST"),
             timeout=self.timeout,
@@ -122,6 +131,7 @@ class Client:
             headers["Authorization"] = f"Bearer {self.token}"
         if self._mcp_session:
             headers["Mcp-Session-Id"] = self._mcp_session
+            headers["Mcp-Protocol-Version"] = self._mcp_version or MCP_VERSION
         with urlopen(
             Request(self.endpoint, data=payload, headers=headers, method="POST"),
             timeout=self.timeout,

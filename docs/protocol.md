@@ -18,6 +18,11 @@ Stdio and Unix stream clients may attach `_meta.progressToken` to a request.
 GDB/AI emits ordered `notifications/progress` records before and after the
 operation while continuing to accept cancellation and I/O requests.
 
+Streamable HTTP supports MCP `2025-11-25`. The negotiated version is stored in
+the transport session and is required in `Mcp-Protocol-Version` on every later
+POST or DELETE. Older message versions remain limited to tested stdio/Unix
+compatibility; GDB/AI does not advertise the legacy HTTP+SSE transport.
+
 Large results return `gdbai://artifact/sha256:...`. Artifact reads re-check
 session ownership; the URI itself is not authorization. `artifact.get` uses
 `offset` and `max_bytes` and reports `next_offset` plus `truncated` so binary

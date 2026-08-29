@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+const MCP_VERSION = "2025-11-25";
+
 export interface ApiResponse<T = unknown> {
   api_version: "gdb.ai/v1";
   request_id: string;
@@ -24,6 +26,7 @@ export class ApiError extends Error {
 export class Client {
   private nextId = 1;
   private mcpSession?: string;
+  private mcpVersion?: string;
 
   constructor(
     private readonly endpoint: string,
@@ -33,12 +36,13 @@ export class Client {
 
   async connect(): Promise<void> {
     const { result, response } = await this.rpc("initialize", {
-      protocolVersion: "2025-11-25",
+      protocolVersion: MCP_VERSION,
       clientInfo: { name: "gdb-ai-typescript", version: "0.1.0" },
     }, false);
-    if (!(result as { protocolVersion?: string }).protocolVersion) {
-      throw new Error("server returned no MCP protocol version");
+    if ((result as { protocolVersion?: string }).protocolVersion !== MCP_VERSION) {
+      throw new Error("server returned an unsupported MCP protocol version");
     }
+    this.mcpVersion = MCP_VERSION;
     this.mcpSession = response.headers.get("Mcp-Session-Id") ?? undefined;
     if (!this.mcpSession) throw new Error("server returned no MCP session ID");
     await this.notify("notifications/initialized", {});
@@ -56,6 +60,7 @@ export class Client {
       throw new Error(`HTTP ${response.status}`);
     }
     this.mcpSession = undefined;
+    this.mcpVersion = undefined;
   }
 
   async call<T = unknown>(
@@ -116,6 +121,8 @@ export class Client {
     if (includeSession) {
       if (!this.mcpSession) throw new Error("connect() must be called first");
       headers["Mcp-Session-Id"] = this.mcpSession;
+      // 2026-08-29: Bind every HTTP request to the negotiated MCP version.
+      headers["Mcp-Protocol-Version"] = this.mcpVersion ?? MCP_VERSION;
     }
     return headers;
   }

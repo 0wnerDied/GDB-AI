@@ -783,6 +783,7 @@ struct HttpState {
 
 struct HttpClient {
     phase: Phase,
+    protocol_version: String,
     caller: Caller,
     pending: HashMap<String, HttpPending>,
     last_active: Instant,
@@ -895,6 +896,14 @@ async fn http_mcp(
         let Some(id) = id else {
             return StatusCode::ACCEPTED.into_response();
         };
+        if params.get("protocolVersion").and_then(Value::as_str) != Some(MCP_VERSION) {
+            let mut response = json_http_response(
+                rpc_error(id, -32602, "Streamable HTTP supports only 2025-11-25"),
+                None,
+            );
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            return response;
+        }
         let mut phase = Phase::New;
         let mut caller = Caller {
             identity: "mcp-http".into(),
@@ -921,6 +930,7 @@ async fn http_mcp(
             session_id.clone(),
             HttpClient {
                 phase,
+                protocol_version: MCP_VERSION.into(),
                 caller,
                 pending: HashMap::new(),
                 last_active: Instant::now(),
@@ -940,6 +950,13 @@ async fn http_mcp(
         let Some(client) = sessions.get_mut(session_id) else {
             return (StatusCode::NOT_FOUND, "MCP session not found").into_response();
         };
+        if !http_protocol_version_matches(&headers, &client.protocol_version) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Mcp-Protocol-Version is missing, repeated, or unsupported",
+            )
+                .into_response();
+        }
         client.last_active = Instant::now();
         (client.phase, client.caller.clone())
     };
@@ -1118,8 +1135,22 @@ async fn http_delete(State(state): State<HttpState>, headers: HeaderMap) -> Resp
     else {
         return (StatusCode::BAD_REQUEST, "Mcp-Session-Id is required").into_response();
     };
-    let Some(client) = state.sessions.write().await.remove(session_id) else {
-        return StatusCode::NOT_FOUND.into_response();
+    let client = {
+        let mut sessions = state.sessions.write().await;
+        let Some(client) = sessions.get(session_id) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        if !http_protocol_version_matches(&headers, &client.protocol_version) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Mcp-Protocol-Version is missing, repeated, or unsupported",
+            )
+                .into_response();
+        }
+        let Some(client) = sessions.remove(session_id) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        client
     };
     for pending in client.pending.into_values() {
         cancel_http_waiter(&state, client.caller.clone(), pending);
@@ -1212,6 +1243,16 @@ fn allow_http_origin(state: &HttpState, headers: &HeaderMap) -> bool {
             .trusted_origins
             .iter()
             .any(|allowed| allowed == origin)
+}
+
+fn http_protocol_version_matches(headers: &HeaderMap, expected: &str) -> bool {
+    let mut supplied = headers.get_all("mcp-protocol-version").iter();
+    let Some(version) = supplied.next() else {
+        return false;
+    };
+    // 2026-08-29: HTTP sessions previously forgot negotiation and accepted
+    // later requests under any transport version. Bind every request to it.
+    supplied.next().is_none() && version.as_bytes() == expected.as_bytes()
 }
 
 fn json_http_response(value: Value, session_id: Option<&str>) -> Response {
@@ -2431,6 +2472,22 @@ mod tests {
         )
         .await;
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        let unsupported = http_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "clientInfo": {"name": "http-old", "version": "1"}
+                }
+            })),
+        )
+        .await;
+        assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+        assert!(state.sessions.read().await.is_empty());
         let initialized = http_mcp(
             State(state.clone()),
             headers.clone(),
@@ -2448,6 +2505,21 @@ mod tests {
         assert_eq!(initialized.status(), StatusCode::OK);
         let session = initialized.headers().get("mcp-session-id").unwrap().clone();
         headers.insert("mcp-session-id", session);
+        let missing_version = http_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            })),
+        )
+        .await;
+        assert_eq!(missing_version.status(), StatusCode::BAD_REQUEST);
+        headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static(MCP_VERSION),
+        );
         let ready = http_mcp(
             State(state.clone()),
             headers.clone(),
@@ -2459,6 +2531,23 @@ mod tests {
         )
         .await;
         assert_eq!(ready.status(), StatusCode::ACCEPTED);
+        let mut wrong_version = headers.clone();
+        wrong_version.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static("2025-06-18"),
+        );
+        let rejected = http_mcp(
+            State(state.clone()),
+            wrong_version,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {}
+            })),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
         let listed = http_mcp(
             State(state.clone()),
             headers.clone(),
@@ -2532,6 +2621,7 @@ mod tests {
             "mcp_test".into(),
             HttpClient {
                 phase: Phase::Ready,
+                protocol_version: MCP_VERSION.into(),
                 caller: caller.clone(),
                 pending: HashMap::from([(
                     "1".into(),
@@ -2642,6 +2732,7 @@ mod tests {
             "mcp_test".into(),
             HttpClient {
                 phase: Phase::Ready,
+                protocol_version: MCP_VERSION.into(),
                 caller: Caller::local("http-deadline-test"),
                 pending: HashMap::from([(
                     "expired".into(),
@@ -2671,6 +2762,13 @@ mod tests {
             );
         let mut headers = HeaderMap::new();
         headers.insert("mcp-session-id", HeaderValue::from_static("mcp_test"));
+        let rejected = http_delete(State(state.clone()), headers.clone()).await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert!(state.sessions.read().await.contains_key("mcp_test"));
+        headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static(MCP_VERSION),
+        );
         let response = http_delete(State(state.clone()), headers).await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         deleted.await.unwrap();
