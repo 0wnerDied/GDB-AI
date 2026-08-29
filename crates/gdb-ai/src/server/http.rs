@@ -30,8 +30,9 @@ use tokio::{
 
 use super::{
     MAX_HTTP_PENDING_DURATION, MAX_MESSAGE_BYTES, MAX_PENDING_REQUESTS, MCP_VERSION, Phase,
-    RequestCancellation, RpcFault, apply_cancel_mode, dispatch_rpc, initialize,
-    request_cancellation, request_key, rpc_error, rpc_fault, rpc_result, valid_request_id,
+    RequestCancellation, RpcFault, apply_cancel_mode, canonical_rpc_request, core_fault,
+    dispatch_rpc, initialize, present_canonical_response, request_cancellation, request_key,
+    rpc_error, rpc_fault, rpc_result, valid_request_id,
 };
 use crate::AnyError;
 
@@ -39,6 +40,22 @@ struct HttpPending {
     cancel_waiter: Option<oneshot::Sender<()>>,
     cancellation: RequestCancellation,
     deadline: Instant,
+}
+
+struct TrackedOperation {
+    gateway: Arc<Gateway>,
+    caller: Caller,
+    operation_id: String,
+}
+
+struct HttpCompletion {
+    sessions: Arc<RwLock<HashMap<String, HttpClient>>>,
+    session_id: String,
+    key: String,
+    response_id: Value,
+    deadline: Instant,
+    tracked: Option<TrackedOperation>,
+    response: oneshot::Sender<Value>,
 }
 
 #[derive(Clone)]
@@ -267,6 +284,16 @@ async fn http_mcp(
         Ok(cancellation) => cancellation,
         Err(error) => return json_http_response(rpc_fault(id, error), Some(session_id)),
     };
+    let canonical = match canonical_rpc_request(
+        method,
+        params.clone(),
+        state.advanced_tools,
+        caller.admin,
+        &state.sequence,
+    ) {
+        Ok(canonical) => canonical,
+        Err(error) => return json_http_response(rpc_fault(id, error), Some(session_id)),
+    };
     let deadline = Instant::now() + MAX_HTTP_PENDING_DURATION;
     let (cancel_waiter, cancelled) = oneshot::channel();
     let reserved = {
@@ -297,31 +324,80 @@ async fn http_mcp(
             Some(session_id),
         );
     }
-    let gateway = state.gateway.clone();
-    let sequence = state.sequence.clone();
-    let advanced_tools = state.advanced_tools;
-    let method = method.to_owned();
     let response_id = id.clone();
-    let operation = tokio::spawn(async move {
-        dispatch_rpc(
-            &gateway,
-            &caller,
-            advanced_tools,
-            &sequence,
-            &method,
-            params,
+    let (operation_id, operation) = if let Some((request, presentation)) = canonical {
+        let ticket = match state
+            .gateway
+            .admit_operation(
+                request,
+                caller.clone(),
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .await
+        {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                if let Some(client) = state.sessions.write().await.get_mut(session_id) {
+                    client.pending.remove(&key);
+                }
+                return json_http_response(
+                    rpc_fault(id, core_fault(format!("{:?}", error.code), error.message)),
+                    Some(session_id),
+                );
+            }
+        };
+        let operation_id = ticket.operation_id.0;
+        let gateway = state.gateway.clone();
+        let operation_caller = caller.clone();
+        let waited_id = operation_id.clone();
+        let waiter = tokio::spawn(async move {
+            let record = gateway
+                .wait_operation(&waited_id, &operation_caller)
+                .await
+                .map_err(|error| core_fault(format!("{:?}", error.code), error.message))?;
+            let response = record.result.ok_or_else(|| {
+                core_fault("INTERNAL", "completed operation has no canonical response")
+            })?;
+            present_canonical_response(response, presentation)
+        });
+        (Some(operation_id), waiter)
+    } else {
+        let gateway = state.gateway.clone();
+        let sequence = state.sequence.clone();
+        let advanced_tools = state.advanced_tools;
+        let method = method.to_owned();
+        let dispatch_caller = caller.clone();
+        (
+            None,
+            tokio::spawn(async move {
+                dispatch_rpc(
+                    &gateway,
+                    &dispatch_caller,
+                    advanced_tools,
+                    &sequence,
+                    &method,
+                    params,
+                )
+                .await
+            }),
         )
-        .await
-    });
+    };
     let (response_sender, mut response_receiver) = oneshot::channel();
     tokio::spawn(complete_http_operation(
-        state.sessions.clone(),
-        session_id.to_owned(),
-        key,
-        response_id,
-        deadline,
+        HttpCompletion {
+            sessions: state.sessions.clone(),
+            session_id: session_id.to_owned(),
+            key,
+            response_id,
+            deadline,
+            tracked: operation_id.map(|operation_id| TrackedOperation {
+                gateway: state.gateway.clone(),
+                caller,
+                operation_id,
+            }),
+            response: response_sender,
+        },
         operation,
-        response_sender,
     ));
     let mut cancelled = cancelled;
     // 2026-08-29: Normal completion drops the stored cancellation sender.
@@ -341,30 +417,66 @@ async fn http_mcp(
 }
 
 async fn complete_http_operation(
-    sessions: Arc<RwLock<HashMap<String, HttpClient>>>,
-    session_id: String,
-    key: String,
-    response_id: Value,
-    deadline: Instant,
-    operation: JoinHandle<Result<Value, RpcFault>>,
-    response: oneshot::Sender<Value>,
+    completion: HttpCompletion,
+    mut operation: JoinHandle<Result<Value, RpcFault>>,
 ) {
-    let completed =
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation).await;
+    let completed = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(completion.deadline),
+        &mut operation,
+    )
+    .await;
     let value = match completed {
         Ok(Ok(result)) => result.map_or_else(
-            |error| rpc_fault(response_id.clone(), error),
-            |result| rpc_result(response_id.clone(), result),
+            |error| rpc_fault(completion.response_id.clone(), error),
+            |result| rpc_result(completion.response_id.clone(), result),
         ),
-        Ok(Err(error)) => rpc_error(response_id, -32603, error.to_string()),
-        Err(_) => rpc_error(response_id, -32001, "HTTP request deadline exceeded"),
+        Ok(Err(error)) => rpc_error(completion.response_id.clone(), -32603, error.to_string()),
+        Err(_) => {
+            operation.abort();
+            if let Some(tracked) = completion.tracked {
+                let operation_state = match tracked
+                    .gateway
+                    .detach_operation_waiter(&tracked.operation_id, &tracked.caller)
+                    .await
+                {
+                    Ok(record) => json!(record.status),
+                    Err(error) => {
+                        tracing::warn!(%error, operation_id = %tracked.operation_id, "failed to detach operation waiter");
+                        Value::String("UNKNOWN".into())
+                    }
+                };
+                rpc_fault(
+                    completion.response_id.clone(),
+                    RpcFault {
+                        code: -32001,
+                        message: "HTTP request deadline exceeded".into(),
+                        data: Some(json!({
+                            "operation_id": tracked.operation_id,
+                            "operation_state": operation_state
+                        })),
+                    },
+                )
+            } else {
+                rpc_error(
+                    completion.response_id.clone(),
+                    -32001,
+                    "HTTP request deadline exceeded",
+                )
+            }
+        }
     };
     // 2026-08-29: A dropped HTTP handler used to skip pending cleanup while
     // its detached target operation completed. Completion now owns cleanup.
-    if let Some(client) = sessions.write().await.get_mut(&session_id) {
-        client.pending.remove(&key);
+    if let Some(client) = completion
+        .sessions
+        .write()
+        .await
+        .get_mut(&completion.session_id)
+    {
+        client.pending.remove(&completion.key);
+        client.last_active = Instant::now();
     }
-    let _ = response.send(value);
+    let _ = completion.response.send(value);
 }
 
 async fn evict_http_sessions(state: &HttpState) {
@@ -823,13 +935,16 @@ mod tests {
         let (response, disconnected) = oneshot::channel();
         drop(disconnected);
         let completion = tokio::spawn(complete_http_operation(
-            sessions.clone(),
-            "mcp_test".into(),
-            "1".into(),
-            json!(1),
-            deadline,
+            HttpCompletion {
+                sessions: sessions.clone(),
+                session_id: "mcp_test".into(),
+                key: "1".into(),
+                response_id: json!(1),
+                deadline,
+                tracked: None,
+                response,
+            },
             operation,
-            response,
         ));
         release.send(()).unwrap();
         completion.await.unwrap();
@@ -845,13 +960,16 @@ mod tests {
             .insert("2".into(), detached_http_pending(cancel_waiter, deadline));
         let (response, received) = oneshot::channel();
         complete_http_operation(
-            sessions.clone(),
-            "mcp_test".into(),
-            "2".into(),
-            json!(2),
-            deadline,
+            HttpCompletion {
+                sessions: sessions.clone(),
+                session_id: "mcp_test".into(),
+                key: "2".into(),
+                response_id: json!(2),
+                deadline,
+                tracked: None,
+                response,
+            },
             tokio::spawn(panic_operation()),
-            response,
         )
         .await;
         assert_eq!(received.await.unwrap()["error"]["code"], -32603);
@@ -873,18 +991,27 @@ mod tests {
         let abort = operation.abort_handle();
         let (response, received) = oneshot::channel();
         complete_http_operation(
-            sessions.clone(),
-            "mcp_test".into(),
-            "3".into(),
-            json!(3),
-            deadline,
+            HttpCompletion {
+                sessions: sessions.clone(),
+                session_id: "mcp_test".into(),
+                key: "3".into(),
+                response_id: json!(3),
+                deadline,
+                tracked: None,
+                response,
+            },
             operation,
-            response,
         )
         .await;
         assert_eq!(received.await.unwrap()["error"]["code"], -32001);
         assert!(sessions.read().await["mcp_test"].pending.is_empty());
-        abort.abort();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !abort.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

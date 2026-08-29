@@ -78,6 +78,7 @@ pub fn effect_for_method(method: CanonicalMethod) -> Effect {
         | SessionProviders
         | SessionTranscript
         | SessionEvent
+        | OperationGet
         | InspectionGet
         | InspectionSnapshot
         | InspectionDiff

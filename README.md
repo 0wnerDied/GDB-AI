@@ -281,6 +281,10 @@ gdb-ai storage gc
 gdb-ai storage gc --execute
 ```
 
+If a Streamable HTTP waiter expires, its error data includes an `operation_id`.
+Use `gdb_session` action `operation_status` to retrieve the canonical outcome;
+the timeout does not claim that the debugger operation was cancelled.
+
 Session CLI commands connect to `server.unix_socket`. Replay validates strict
 journal ordering and reconstructs controller state and stored snapshots. A
 recorded `session.created` ID overrides `--session-id`; the flag supplies a

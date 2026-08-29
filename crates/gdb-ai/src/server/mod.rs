@@ -33,6 +33,12 @@ const MAX_HTTP_PENDING_DURATION: Duration = Duration::from_secs(5 * 60);
 type RpcOutput = (Option<String>, Value);
 
 #[derive(Clone, Copy)]
+enum CanonicalPresentation {
+    Tool,
+    Envelope,
+}
+
+#[derive(Clone, Copy)]
 enum CancelMode {
     DetachWaiter,
     InterruptTarget,
@@ -80,7 +86,8 @@ Read inferior output from stream=pty. Use each returned stop_id for stop-scoped 
 inspection; resuming invalidates old frames and values. For stripped PIEs, set \
 module-offset breakpoints with names shown by inspection mappings; a local \
 explicit-loader breakpoint rebinds when its executable mapping appears. Read large evidence through \
-gdbai:// resources and close the session when finished.";
+gdbai:// resources. If HTTP returns an operation_id after waiter timeout, query \
+it with gdb_session action=operation_status. Close the session when finished.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {
@@ -242,21 +249,21 @@ async fn dispatch_rpc(
     method: &str,
     params: Value,
 ) -> Result<Value, RpcFault> {
+    if let Some((request, presentation)) = canonical_rpc_request(
+        method,
+        params.clone(),
+        advanced_tools,
+        caller.admin,
+        sequence,
+    )? {
+        return present_canonical_response(gateway.dispatch(request, caller).await, presentation);
+    }
     match method {
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools(advanced_tools, caller.admin)})),
-        "tools/call" => call_tool(gateway, caller, advanced_tools, sequence, params).await,
         "resources/list" => list_resources(gateway, caller, sequence).await,
         "resources/templates/list" => Ok(resource_templates()),
         "resources/read" => read_resource(gateway, caller, sequence, &params).await,
-        "gdb.ai/call" => {
-            let request: ApiRequest = serde_json::from_value(params)
-                .map_err(|error| RpcFault::invalid(error.to_string()))?;
-            Ok(
-                serde_json::to_value(gateway.dispatch(request, caller).await)
-                    .map_err(|error| RpcFault::invalid(error.to_string()))?,
-            )
-        }
         _ => Err(RpcFault {
             code: -32601,
             message: format!("method not found: {method}"),
@@ -265,6 +272,55 @@ async fn dispatch_rpc(
     }
 }
 
+fn canonical_rpc_request(
+    method: &str,
+    params: Value,
+    advanced_tools: bool,
+    raw_admin: bool,
+    sequence: &AtomicU64,
+) -> Result<Option<(ApiRequest, CanonicalPresentation)>, RpcFault> {
+    match method {
+        "tools/call" => {
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| RpcFault::invalid("tools/call requires name"))?;
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            Ok(Some((
+                map_tool(
+                    name,
+                    arguments,
+                    advanced_tools,
+                    raw_admin,
+                    sequence.fetch_add(1, Ordering::Relaxed),
+                )?,
+                CanonicalPresentation::Tool,
+            )))
+        }
+        "gdb.ai/call" => Ok(Some((
+            serde_json::from_value(params).map_err(|error| RpcFault::invalid(error.to_string()))?,
+            CanonicalPresentation::Envelope,
+        ))),
+        _ => Ok(None),
+    }
+}
+
+fn present_canonical_response(
+    response: ApiResponse,
+    presentation: CanonicalPresentation,
+) -> Result<Value, RpcFault> {
+    match presentation {
+        CanonicalPresentation::Tool => Ok(tool_result(response)),
+        CanonicalPresentation::Envelope => {
+            serde_json::to_value(response).map_err(|error| RpcFault::invalid(error.to_string()))
+        }
+    }
+}
+
+#[cfg(test)]
 async fn call_tool(
     gateway: &Gateway,
     caller: &Caller,
@@ -272,23 +328,12 @@ async fn call_tool(
     sequence: &AtomicU64,
     params: Value,
 ) -> Result<Value, RpcFault> {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| RpcFault::invalid("tools/call requires name"))?;
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let request = map_tool(
-        name,
-        arguments,
-        advanced_tools,
-        caller.admin,
-        sequence.fetch_add(1, Ordering::Relaxed),
-    )?;
-    let response = gateway.dispatch(request, caller).await;
-    Ok(tool_result(response))
+    let Some((request, presentation)) =
+        canonical_rpc_request("tools/call", params, advanced_tools, caller.admin, sequence)?
+    else {
+        unreachable!("tools/call always maps to a canonical request")
+    };
+    present_canonical_response(gateway.dispatch(request, caller).await, presentation)
 }
 
 fn map_tool(

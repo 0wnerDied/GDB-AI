@@ -18,7 +18,11 @@ use crate::{
     session::SessionHandle,
 };
 
+mod operation;
 mod operations;
+
+use operation::OperationRegistry;
+pub use operation::{OperationTicket, RequestOperationRecord, RequestOperationStatus};
 
 #[derive(Clone, Debug)]
 pub struct Caller {
@@ -55,6 +59,7 @@ pub struct Gateway {
     idempotency_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     rates: Mutex<BTreeMap<String, RateWindow>>,
     session_creation: Mutex<()>,
+    operations: OperationRegistry,
     _storage_lock: StorageLock,
 }
 
@@ -73,6 +78,10 @@ impl Gateway {
         )?);
         let artifacts = ArtifactStore::new(&config.artifacts.path)?;
         let metrics = Arc::new(Metrics::default());
+        let operation_limit = config
+            .storage
+            .max_operations_per_session
+            .saturating_mul(config.server.max_sessions.max(1));
         let gateway = Self {
             config: Arc::new(config),
             store,
@@ -83,6 +92,7 @@ impl Gateway {
             idempotency_locks: Mutex::new(BTreeMap::new()),
             rates: Mutex::new(BTreeMap::new()),
             session_creation: Mutex::new(()),
+            operations: OperationRegistry::new(operation_limit),
             _storage_lock: storage_lock,
         };
         gateway.maintain_storage(&BTreeSet::new())?;

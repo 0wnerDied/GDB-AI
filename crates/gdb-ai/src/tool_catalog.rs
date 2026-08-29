@@ -56,6 +56,7 @@ const SESSION_ACTIONS: &[ToolAction] = &[
     action!("acquire_write_lease", SessionAcquireWriteLease),
     action!("release_write_lease", SessionReleaseWriteLease),
     action!("attempt_recovery", SessionAttemptRecovery),
+    action!("operation_status", OperationGet),
     action!("close", SessionClose),
 ];
 const RUN_ACTIONS: &[ToolAction] = &[

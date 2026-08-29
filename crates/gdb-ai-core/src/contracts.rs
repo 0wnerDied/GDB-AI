@@ -551,6 +551,7 @@ impl CanonicalMethod {
                 optional("max_bytes", Unsigned),
             ]),
             SessionEvent => MethodContract::plain(vec![required("event_seq", Unsigned)]),
+            OperationGet => MethodContract::plain(vec![required("operation_id", String)]),
             TargetLaunch => MethodContract::plain(vec![
                 required("program", String),
                 optional("argv", StringArray),
@@ -867,7 +868,7 @@ impl CanonicalMethod {
     pub const fn requires_session(self) -> bool {
         !matches!(
             self,
-            Self::SessionCreate | Self::SessionList | Self::ArtifactGet
+            Self::SessionCreate | Self::SessionList | Self::OperationGet | Self::ArtifactGet
         )
     }
 }

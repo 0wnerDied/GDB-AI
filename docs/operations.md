@@ -6,8 +6,10 @@ reverse proxy. HTTP never binds directly to a non-loopback address.
 
 Every session returns an expiring write lease. Renew it with
 `session.acquire_write_lease`; expiration never interrupts a running target.
-On timeout, inspect the returned operation and choose wait, interrupt, or
-close. A timeout never means the inferior exited.
+An HTTP waiter timeout returns `operation_id` in the error data. Query it with
+`gdb_session` action `operation_status`; the returned canonical record contains
+the eventual response or an explicit `OUTCOME_UNKNOWN` state. A waiter timeout
+never means the operation stopped or the inferior exited.
 
 MCP cancellation defaults to `cancel_mode: "detach_waiter"`: it stops the
 client wait while the accepted debugger operation finishes in the background.
@@ -16,10 +18,11 @@ must enter the session actor (`SessionWorker`) control lane; both require
 `session_id` and `lease_id`.
 
 Dropping a Streamable HTTP connection does not imply MCP cancellation. The
-accepted operation continues to its deadline, owns removal of its pending
-entry, and discards its response if the network waiter is gone. Only an
-explicit cancellation notification or transport-session DELETE applies the
-request's `cancel_mode`.
+Gateway owns the accepted canonical operation until a recorded outcome, while
+HTTP owns only the response waiter and pending request key. The result remains
+queryable after that waiter disconnects or expires. Only an explicit
+cancellation notification or transport-session DELETE applies the request's
+`cancel_mode`.
 
 Journals are stored per session. Use `gdb-ai transcript inspect`, `transcript
 export`, and `replay` for diagnosis without executing the inferior again.

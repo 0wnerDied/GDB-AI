@@ -353,6 +353,40 @@
       "if": {
         "properties": {
           "method": {
+            "const": "operation.get"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "operation_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "operation_id"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
             "const": "target.launch"
           }
         },
@@ -4085,6 +4119,7 @@
         "session.providers",
         "session.transcript",
         "session.event",
+        "operation.get",
         "target.launch",
         "target.attach",
         "target.connect_remote",

@@ -52,6 +52,7 @@ impl Gateway {
             CanonicalMethod::SessionProviders => self.session_providers(request).await,
             CanonicalMethod::SessionTranscript => self.session_transcript(request).await,
             CanonicalMethod::SessionEvent => self.session_event(request).await,
+            CanonicalMethod::OperationGet => self.operation_get(request, caller).await,
             CanonicalMethod::TargetLaunch => self.target_launch(request).await,
             CanonicalMethod::TargetAttach => self.target_attach(request).await,
             CanonicalMethod::TargetConnectRemote => self.target_connect_remote(request).await,

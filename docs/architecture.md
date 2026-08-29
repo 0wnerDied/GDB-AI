@@ -113,8 +113,9 @@ starve debugger state events.
   They do not construct GDB/MI commands.
 - MCP resources call the same canonical Gateway operations as tools. Artifact
   base URIs return manifests; range URIs return exactly the bytes they name.
-- A Streamable HTTP operation owns removal of its pending entry. Disconnecting
-  a response waiter does not silently cancel an accepted debugger operation.
+- The Gateway registry owns canonical operations; Streamable HTTP pending state
+  owns only request IDs and response waiters. A waiter timeout returns a
+  queryable operation ID and never detaches untracked target work.
 - GDB-specific command strings and record classes remain inside the core and
   backend implementation and never enter the canonical protocol.
 
