@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::{
     domain::{FrameId, InferiorId, JournaledEvent, SessionState, StopId, ThreadId},

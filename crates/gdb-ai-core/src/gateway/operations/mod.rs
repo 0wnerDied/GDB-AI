@@ -39,7 +39,16 @@ mod kernel;
 mod lifecycle;
 mod memory;
 mod raw;
+mod request;
 mod values;
+
+use request::*;
+
+#[cfg(test)]
+use lifecycle::{
+    AttachIdentity, StartPolicy, inherited_environment, parse_process_start_time,
+    validate_attach_target,
+};
 
 impl Gateway {
     pub(crate) async fn execute_method(
@@ -188,38 +197,6 @@ impl Gateway {
             return Ok((breakpoint_location(parameters)?, Some((module, offset))));
         }
         Ok((breakpoint_location(parameters)?, None))
-    }
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum StartPolicy {
-    // 2026-08-28: The old "entry" name mapped to GDB starti, which can stop
-    // in the dynamic loader. Retain it only as an input alias for the precise
-    // first-instruction policy.
-    #[serde(alias = "entry")]
-    FirstInstruction,
-    Main,
-    None,
-}
-
-impl StartPolicy {
-    fn command(self) -> Result<MiCommand> {
-        match self {
-            Self::FirstInstruction => MiCommand::new("-interpreter-exec")?
-                .bare("console")
-                .map(|command| command.string("starti")),
-            Self::Main => MiCommand::new("-exec-run")?.bare("--start"),
-            Self::None => MiCommand::new("-exec-run"),
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::FirstInstruction => "first_instruction",
-            Self::Main => "main",
-            Self::None => "none",
-        }
     }
 }
 
@@ -403,130 +380,6 @@ async fn apply_wait_baseline(
         }
         (Some(baseline), None) => handle.wait_after_baseline(until, timeout, baseline).await,
         (None, _) => handle.wait(until, timeout).await,
-    }
-}
-
-fn required_session(request: &ApiRequest) -> Result<&str> {
-    request
-        .session_id
-        .as_deref()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "method requires session_id"))
-}
-
-fn parameters<T: for<'de> Deserialize<'de>>(request: &ApiRequest) -> Result<T> {
-    let mut parameters = request.parameters.clone();
-    // 2026-08-28: Strict operation structs rejected the lease and revision
-    // controls that the shared Gateway contract adds to every parameter map.
-    // Consume those transport controls before decoding operation-owned fields.
-    if let Some(parameters) = parameters.as_object_mut() {
-        parameters.remove("lease_id");
-        parameters.remove("accept_latest_revision");
-    }
-    serde_json::from_value(parameters)
-        .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))
-}
-
-fn string(value: &Value, name: &str) -> Result<String> {
-    value
-        .get(name)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, format!("{name} is required")))
-}
-
-fn unsigned(value: &Value, name: &str) -> Result<u64> {
-    value.get(name).and_then(Value::as_u64).ok_or_else(|| {
-        Error::new(
-            ErrorCode::InvalidArgument,
-            format!("{name} must be unsigned"),
-        )
-    })
-}
-
-fn bool_value(value: &Value, name: &str, default: bool) -> bool {
-    value.get(name).and_then(Value::as_bool).unwrap_or(default)
-}
-
-fn bounded_limit(value: &Value, default: usize, maximum: usize) -> Result<usize> {
-    let limit = value
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(default as u64);
-    if limit == 0 || limit > maximum as u64 {
-        return Err(Error::new(
-            ErrorCode::InvalidArgument,
-            format!("limit must be between 1 and {maximum}"),
-        ));
-    }
-    Ok(limit as usize)
-}
-
-fn bounded_offset(value: &Value, maximum: usize, subject: &str) -> Result<usize> {
-    let offset = value.get("offset").and_then(Value::as_u64).unwrap_or(0);
-    if offset > maximum as u64 {
-        return Err(Error::new(
-            ErrorCode::OutputLimit,
-            format!("{subject} offset must not exceed {maximum}"),
-        ));
-    }
-    Ok(offset as usize)
-}
-
-fn validate_environment(environment: &BTreeMap<String, String>) -> Result<()> {
-    if environment.len() > 256 {
-        return Err(Error::new(
-            ErrorCode::OutputLimit,
-            "too many environment variables",
-        ));
-    }
-    for (name, value) in environment {
-        let mut bytes = name.bytes();
-        if !bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            || value.len() > 64 * 1024
-            || value.contains('\0')
-        {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!("invalid environment entry {name:?}"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn inherited_environment(allowlist: &[String]) -> Result<BTreeMap<String, String>> {
-    let mut environment = BTreeMap::new();
-    for name in allowlist {
-        let Some(value) = std::env::var_os(name) else {
-            continue;
-        };
-        let value = value.into_string().map_err(|_| {
-            Error::new(
-                ErrorCode::InvalidArgument,
-                format!("inherited environment variable {name:?} is not UTF-8"),
-            )
-        })?;
-        environment.insert(name.clone(), value);
-    }
-    Ok(environment)
-}
-
-fn validate_argv(arguments: &[String]) -> Result<()> {
-    if arguments.len() > 256
-        || arguments
-            .iter()
-            .any(|argument| argument.len() > 64 * 1024 || argument.contains('\0'))
-    {
-        Err(Error::new(
-            ErrorCode::OutputLimit,
-            "argv exceeds 256 entries or 64 KiB per argument",
-        ))
-    } else {
-        Ok(())
     }
 }
 
@@ -1946,119 +1799,6 @@ fn input_bytes(parameters: &Value) -> Result<Vec<u8>> {
         ErrorCode::InvalidArgument,
         "text or data_base64 is required",
     ))
-}
-
-fn remote_endpoint(parameters: &Value) -> Result<String> {
-    let endpoint = parameters
-        .get("endpoint")
-        .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "endpoint is required"))?;
-    let text = if let Some(endpoint) = endpoint.as_str() {
-        endpoint.to_owned()
-    } else {
-        let host = string(endpoint, "host")?;
-        let port = unsigned(endpoint, "port")?;
-        if port == 0 || port > u16::MAX as u64 {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                "remote port must be between 1 and 65535",
-            ));
-        }
-        if host.contains(':') {
-            format!("[{host}]:{port}")
-        } else {
-            format!("{host}:{port}")
-        }
-    };
-    text.parse::<std::net::SocketAddr>()
-        .map(|endpoint| endpoint.to_string())
-        .map_err(|_| {
-            Error::new(
-                ErrorCode::InvalidArgument,
-                "remote endpoint must use a pinned IP address and port",
-            )
-        })
-}
-
-#[derive(Clone, Copy)]
-struct AttachIdentity {
-    start_time_ticks: u64,
-}
-
-impl AttachIdentity {
-    fn revalidate(self, pid: u64) -> Result<()> {
-        if process_start_time(pid)? == self.start_time_ticks {
-            Ok(())
-        } else {
-            Err(Error::new(
-                ErrorCode::Conflict,
-                "attach target identity changed before attach completed",
-            ))
-        }
-    }
-}
-
-fn validate_attach_target(pid: u64) -> Result<AttachIdentity> {
-    use std::os::unix::fs::MetadataExt;
-
-    let process = std::fs::metadata(format!("/proc/{pid}")).map_err(|error| {
-        Error::new(
-            ErrorCode::TargetUnavailable,
-            format!("cannot inspect attach target: {error}"),
-        )
-    })?;
-    // SAFETY: geteuid has no preconditions and reads process credentials.
-    let current_uid = unsafe { libc::geteuid() };
-    if process.uid() != current_uid {
-        return Err(Error::new(
-            ErrorCode::PolicyDenied,
-            "attach target belongs to another Unix user",
-        ));
-    }
-    let current_namespace = std::fs::metadata("/proc/self/ns/pid")?;
-    let target_namespace = std::fs::metadata(format!("/proc/{pid}/ns/pid"))?;
-    if current_namespace.dev() != target_namespace.dev()
-        || current_namespace.ino() != target_namespace.ino()
-    {
-        return Err(Error::new(
-            ErrorCode::PolicyDenied,
-            "attach target belongs to another PID namespace",
-        ));
-    }
-    Ok(AttachIdentity {
-        start_time_ticks: process_start_time(pid)?,
-    })
-}
-
-fn process_start_time(pid: u64) -> Result<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|error| {
-        Error::new(
-            ErrorCode::TargetUnavailable,
-            format!("cannot read attach target identity: {error}"),
-        )
-    })?;
-    parse_process_start_time(&stat)
-}
-
-fn parse_process_start_time(stat: &str) -> Result<u64> {
-    let fields = stat
-        .rsplit_once(") ")
-        .map(|(_, fields)| fields)
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::TargetUnavailable,
-                "attach target stat record is malformed",
-            )
-        })?;
-    fields
-        .split_whitespace()
-        .nth(19)
-        .and_then(|value| value.parse().ok())
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::TargetUnavailable,
-                "attach target stat record has no start time",
-            )
-        })
 }
 
 fn first_word(command: &str) -> &str {
