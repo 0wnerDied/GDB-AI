@@ -5,7 +5,7 @@ use super::*;
 use crate::config::{ArtifactConfig, PersistenceConfig};
 
 #[tokio::test]
-async fn rejects_expired_write_lease_without_interrupting_session() {
+async fn expired_lease_keeps_owner_cleanup_reachable() {
     if std::process::Command::new("gdb")
         .arg("--version")
         .output()
@@ -51,7 +51,7 @@ async fn rejects_expired_write_lease_without_interrupting_session() {
             ApiRequest {
                 api_version: API_VERSION.into(),
                 request_id: "close".into(),
-                session_id: Some(session_id),
+                session_id: Some(session_id.clone()),
                 method: crate::protocol::CanonicalMethod::SessionClose,
                 expected_revision: created.revision,
                 idempotency_key: None,
@@ -61,7 +61,145 @@ async fn rejects_expired_write_lease_without_interrupting_session() {
         )
         .await;
     assert_eq!(rejected.error.unwrap().code, ErrorCode::WriteLeaseExpired);
-    gateway.shutdown().await;
+
+    gateway
+        .entry(&session_id)
+        .await
+        .unwrap()
+        .handle
+        .record_event(crate::domain::DomainEvent::CommandOutcomeUnknown { token: 99 })
+        .await
+        .unwrap();
+    let renewed = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "renew-unknown".into(),
+                session_id: Some(session_id.clone()),
+                method: crate::protocol::CanonicalMethod::SessionAcquireWriteLease,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({"accept_latest_revision": true}),
+            },
+            &caller,
+        )
+        .await;
+    assert!(renewed.error.is_none(), "{:?}", renewed.error);
+
+    let denied = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "foreign-abort".into(),
+                session_id: Some(session_id.clone()),
+                method: crate::protocol::CanonicalMethod::SessionForceAbort,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &Caller::local("different-owner"),
+        )
+        .await;
+    assert_eq!(denied.error.unwrap().code, ErrorCode::PolicyDenied);
+
+    let aborted = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "force-abort".into(),
+                session_id: Some(session_id),
+                method: crate::protocol::CanonicalMethod::SessionForceAbort,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    assert!(aborted.error.is_none(), "{:?}", aborted.error);
+    assert_eq!(aborted.result.unwrap()["clean_shutdown"], false);
+    assert!(gateway.sessions.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn lost_session_recovery_does_not_require_a_business_lease() {
+    if std::process::Command::new("gdb")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let gateway = Gateway::new(Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    })
+    .unwrap();
+    let caller = Caller::local("recovery-test");
+    let created = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "create-recovery".into(),
+                session_id: None,
+                method: crate::protocol::CanonicalMethod::SessionCreate,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    let session_id = created.session_id.unwrap();
+    let entry = gateway.entry(&session_id).await.unwrap();
+    entry.lease.lock().await.take();
+    gateway.store.delete_lease(entry.handle.id()).unwrap();
+    entry
+        .handle
+        .record_event(crate::domain::DomainEvent::ConsistencyLost {
+            reason: "test recovery authority".into(),
+        })
+        .await
+        .unwrap();
+
+    let recovered = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "recover".into(),
+                session_id: Some(session_id.clone()),
+                method: crate::protocol::CanonicalMethod::SessionAttemptRecovery,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    assert!(recovered.error.is_none(), "{:?}", recovered.error);
+
+    let aborted = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "cleanup".into(),
+                session_id: Some(session_id),
+                method: crate::protocol::CanonicalMethod::SessionForceAbort,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    assert!(aborted.error.is_none(), "{:?}", aborted.error);
 }
 
 #[tokio::test]

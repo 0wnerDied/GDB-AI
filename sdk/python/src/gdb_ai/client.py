@@ -183,3 +183,6 @@ class Session:
 
     def close(self) -> None:
         self.call("session.close")
+
+    def force_abort(self) -> None:
+        self.client.call("session.force_abort", session_id=self.session_id)

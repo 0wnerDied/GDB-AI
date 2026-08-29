@@ -535,6 +535,7 @@ impl CanonicalMethod {
             SessionGet
             | SessionList
             | SessionClose
+            | SessionForceAbort
             | SessionReleaseWriteLease
             | SessionAttemptRecovery
             | SessionCapabilities

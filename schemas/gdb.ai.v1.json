@@ -133,6 +133,35 @@
       "if": {
         "properties": {
           "method": {
+            "const": "session.force_abort"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
             "const": "session.acquire_write_lease"
           }
         },
@@ -4154,6 +4183,7 @@
         "session.get",
         "session.list",
         "session.close",
+        "session.force_abort",
         "session.acquire_write_lease",
         "session.release_write_lease",
         "session.attempt_recovery",

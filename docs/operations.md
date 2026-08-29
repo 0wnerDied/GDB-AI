@@ -6,6 +6,11 @@ reverse proxy. HTTP never binds directly to a non-loopback address.
 
 Every session returns an expiring write lease. Renew it with
 `session.acquire_write_lease`; expiration never interrupts a running target.
+Normal mutations and clean close still require that lease. If consistency is
+lost or the lease expires, the session owner or an administrator can reacquire
+the lease, call `session.attempt_recovery`, or use `gdb_session` action
+`force_abort`. Forced abort terminates session resources without claiming a
+clean debugger shutdown.
 An HTTP waiter timeout returns `operation_id` in the error data. Query it with
 `gdb_session` action `operation_status`; the returned canonical record contains
 the eventual response or an explicit `OUTCOME_UNKNOWN` state. A waiter timeout

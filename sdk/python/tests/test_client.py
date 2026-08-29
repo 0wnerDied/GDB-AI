@@ -62,6 +62,18 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(session.revision, 9)
         self.assertEqual(session.lease_id, "lease_new")
 
+    def test_force_abort_does_not_require_the_business_lease(self) -> None:
+        calls = []
+
+        class FakeClient:
+            def call(self, method, parameters=None, **envelope):
+                calls.append((method, parameters, envelope))
+                return {"result": {"closed": True, "clean_shutdown": False}}
+
+        Session(FakeClient(), "sess_test", 7, "lease_expired").force_abort()
+
+        self.assertEqual(calls, [("session.force_abort", None, {"session_id": "sess_test"})])
+
 
 if __name__ == "__main__":
     unittest.main()

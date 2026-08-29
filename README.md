@@ -196,7 +196,9 @@ Mutations require both the exact current `expected_revision` and `lease_id`,
 or an explicit `accept_latest_revision` where permitted. `session.create`
 returns the first expiring lease. Renew it with
 `session.acquire_write_lease`. Starting execution invalidates every previous
-frame and value handle.
+frame and value handle. If a lease expires while consistency is unknown or
+lost, the owner can reacquire it, attempt recovery, or use `gdb_session`
+action `force_abort` to terminate resources without claiming a clean shutdown.
 
 ## Configuration and SDKs
 

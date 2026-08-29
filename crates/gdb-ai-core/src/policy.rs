@@ -33,8 +33,10 @@ impl Profile {
             method,
             CanonicalMethod::SessionCreate
                 | CanonicalMethod::SessionClose
+                | CanonicalMethod::SessionForceAbort
                 | CanonicalMethod::SessionAcquireWriteLease
                 | CanonicalMethod::SessionReleaseWriteLease
+                | CanonicalMethod::SessionAttemptRecovery
                 | CanonicalMethod::OperationCancel
         ) || (self == Self::OfflineCore && method == CanonicalMethod::TargetOpenCore)
         {
@@ -127,6 +129,7 @@ pub fn effect_for_method(method: CanonicalMethod) -> Effect {
         | ValueRelease => Effect::Control,
         SessionCreate
         | SessionClose
+        | SessionForceAbort
         | SessionAcquireWriteLease
         | SessionReleaseWriteLease
         | SessionAttemptRecovery => Effect::Control,
@@ -221,6 +224,16 @@ mod tests {
                 .authorize_method(CanonicalMethod::BreakpointCreate, Effect::Control)
                 .is_err()
         );
+        for method in [
+            CanonicalMethod::SessionAttemptRecovery,
+            CanonicalMethod::SessionForceAbort,
+        ] {
+            assert!(
+                Profile::OfflineCore
+                    .authorize_method(method, Effect::Control)
+                    .is_ok()
+            );
+        }
     }
 
     #[test]

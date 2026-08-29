@@ -175,4 +175,8 @@ export class Session {
   async close(): Promise<void> {
     await this.call("session.close");
   }
+
+  async forceAbort(): Promise<void> {
+    await this.client.call("session.force_abort", {}, { sessionId: this.sessionId });
+  }
 }

@@ -33,6 +33,7 @@ canonical_methods! {
     SessionGet => "session.get",
     SessionList => "session.list",
     SessionClose => "session.close",
+    SessionForceAbort => "session.force_abort",
     SessionAcquireWriteLease => "session.acquire_write_lease",
     SessionReleaseWriteLease => "session.release_write_lease",
     SessionAttemptRecovery => "session.attempt_recovery",

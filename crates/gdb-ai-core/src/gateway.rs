@@ -375,6 +375,7 @@ impl Gateway {
         // during a long wait.
         let out_of_band = request.method.starts_with("inferior_io.")
             || request.method == "session.close"
+            || request.method == "session.force_abort"
             || request.method == "session.acquire_write_lease"
             || (request.method == "execution.control"
                 && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"));
@@ -430,7 +431,18 @@ impl Gateway {
             }
             // 2026-08-28: TAINTED describes an unknowable outer state, but its
             // managed registries still require one bounded reconciliation.
-            if state.reconciliation_required {
+            // 2026-08-29: Automatic reconciliation ran before lease recovery
+            // and termination, so an unresponsive backend could prevent the
+            // owner from regaining authority or releasing session resources.
+            if state.reconciliation_required
+                && !matches!(
+                    request.method,
+                    crate::protocol::CanonicalMethod::SessionClose
+                        | crate::protocol::CanonicalMethod::SessionForceAbort
+                        | crate::protocol::CanonicalMethod::SessionAcquireWriteLease
+                        | crate::protocol::CanonicalMethod::SessionAttemptRecovery
+                )
+            {
                 self.reconcile_session(entry, true).await?;
                 state = entry.handle.state();
             }
@@ -443,6 +455,8 @@ impl Gateway {
                         | "session.transcript"
                         | "session.event"
                         | "session.close"
+                        | "session.force_abort"
+                        | "session.acquire_write_lease"
                         | "session.attempt_recovery"
                         | "artifact.get"
                 )
@@ -638,6 +652,16 @@ impl Gateway {
         entry: &SessionEntry,
         state: &crate::domain::SessionState,
     ) -> Result<()> {
+        // 2026-08-29: Recovery and forced cleanup reused the expiring business
+        // lease, leaving an owner unable to govern a LOST session. Ownership
+        // is already enforced at the shared Gateway boundary.
+        if matches!(
+            request.method,
+            crate::protocol::CanonicalMethod::SessionForceAbort
+                | crate::protocol::CanonicalMethod::SessionAttemptRecovery
+        ) {
+            return Ok(());
+        }
         if let Some(expected) = request.expected_revision {
             state.require_revision(expected)?;
         } else if request
@@ -826,7 +850,14 @@ impl Gateway {
 fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
     matches!(
         request.method.as_str(),
-        "session.get" | "session.transcript" | "session.event" | "session.close" | "artifact.get"
+        "session.get"
+            | "session.transcript"
+            | "session.event"
+            | "session.close"
+            | "session.force_abort"
+            | "session.acquire_write_lease"
+            | "session.attempt_recovery"
+            | "artifact.get"
     ) || (request.method == "execution.control"
         && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"))
 }

@@ -59,6 +59,7 @@ const SESSION_ACTIONS: &[ToolAction] = &[
     action!("operation_status", OperationGet),
     action!("operation_cancel", OperationCancel),
     action!("close", SessionClose),
+    action!("force_abort", SessionForceAbort),
 ];
 const RUN_ACTIONS: &[ToolAction] = &[
     action!("continue", ExecutionControl),

@@ -8,6 +8,12 @@ optional session ID, method, expected revision, idempotency key, and
 parameters. Mutations require the current revision and write lease.
 Stop-sensitive reads require the current `stop_id`.
 
+Session recovery authority is separate from a business write lease. The owner
+or an administrator may call `session.attempt_recovery` or
+`session.force_abort` after lease expiry or consistency loss. Forced abort
+returns `clean_shutdown=false`; it is a resource cleanup guarantee, not a
+claim that GDB detached cleanly from the target.
+
 Schema files and hashes live in [`../schemas`](../schemas). MCP is a compact
 projection over the same methods; `gdb.ai/call` exposes the canonical envelope
 without translating it into a tool action. Rust method contracts validate

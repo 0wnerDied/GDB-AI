@@ -299,15 +299,32 @@ impl Gateway {
     }
 
     pub(super) async fn session_close(&self, request: &ApiRequest) -> Result<Value> {
+        self.finish_session(request, false).await
+    }
+
+    pub(super) async fn session_force_abort(&self, request: &ApiRequest) -> Result<Value> {
+        self.finish_session(request, true).await
+    }
+
+    async fn finish_session(&self, request: &ApiRequest, forced: bool) -> Result<Value> {
         let id = required_session(request)?.to_owned();
         let entry = self.entry(&id).await?;
-        if let Err(error) = entry.handle.close().await {
-            // 2026-08-28: A failed worker closes its request channel, so close
-            // must still release registry and lease state after GDB death.
-            if entry.handle.state().lifecycle != crate::domain::SessionLifecycle::Failed {
-                return Err(error);
+        let close_error = match entry.handle.close().await {
+            Ok(()) => None,
+            Err(error) => {
+                // 2026-08-28: A failed worker closes its request channel, so close
+                // must still release registry and lease state after GDB death.
+                if !forced
+                    && entry.handle.state().lifecycle != crate::domain::SessionLifecycle::Failed
+                {
+                    return Err(error);
+                }
+                Some(error.to_string())
             }
-        }
+        };
+        // 2026-08-29: An expired business lease could strand a failed worker.
+        // Forced termination always drops live registry and lease ownership
+        // after the control lane has attempted GDB process-group shutdown.
         let state = entry.handle.state();
         let output_evidence = entry.handle.inferior_output_evidence();
         self.store.delete_lease(entry.handle.id())?;
@@ -318,6 +335,8 @@ impl Gateway {
         }
         Ok(json!({
             "closed": true,
+            "clean_shutdown": !forced && close_error.is_none(),
+            "termination_warning": close_error,
             "state": state,
             "inferior_output_evidence": output_evidence
         }))

@@ -44,3 +44,7 @@ const fakeClient = {
 const session = await Session.create(fakeClient);
 await session.renew();
 assert.equal(calls.at(-1).options.expectedRevision, undefined);
+await session.forceAbort();
+assert.equal(calls.at(-1).method, "session.force_abort");
+assert.deepEqual(calls.at(-1).parameters, {});
+assert.equal(calls.at(-1).options.expectedRevision, undefined);

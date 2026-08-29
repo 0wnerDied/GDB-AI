@@ -36,6 +36,7 @@ impl Gateway {
             CanonicalMethod::SessionGet => self.session_get(request).await,
             CanonicalMethod::SessionList => self.session_list(caller).await,
             CanonicalMethod::SessionClose => self.session_close(request).await,
+            CanonicalMethod::SessionForceAbort => self.session_force_abort(request).await,
             CanonicalMethod::SessionAcquireWriteLease => {
                 self.session_acquire_write_lease(request, caller).await
             }
