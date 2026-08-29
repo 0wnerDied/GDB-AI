@@ -141,7 +141,10 @@ async fn remote_disconnect_invalidates_live_target_state() {
     let _server_guard = GDBSERVER_TEST_LOCK.lock().await;
     let directory = tempdir().unwrap();
     let executable = directory.path().join("remote-disconnect");
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
+    // 2026-08-29: Remote inferiors do not use GDB's local PTY, so the old
+    // getchar fixture could consume CI stdin EOF and exit before disconnect.
+    // Keep this target alive until the test kills gdbserver.
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/attach.c");
     assert!(
         Command::new("cc")
             .args(["-g", "-O0"])
