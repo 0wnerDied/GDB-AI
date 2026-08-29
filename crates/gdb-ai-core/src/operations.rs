@@ -179,6 +179,8 @@ impl Gateway {
         // startup is rare, so serialize its reservation and insertion.
         // ponytail: shard reservations only if startup throughput matters.
         let _creation = self.session_creation.lock().await;
+        let live_sessions = self.sessions.read().await.keys().cloned().collect();
+        self.maintain_storage(&live_sessions)?;
         if self.sessions.read().await.len() >= self.config.server.max_sessions {
             return Err(Error::new(ErrorCode::Conflict, "maximum sessions reached"));
         }
@@ -452,6 +454,10 @@ impl Gateway {
         let output_evidence = entry.handle.inferior_output_evidence();
         self.store.delete_lease(entry.handle.id())?;
         self.sessions.write().await.remove(&id);
+        let live_sessions = self.sessions.read().await.keys().cloned().collect();
+        if let Err(error) = self.maintain_storage(&live_sessions) {
+            tracing::warn!(%error, "closed session retention failed");
+        }
         Ok(json!({
             "closed": true,
             "state": state,

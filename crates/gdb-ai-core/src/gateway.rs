@@ -1,7 +1,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, atomic::AtomicU64},
 };
 use tokio::sync::{Mutex, RwLock};
@@ -12,7 +12,7 @@ use crate::{
     config::Config,
     domain::{Address, SessionState, TargetOrigin, WriteLease},
     metrics::Metrics,
-    persistence::{ArtifactLimits, StorageLock, Store},
+    persistence::{ArtifactLimits, StorageLock, Store, prune_retained_sessions},
     policy::{Effect, Profile, effect_for_method},
     protocol::{API_VERSION, ApiRequest, ApiResponse},
     session::SessionHandle,
@@ -68,7 +68,7 @@ impl Gateway {
         let store = Arc::new(Store::open(&config.persistence.sqlite)?);
         let artifacts = ArtifactStore::new(&config.artifacts.path)?;
         let metrics = Arc::new(Metrics::default());
-        Ok(Self {
+        let gateway = Self {
             config: Arc::new(config),
             store,
             artifacts,
@@ -79,7 +79,9 @@ impl Gateway {
             rates: Mutex::new(BTreeMap::new()),
             session_creation: Mutex::new(()),
             _storage_lock: storage_lock,
-        })
+        };
+        gateway.maintain_storage(&BTreeSet::new())?;
+        Ok(gateway)
     }
 
     pub async fn dispatch(&self, request: ApiRequest, caller: &Caller) -> ApiResponse {
@@ -678,6 +680,25 @@ impl Gateway {
         for entry in sessions.into_values() {
             let _ = entry.handle.close().await;
         }
+    }
+
+    pub(crate) fn maintain_storage(&self, live_sessions: &BTreeSet<String>) -> Result<()> {
+        // 2026-08-29: Per-session journal limits did not bound the number of
+        // retained session directories after daemon restarts. Apply the same
+        // age/count policy at startup and normal lifecycle boundaries.
+        let (sessions, _) = prune_retained_sessions(
+            &self.store,
+            &self.artifacts,
+            &self.config.persistence.sessions,
+            now_unix_ms().min(i64::MAX as u64) as i64,
+            self.config.storage.closed_session_retention_ms,
+            self.config.storage.max_closed_sessions,
+            live_sessions,
+        )?;
+        if sessions > 0 {
+            self.store.checkpoint_wal()?;
+        }
+        Ok(())
     }
 
     async fn entry_for_request(&self, request: &ApiRequest) -> Option<Arc<SessionEntry>> {

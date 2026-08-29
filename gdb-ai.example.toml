@@ -23,6 +23,10 @@ durability = "performance"
 evidence = "ephemeral_ring" # ephemeral_ring, bounded_spool, or artifact
 max_bytes = 8388608
 
+[storage]
+max_closed_sessions = 256
+closed_session_retention_ms = 604800000
+
 [limits]
 mi_record_bytes = 8388608
 mi_depth = 128

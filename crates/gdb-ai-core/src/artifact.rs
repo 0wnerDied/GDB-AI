@@ -252,6 +252,29 @@ impl ArtifactStore {
             .remove(digest);
         Ok(())
     }
+
+    pub fn remove_if_exists(&self, uri: &str) -> Result<bool> {
+        let digest = artifact_digest(uri)?;
+        let path = self.root.join("sha256").join(digest);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                std::fs::remove_file(path)?;
+                self.verified
+                    .lock()
+                    .map_err(|_| {
+                        Error::new(ErrorCode::Internal, "artifact verification cache poisoned")
+                    })?
+                    .remove(digest);
+                Ok(true)
+            }
+            Ok(_) => Err(Error::new(
+                ErrorCode::Internal,
+                "artifact path is not a regular file",
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 fn artifact_digest(uri: &str) -> Result<&str> {

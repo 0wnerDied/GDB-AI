@@ -5,7 +5,7 @@ use gdb_ai_core::{
     Error, ErrorCode, Result,
     artifact::{ArtifactFile, ArtifactStore},
     config::Config,
-    persistence::{StorageLock, Store, StoredArtifact},
+    persistence::{StorageLock, Store, StoredArtifact, prune_retained_sessions},
 };
 use serde_json::{Value, json};
 
@@ -70,10 +70,9 @@ pub fn run(config: Config, command: StorageCommand) -> Result<()> {
     let artifacts = ArtifactStore::new(&config.artifacts.path)?;
     match command {
         StorageCommand::Status => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&scan(&store, &artifacts, false)?.json())?
-            );
+            let mut report = scan(&store, &artifacts, false)?.json();
+            report["retained_sessions"] = json!(store.list_sessions()?.len());
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         StorageCommand::Verify => {
             let report = scan(&store, &artifacts, true)?;
@@ -87,10 +86,27 @@ pub fn run(config: Config, command: StorageCommand) -> Result<()> {
         }
         StorageCommand::Gc { execute } => {
             let before = scan(&store, &artifacts, false)?;
-            let removed = if execute {
-                collect_garbage(&store, &artifacts, &before)?
+            let session_candidates = store.retention_candidates(
+                now_unix_ms(),
+                config.storage.closed_session_retention_ms,
+                config.storage.max_closed_sessions,
+                &BTreeSet::new(),
+            )?;
+            let (removed_sessions, removed_session_artifacts, removed_orphans) = if execute {
+                let (sessions, session_artifacts) = prune_retained_sessions(
+                    &store,
+                    &artifacts,
+                    &config.persistence.sessions,
+                    now_unix_ms(),
+                    config.storage.closed_session_retention_ms,
+                    config.storage.max_closed_sessions,
+                    &BTreeSet::new(),
+                )?;
+                let refreshed = scan(&store, &artifacts, false)?;
+                let orphans = collect_garbage(&store, &artifacts, &refreshed)?;
+                (sessions, session_artifacts, orphans)
             } else {
-                0
+                (0, 0, 0)
             };
             let after = execute
                 .then(|| scan(&store, &artifacts, false))
@@ -99,8 +115,13 @@ pub fn run(config: Config, command: StorageCommand) -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "executed": execute,
-                    "removed": removed,
+                    "removed": {
+                        "sessions": removed_sessions,
+                        "session_artifacts": removed_session_artifacts,
+                        "orphan_artifacts": removed_orphans,
+                    },
                     "planned": {
+                        "sessions": session_candidates,
                         "untracked_files": before.untracked_files,
                         "unowned_artifacts": before.unowned_artifacts,
                     },
@@ -110,6 +131,14 @@ pub fn run(config: Config, command: StorageCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::UNIX_EPOCH
+        .elapsed()
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }
 
 fn scan(store: &Store, artifacts: &ArtifactStore, verify: bool) -> Result<StorageScan> {

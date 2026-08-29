@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::{File, OpenOptions},
     os::fd::AsRawFd,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -222,6 +223,98 @@ impl Store {
                 serde_json::from_str(&json).map_err(Into::into)
             })
             .collect()
+        })
+    }
+
+    pub fn retention_candidates(
+        &self,
+        now_unix_ms: i64,
+        retention_ms: u64,
+        maximum: usize,
+        live_sessions: &BTreeSet<String>,
+    ) -> Result<Vec<SessionId>> {
+        let mut historical = self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare("SELECT id, updated_unix_ms FROM sessions ORDER BY updated_unix_ms DESC")
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(sql_error)?;
+            rows.map(|row| row.map_err(sql_error))
+                .collect::<Result<Vec<_>>>()
+        })?;
+        historical.retain(|(id, _)| !live_sessions.contains(id));
+        let cutoff = now_unix_ms.saturating_sub(retention_ms.min(i64::MAX as u64) as i64);
+        historical
+            .into_iter()
+            .enumerate()
+            .filter(|(index, (_, updated))| *index >= maximum || *updated < cutoff)
+            .map(|(_, (id, _))| SessionId::parse(id))
+            .collect()
+    }
+
+    pub fn prune_session(
+        &self,
+        artifacts: &ArtifactStore,
+        session_id: &SessionId,
+    ) -> Result<usize> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM artifact_owners WHERE session_id=?1",
+                    params![session_id.0],
+                )
+                .map_err(sql_error)?;
+            let orphaned = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT uri FROM artifacts
+                         WHERE session_id IS NOT NULL
+                           AND NOT EXISTS (
+                             SELECT 1 FROM artifact_owners
+                             WHERE artifact_owners.uri=artifacts.uri
+                           )
+                         ORDER BY uri",
+                    )
+                    .map_err(sql_error)?;
+                let rows = statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(sql_error)?;
+                rows.map(|row| row.map_err(sql_error))
+                    .collect::<Result<Vec<_>>>()?
+            };
+            for table in [
+                "leases",
+                "tracking",
+                "snapshots",
+                "operations",
+                "session_owners",
+            ] {
+                transaction
+                    .execute(
+                        &format!("DELETE FROM {table} WHERE session_id=?1"),
+                        params![session_id.0],
+                    )
+                    .map_err(sql_error)?;
+            }
+            transaction
+                .execute("DELETE FROM sessions WHERE id=?1", params![session_id.0])
+                .map_err(sql_error)?;
+            for uri in &orphaned {
+                transaction
+                    .execute("DELETE FROM artifacts WHERE uri=?1", params![uri])
+                    .map_err(sql_error)?;
+            }
+            transaction.commit().map_err(sql_error)?;
+            // The connection mutex remains held until this closure returns,
+            // so another registration cannot recreate metadata before unlink.
+            for uri in &orphaned {
+                artifacts.remove_if_exists(uri)?;
+            }
+            Ok(orphaned.len())
         })
     }
 
@@ -865,6 +958,60 @@ impl StorageLock {
     }
 }
 
+pub fn prune_retained_sessions(
+    store: &Store,
+    artifacts: &ArtifactStore,
+    session_root: &Path,
+    now_unix_ms: i64,
+    retention_ms: u64,
+    maximum: usize,
+    live_sessions: &BTreeSet<String>,
+) -> Result<(usize, usize)> {
+    let candidates =
+        store.retention_candidates(now_unix_ms, retention_ms, maximum, live_sessions)?;
+    let mut removed_artifacts = 0;
+    for session_id in &candidates {
+        removed_artifacts += store.prune_session(artifacts, session_id)?;
+        remove_session_directory(session_root, session_id)?;
+    }
+    Ok((candidates.len(), removed_artifacts))
+}
+
+fn remove_session_directory(root: &Path, session_id: &SessionId) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_dir() {
+        return Err(Error::new(
+            ErrorCode::Internal,
+            "session storage root is not a directory",
+        ));
+    }
+    let root = std::fs::canonicalize(root)?;
+    let candidate = root.join(&session_id.0);
+    match std::fs::symlink_metadata(&candidate) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            let canonical = std::fs::canonicalize(&candidate)?;
+            if canonical.parent() != Some(root.as_path()) {
+                return Err(Error::new(
+                    ErrorCode::Internal,
+                    "session directory escapes the storage root",
+                ));
+            }
+            std::fs::remove_dir_all(canonical)?;
+            Ok(true)
+        }
+        Ok(_) => Err(Error::new(
+            ErrorCode::Internal,
+            "session storage entry is not a directory",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn artifact_sensitivity_rank(sensitivity: &str) -> Option<u8> {
     Some(match sensitivity {
         "public" => 0,
@@ -1082,6 +1229,73 @@ mod tests {
         assert!(StorageLock::acquire(&path).is_err());
         drop(first);
         StorageLock::acquire(path).unwrap();
+    }
+
+    #[test]
+    fn retention_prunes_only_non_live_session_ownership() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(directory.path().join("state.sqlite")).unwrap();
+        let artifacts = ArtifactStore::new(directory.path().join("artifacts")).unwrap();
+        let sessions = directory.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let live = SessionId("sess_live".into());
+        let stale = SessionId("sess_stale".into());
+        for session in [&live, &stale] {
+            store
+                .upsert_session(
+                    &SessionState::creating(session.clone()),
+                    Profile::DebugControl,
+                )
+                .unwrap();
+            store.set_session_owner(session, "owner").unwrap();
+            std::fs::create_dir(sessions.join(&session.0)).unwrap();
+        }
+        let uri = store
+            .put_artifact(
+                &artifacts,
+                b"shared",
+                Some(&live),
+                "public",
+                UNLIMITED_ARTIFACTS,
+            )
+            .unwrap();
+        store
+            .put_artifact(
+                &artifacts,
+                b"shared",
+                Some(&stale),
+                "public",
+                UNLIMITED_ARTIFACTS,
+            )
+            .unwrap();
+        let excluded = BTreeSet::from([live.0.clone()]);
+        let future = unix_ms().saturating_add(10_000);
+        assert_eq!(
+            prune_retained_sessions(&store, &artifacts, &sessions, future, 1, 10, &excluded)
+                .unwrap(),
+            (1, 0)
+        );
+        assert!(sessions.join(&live.0).is_dir());
+        assert!(!sessions.join(&stale.0).exists());
+        assert_eq!(
+            store.artifact_sessions(&uri).unwrap(),
+            std::slice::from_ref(&live.0)
+        );
+        assert_eq!(
+            prune_retained_sessions(
+                &store,
+                &artifacts,
+                &sessions,
+                future,
+                1,
+                10,
+                &BTreeSet::new(),
+            )
+            .unwrap(),
+            (1, 1)
+        );
+        assert!(!sessions.join(&live.0).exists());
+        assert!(artifacts.verify(&uri).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

@@ -34,3 +34,10 @@ dry-run. `storage gc --execute` removes only valid digest files absent from the
 database and session artifacts with no remaining owner, then checkpoints the
 SQLite WAL. Stop the daemon first; the shared lock rejects maintenance while
 the data directory is live.
+
+Historical sessions are retained for at most `storage.max_closed_sessions`
+and `storage.closed_session_retention_ms`. A session not owned by the current
+daemon process is historical, including state left by a previous crash.
+Retention runs at daemon startup and session create/close boundaries; it
+removes the exact session directory, stop-scoped rows, leases, operations, and
+artifact ownership. Shared content remains until its final owner expires.

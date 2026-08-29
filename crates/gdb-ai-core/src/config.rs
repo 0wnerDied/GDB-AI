@@ -12,6 +12,7 @@ pub struct Config {
     pub limits: Limits,
     pub journal: JournalConfig,
     pub output: OutputConfig,
+    pub storage: StorageConfig,
     pub artifacts: ArtifactConfig,
     pub persistence: PersistenceConfig,
     pub security: SecurityConfig,
@@ -28,6 +29,7 @@ impl Default for Config {
             limits: Limits::default(),
             journal: JournalConfig::default(),
             output: OutputConfig::default(),
+            storage: StorageConfig::default(),
             artifacts: ArtifactConfig {
                 path: data.join("artifacts"),
             },
@@ -97,7 +99,8 @@ impl Config {
             && self.server.wait_timeout_ms > 0
             && self.server.wait_timeout_ms <= 300_000
             && self.server.write_lease_ms > 0
-            && self.server.http_session_idle_ms >= 1_000;
+            && self.server.http_session_idle_ms >= 1_000
+            && self.storage.closed_session_retention_ms >= 1_000;
         let limits_valid = self.server.max_sessions > 0
             && self.server.max_sessions <= 1_024
             && self.server.max_http_sessions > 0
@@ -122,6 +125,7 @@ impl Config {
             && self.limits.process_memory_bytes > 0
             && self.limits.process_cpu_seconds > 0
             && self.limits.process_open_files >= 32
+            && self.storage.max_closed_sessions > 0
             && self.output.max_bytes > 0
             && self.output.max_bytes <= self.limits.session_artifact_bytes;
         if !timeouts_valid || !limits_valid || self.security.workspace_roots.is_empty() {
@@ -150,6 +154,22 @@ impl Config {
             ));
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorageConfig {
+    pub max_closed_sessions: usize,
+    pub closed_session_retention_ms: u64,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            max_closed_sessions: 256,
+            closed_session_retention_ms: 7 * 24 * 60 * 60 * 1_000,
+        }
     }
 }
 

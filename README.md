@@ -217,7 +217,8 @@ Storage GC is dry-run unless `--execute` is present. Status and GC never hash
 all content; `storage verify` performs that explicit integrity scan. Daemon
 and maintenance commands share one non-blocking data-directory lock, so GC
 cannot race live artifact ownership changes. Invalid unknown directory entries
-are reported and never removed automatically.
+are reported and never removed automatically. Historical sessions and their
+journals are also bounded by configured age and count retention.
 
 ## Embedding in binutils-gdb
 
