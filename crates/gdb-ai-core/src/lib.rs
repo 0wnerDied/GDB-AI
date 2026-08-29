@@ -8,7 +8,6 @@ pub mod gateway;
 pub mod journal;
 pub mod metrics;
 pub mod normalize;
-mod operations;
 pub mod persistence;
 pub mod policy;
 pub mod protocol;

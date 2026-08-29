@@ -18,6 +18,8 @@ use crate::{
     session::SessionHandle,
 };
 
+mod operations;
+
 #[derive(Clone, Debug)]
 pub struct Caller {
     pub identity: String,
