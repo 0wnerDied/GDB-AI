@@ -100,6 +100,8 @@ enum Command {
         raw_admin: bool,
         #[arg(long)]
         auth_token_file: Option<PathBuf>,
+        #[arg(long, requires = "http")]
+        trusted_origin: Vec<String>,
     },
     Doctor,
     Replay {
@@ -173,8 +175,9 @@ async fn run() -> Result<(), AnyError> {
             http: Some(address),
             raw_admin,
             auth_token_file,
+            trusted_origin,
             ..
-        } => serve_http(config, address, raw_admin, auth_token_file).await,
+        } => serve_http(config, address, raw_admin, auth_token_file, trusted_origin).await,
         Command::Serve { .. } => unreachable!("clap requires one transport"),
         Command::Doctor => doctor(config).await,
         Command::Replay {
@@ -773,6 +776,7 @@ struct HttpState {
     sequence: Arc<AtomicU64>,
     raw_admin: bool,
     auth_token: Option<Arc<str>>,
+    trusted_origins: Arc<[HeaderValue]>,
     max_sessions: usize,
     idle_timeout: Duration,
 }
@@ -789,14 +793,10 @@ async fn serve_http(
     address: SocketAddr,
     raw_admin: bool,
     auth_token_file: Option<PathBuf>,
+    trusted_origins: Vec<String>,
 ) -> Result<(), AnyError> {
-    if !address.ip().is_loopback() && auth_token_file.is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "non-loopback HTTP requires --auth-token-file",
-        )
-        .into());
-    }
+    validate_http_address(address)?;
+    let trusted_origins = parse_trusted_origins(&trusted_origins)?;
     let auth_token = auth_token_file
         .map(|path| -> Result<Arc<str>, AnyError> {
             let metadata = std::fs::metadata(&path)?;
@@ -832,6 +832,7 @@ async fn serve_http(
         sequence: Arc::new(AtomicU64::new(1)),
         raw_admin,
         auth_token,
+        trusted_origins,
         max_sessions,
         idle_timeout,
     };
@@ -864,6 +865,9 @@ async fn http_mcp(
     headers: HeaderMap,
     Json(message): Json<Value>,
 ) -> Response {
+    if !allow_http_origin(&state, &headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if !authorize_http(&state, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -1102,6 +1106,9 @@ fn evict_expired_http_clients(
 }
 
 async fn http_delete(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if !allow_http_origin(&state, &headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if !authorize_http(&state, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -1141,6 +1148,70 @@ fn authorize_http(state: &HttpState, headers: &HeaderMap) -> bool {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
     supplied == Some(expected.as_ref())
+}
+
+fn parse_trusted_origins(origins: &[String]) -> io::Result<Arc<[HeaderValue]>> {
+    let mut parsed = Vec::with_capacity(origins.len());
+    for origin in origins {
+        let authority = origin
+            .strip_prefix("https://")
+            .or_else(|| origin.strip_prefix("http://"))
+            .filter(|authority| {
+                !authority.is_empty()
+                    && !authority
+                        .bytes()
+                        .any(|byte| matches!(byte, b'/' | b'?' | b'#' | b'@' | b' ' | b'\t'))
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "trusted origins must be HTTP(S) origins without paths",
+                )
+            })?;
+        if authority.starts_with(':') || authority.ends_with(':') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "trusted origin authority is invalid",
+            ));
+        }
+        let value = HeaderValue::from_str(origin).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "trusted origin is not a header value",
+            )
+        })?;
+        if !parsed.contains(&value) {
+            parsed.push(value);
+        }
+    }
+    Ok(Arc::from(parsed))
+}
+
+fn validate_http_address(address: SocketAddr) -> io::Result<()> {
+    // 2026-08-29: Bearer authentication did not encrypt non-loopback HTTP or
+    // prevent direct proxy bypass. Keep plaintext listeners on loopback only.
+    if address.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "HTTP must bind to loopback; terminate remote TLS at a local proxy",
+        ))
+    }
+}
+
+fn allow_http_origin(state: &HttpState, headers: &HeaderMap) -> bool {
+    let mut supplied = headers.get_all(header::ORIGIN).iter();
+    let Some(origin) = supplied.next() else {
+        return true;
+    };
+    // 2026-08-29: Accepting arbitrary browser Origin values exposed the local
+    // MCP endpoint to DNS rebinding. Require one exact configured origin.
+    supplied.next().is_none()
+        && state
+            .trusted_origins
+            .iter()
+            .any(|allowed| allowed == origin)
 }
 
 fn json_http_response(value: Value, session_id: Option<&str>) -> Response {
@@ -2323,6 +2394,7 @@ mod tests {
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
             auth_token: Some(Arc::from("test-token")),
+            trusted_origins: parse_trusted_origins(&["https://agent.example".into()]).unwrap(),
             max_sessions: 1,
             idle_timeout: Duration::from_secs(1),
         };
@@ -2339,6 +2411,26 @@ mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer test-token"),
         );
+        let mut forbidden_headers = headers.clone();
+        forbidden_headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        let forbidden = http_mcp(
+            State(state.clone()),
+            forbidden_headers,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_VERSION,
+                    "clientInfo": {"name": "http-evil", "version": "1"}
+                }
+            })),
+        )
+        .await;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
         let initialized = http_mcp(
             State(state.clone()),
             headers.clone(),
@@ -2541,6 +2633,7 @@ mod tests {
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
             auth_token: None,
+            trusted_origins: Arc::from([]),
             max_sessions: 1,
             idle_timeout: Duration::from_secs(60),
         };
@@ -2583,6 +2676,53 @@ mod tests {
         deleted.await.unwrap();
         assert!(state.sessions.read().await.is_empty());
         gateway.shutdown().await;
+    }
+
+    #[test]
+    fn http_origin_and_binding_policy_fail_closed() {
+        assert!(validate_http_address("127.0.0.1:8080".parse().unwrap()).is_ok());
+        assert!(validate_http_address("[::1]:8080".parse().unwrap()).is_ok());
+        assert!(validate_http_address("0.0.0.0:8080".parse().unwrap()).is_err());
+        assert!(parse_trusted_origins(&["https://agent.example/path".into()]).is_err());
+
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let state = HttpState {
+            gateway: Arc::new(Gateway::new(config).unwrap()),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sequence: Arc::new(AtomicU64::new(1)),
+            raw_admin: false,
+            auth_token: None,
+            trusted_origins: parse_trusted_origins(&["https://agent.example".into()]).unwrap(),
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(60),
+        };
+        assert!(allow_http_origin(&state, &HeaderMap::new()));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://agent.example"),
+        );
+        assert!(allow_http_origin(&state, &headers));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert!(!allow_http_origin(&state, &headers));
+        headers.append(
+            header::ORIGIN,
+            HeaderValue::from_static("https://agent.example"),
+        );
+        assert!(!allow_http_origin(&state, &headers));
     }
 
     #[tokio::test]

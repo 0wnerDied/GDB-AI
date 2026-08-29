@@ -128,12 +128,14 @@ Multi-client local socket:
 target/release/gdb-ai serve --unix /run/user/1000/gdb-ai.sock
 ```
 
-Streamable HTTP is loopback-only unless a bearer-token file is supplied:
+Streamable HTTP listens only on loopback. Use a private bearer-token file and
+terminate remote TLS at a trusted same-host reverse proxy. Browser clients
+also require an exact Origin allowlist entry:
 
 ```sh
-target/release/gdb-ai serve --http 127.0.0.1:8080
-target/release/gdb-ai serve --http 0.0.0.0:8080 \
-  --auth-token-file /run/secrets/gdb-ai-token
+target/release/gdb-ai serve --http 127.0.0.1:8080 \
+  --auth-token-file /run/secrets/gdb-ai-token \
+  --trusted-origin https://agent.example
 ```
 
 HTTP endpoints are `/mcp`, `/healthz`, and `/metrics`. The same connection
