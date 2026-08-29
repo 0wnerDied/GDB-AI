@@ -1,4 +1,24 @@
-use super::*;
+use std::collections::BTreeMap;
+
+use gdb_ai_mi::{MiResult, MiValue};
+use serde_json::{Value, json};
+
+use super::{
+    context::{apply_wait, apply_wait_baseline, context_options, wait_spec},
+    reconciliation::{reconcile_breakpoints, synchronize_breakpoint},
+    request::{bool_value, required_session, string},
+};
+use crate::{
+    Error, ErrorCode, Result,
+    backend::MiCommand,
+    domain::{
+        DomainEvent, OperationId, OperationRecord, OperationStatus, SignalPolicyState, WaitBaseline,
+    },
+    gateway::{Gateway, SessionEntry},
+    normalize::breakpoint_number as inserted_breakpoint_number,
+    protocol::ApiRequest,
+    session::{CommandReply, PendingModuleBreakpoint},
+};
 
 pub(super) fn breakpoint_location(parameters: &Value) -> Result<String> {
     let location = parameters.get("location").unwrap_or(parameters);

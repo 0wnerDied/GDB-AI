@@ -1,4 +1,23 @@
-use super::*;
+use std::time::Duration;
+
+use serde_json::{Value, json};
+
+use super::{
+    encoding::first_word,
+    reconciliation::{
+        reconcile_breakpoints, reconcile_inferiors, reconcile_libraries, reconcile_threads,
+        reconciliation_command,
+    },
+    request::{required_session, string},
+};
+use crate::{
+    Error, ErrorCode, Result,
+    backend::MiCommand,
+    domain::DomainEvent,
+    gateway::{Gateway, SessionEntry},
+    policy::validate_console_command,
+    protocol::ApiRequest,
+};
 
 impl Gateway {
     pub(super) async fn raw_console(&self, request: &ApiRequest) -> Result<Value> {

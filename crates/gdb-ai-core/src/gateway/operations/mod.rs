@@ -1,33 +1,9 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-    sync::{Arc, atomic::Ordering},
-    time::{Duration, Instant},
-};
-
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use gdb_ai_mi::{MiRecord, MiResult, MiValue};
-use serde::Deserialize;
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use ulid::Ulid;
+use serde_json::Value;
 
 use crate::{
-    Error, ErrorCode, Result,
-    backend::MiCommand,
-    domain::{
-        BreakpointLocationState, DomainEvent, FrameId, FrameSummary, LeaseId, OperationId,
-        OperationRecord, OperationStatus, SessionId, SignalPolicyState, StopId, StopReason,
-        TargetOrigin, TrackingDefinition, TrackingId, ValueBinding, ValueId, WaitBaseline,
-        WriteLease,
-    },
-    gateway::{Caller, Gateway, SessionEntry, now_unix_ms, same_principal},
-    normalize::breakpoint_number as inserted_breakpoint_number,
-    persistence::Store,
-    policy::{Profile, validate_console_command},
+    Result,
+    gateway::{Caller, Gateway},
     protocol::{ApiRequest, CanonicalMethod},
-    providers::{LINUX_KERNEL_PROVIDER_VERSION, live_module_offset, mappings},
-    session::{CommandReply, OutputRing, PendingModuleBreakpoint, SessionHandle, WaitUntil},
 };
 
 mod agent;
@@ -47,17 +23,10 @@ mod reconciliation;
 mod request;
 mod values;
 
-use context::*;
-use encoding::*;
-use evaluation::{safe_evaluate_command, validate_expression};
-use execution::breakpoint_location;
-use memory::read_memory_bytes;
-use mi::*;
-use reconciliation::*;
-use request::*;
+use request::required_session;
 
 impl Gateway {
-    pub(crate) async fn execute_method(
+    pub(super) async fn execute_method(
         &self,
         request: &ApiRequest,
         caller: &Caller,

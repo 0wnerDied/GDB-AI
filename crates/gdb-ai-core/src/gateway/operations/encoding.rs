@@ -1,4 +1,7 @@
-use super::*;
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use serde_json::Value;
+
+use crate::{Error, ErrorCode, Result};
 
 pub(super) fn hex_decode(value: &str) -> Result<Vec<u8>> {
     if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {

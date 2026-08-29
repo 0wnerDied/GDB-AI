@@ -1,4 +1,14 @@
-use super::*;
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use serde_json::{Value, json};
+
+use super::{
+    encoding::input_bytes,
+    request::{required_session, unsigned},
+};
+use crate::{
+    Error, ErrorCode, Result, domain::DomainEvent, gateway::Gateway, protocol::ApiRequest,
+    session::OutputRing,
+};
 
 impl Gateway {
     pub(super) async fn io_read(&self, request: &ApiRequest) -> Result<Value> {

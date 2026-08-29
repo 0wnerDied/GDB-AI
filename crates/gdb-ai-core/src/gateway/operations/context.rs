@@ -1,4 +1,20 @@
-use super::*;
+use std::time::Duration;
+
+use serde::Deserialize;
+use serde_json::Value;
+
+use super::{
+    execution::breakpoint_location,
+    request::{string, unsigned},
+};
+use crate::{
+    Error, ErrorCode, Result,
+    backend::MiCommand,
+    domain::{StopId, WaitBaseline},
+    gateway::Gateway,
+    providers::live_module_offset,
+    session::{SessionHandle, WaitUntil},
+};
 
 impl Gateway {
     pub(super) fn workspace_path(
@@ -317,6 +333,7 @@ mod tests {
         domain::{DomainEvent, FrameId, JournaledEvent, SessionId, SessionState, StopReason},
         reducer::StateReducer,
     };
+    use serde_json::json;
 
     #[test]
     fn frame_context_encodes_its_thread_before_positional_arguments() {

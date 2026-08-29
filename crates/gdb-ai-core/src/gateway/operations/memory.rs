@@ -1,4 +1,23 @@
-use super::*;
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use gdb_ai_mi::{MiRecord, MiResult};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use super::{
+    context::require_stopped_context,
+    encoding::{hex_decode, hex_encode, input_bytes, parse_address},
+    evaluation::validate_expression,
+    mi::aggregate_items,
+    request::{bool_value, required_session, string, unsigned},
+};
+use crate::{
+    Error, ErrorCode, Result,
+    backend::MiCommand,
+    domain::{DomainEvent, TrackingDefinition, TrackingId},
+    gateway::Gateway,
+    protocol::ApiRequest,
+    session::SessionHandle,
+};
 
 fn memory_contents(record: &MiRecord) -> Result<Vec<u8>> {
     let memory = MiResult::find(record.results(), "memory").ok_or_else(|| {

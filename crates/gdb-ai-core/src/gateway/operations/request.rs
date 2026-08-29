@@ -1,4 +1,13 @@
-use super::*;
+use serde::Deserialize;
+use serde_json::Value;
+
+#[cfg(test)]
+use serde_json::json;
+
+use crate::{Error, ErrorCode, Result, protocol::ApiRequest};
+
+#[cfg(test)]
+use crate::protocol::CanonicalMethod;
 
 pub(super) fn required_session(request: &ApiRequest) -> Result<&str> {
     request
