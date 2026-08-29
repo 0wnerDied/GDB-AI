@@ -215,3 +215,93 @@ jobs:
           GDB_AI_GDB_PATH="$RUNNER_TEMP/gdb/${{ matrix.version }}/bin/gdb" \
             cargo test --locked -p gdb-ai-core --test vertical \
             local_debugging_vertical_slice -- --exact --nocapture
+
+  soak:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      GDB_AI_REQUIRE_INTEGRATION: "1"
+      GDB_AI_SOAK_CYCLES: "10000"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.88.0
+      - name: Install lifecycle prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc gdb
+      - name: Run 10,000 real GDB lifecycles
+        run: |
+          cargo test --locked -p gdb-ai-core --test soak \
+            ten_thousand_session_lifecycles -- \
+            --exact --ignored --nocapture --test-threads=1
+
+  release-bundle:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, kernel, aarch64-system, compatibility, soak]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.88.0
+      - name: Verify release tag and build identity
+        run: |
+          test "$(git cat-file -t "$GITHUB_REF")" = tag
+          source_date_epoch=$(git show -s --format=%ct "$GITHUB_SHA")
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
+          GDB_AI_BUILD_COMMIT="$GITHUB_SHA" \
+          GDB_AI_BUILD_TAG="$GITHUB_REF_NAME" \
+          GDB_AI_BUILD_DIRTY=false \
+            cargo build --locked --release -p gdb-ai
+          target/release/gdb-ai --version | tee "$RUNNER_TEMP/version.txt"
+          grep -F "tag: $GITHUB_REF_NAME" "$RUNNER_TEMP/version.txt"
+          grep -F "commit: $GITHUB_SHA" "$RUNNER_TEMP/version.txt"
+          grep -F "dirty: false" "$RUNNER_TEMP/version.txt"
+      - name: Generate deterministic archives and SBOM
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          release="$RUNNER_TEMP/release"
+          bundle="$RUNNER_TEMP/gdb-ai-$version-x86_64-unknown-linux-gnu"
+          mkdir -p "$release" "$bundle"
+          install -m755 target/release/gdb-ai "$bundle/gdb-ai"
+          install -m644 LICENSE README.md gdb-ai.example.toml "$bundle/"
+          cp -R schemas "$bundle/schemas"
+          git archive --format=tar --prefix="gdb-ai-$version/" \
+            "$GITHUB_SHA" > "$release/gdb-ai-$version-source.tar"
+          gzip -n "$release/gdb-ai-$version-source.tar"
+          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" \
+            --owner=0 --group=0 --numeric-owner \
+            -C "$RUNNER_TEMP" \
+            -cf "$release/gdb-ai-$version-x86_64-unknown-linux-gnu.tar" \
+            "gdb-ai-$version-x86_64-unknown-linux-gnu"
+          gzip -n "$release/gdb-ai-$version-x86_64-unknown-linux-gnu.tar"
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --spec-version 1.5 \
+            --describe binaries --manifest-path crates/gdb-ai/Cargo.toml \
+            --override-filename gdb-ai
+          sbom=$(find crates/gdb-ai -maxdepth 1 -name 'gdb-ai*.cdx.json' \
+            -print -quit)
+          test -n "$sbom"
+          cp "$sbom" "$release/gdb-ai-$version.cdx.json"
+          cd "$release"
+          sha256sum *.tar.gz *.cdx.json > SHA256SUMS
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661
+        with:
+          subject-path: ${{ runner.temp }}/release/*
+      - name: Upload qualified release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gdb-ai-${{ github.ref_name }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
