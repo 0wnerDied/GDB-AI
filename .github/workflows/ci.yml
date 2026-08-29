@@ -297,7 +297,9 @@ jobs:
           install -m755 \
             target/x86_64-unknown-linux-musl/release/gdb-ai \
             "$bundle/gdb-ai"
-          install -m644 LICENSE README.md gdb-ai.example.toml "$bundle/"
+          # 2026-08-29: Omit README from binary bundles because its
+          # repository-relative assets exist only in the source archive.
+          install -m644 LICENSE gdb-ai.example.toml "$bundle/"
           cp -R schemas "$bundle/schemas"
           git archive --format=tar --prefix="gdb-ai-$version/" \
             "$GITHUB_SHA" > "$release/gdb-ai-$version-source.tar"
