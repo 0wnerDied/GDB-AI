@@ -16,6 +16,9 @@ fallback_mi = "mi3"
 # python_extension = "/usr/lib/gdb-ai/gdb_ai.py"
 # python_extension_sha256 = "<64 lowercase hexadecimal digits>"
 
+[journal]
+durability = "performance"
+
 [limits]
 mi_record_bytes = 8388608
 mi_depth = 128

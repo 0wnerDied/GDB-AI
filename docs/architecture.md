@@ -7,6 +7,10 @@ before it becomes public state. Inferior input and output use a separate PTY.
 The PTY reader writes directly to its bounded ring and emits coalesced
 high-water notifications, so a slow actor cannot stop target-output draining.
 
+Journal durability is explicit. `performance` batches buffered flushes;
+`durable` additionally calls `sync_data` at API, state, snapshot, periodic
+flush, and close boundaries. Both modes preserve journal-before-reducer order.
+
 The production boundary is `Agent -> MCP/JSON-RPC -> Gateway -> SessionWorker
 -> DebugBackend -> GDB`. The current backend is GDB/MI; its command strings and
 record classes do not appear in the canonical API.

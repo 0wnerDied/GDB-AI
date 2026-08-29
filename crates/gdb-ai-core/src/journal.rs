@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::{
     Error, ErrorCode, Result,
+    config::JournalDurability,
     domain::{DomainEvent, JournaledEvent},
 };
 
@@ -41,10 +42,19 @@ pub struct Journal {
     bytes_written: usize,
     max_bytes: usize,
     unflushed_records: usize,
+    durability: JournalDurability,
 }
 
 impl Journal {
     pub fn create(path: impl AsRef<Path>, max_bytes: usize) -> Result<Self> {
+        Self::create_with_durability(path, max_bytes, JournalDurability::Performance)
+    }
+
+    pub fn create_with_durability(
+        path: impl AsRef<Path>,
+        max_bytes: usize,
+        durability: JournalDurability,
+    ) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -59,6 +69,7 @@ impl Journal {
             bytes_written: 0,
             max_bytes,
             unflushed_records: 0,
+            durability,
         })
     }
 
@@ -70,7 +81,8 @@ impl Journal {
     }
 
     pub fn append_api(&mut self, request: &Value) -> Result<u64> {
-        self.append("api.request", request.clone())
+        let sequence = self.append("api.request", request.clone())?;
+        self.flush_boundary(sequence)
     }
 
     pub fn append_mi_input(&mut self, token: u64, raw: &[u8]) -> Result<u64> {
@@ -124,17 +136,19 @@ impl Journal {
     }
 
     pub fn append_state(&mut self, revision: u64, state: &Value) -> Result<u64> {
-        self.append(
+        let sequence = self.append(
             "state.revision",
             serde_json::json!({ "revision": revision, "state": state }),
-        )
+        )?;
+        self.flush_boundary(sequence)
     }
 
     pub fn append_snapshot(&mut self, snapshot_id: &str, snapshot: &Value) -> Result<u64> {
-        self.append(
+        let sequence = self.append(
             "snapshot.result",
             serde_json::json!({ "snapshot_id": snapshot_id, "snapshot": snapshot }),
-        )
+        )?;
+        self.flush_boundary(sequence)
     }
 
     fn append(&mut self, kind: &str, data: Value) -> Result<u64> {
@@ -169,8 +183,20 @@ impl Journal {
             return Ok(());
         }
         self.writer.flush()?;
+        // 2026-08-29: A buffered flush only made records visible to the OS;
+        // it did not satisfy the documented crash-durable evidence mode.
+        if self.durability == JournalDurability::Durable {
+            self.writer.get_ref().sync_data()?;
+        }
         self.unflushed_records = 0;
         Ok(())
+    }
+
+    fn flush_boundary(&mut self, sequence: u64) -> Result<u64> {
+        if self.durability == JournalDurability::Durable {
+            self.flush()?;
+        }
+        Ok(sequence)
     }
 }
 
@@ -231,5 +257,23 @@ mod tests {
         assert_eq!(entry.data["length"], 65_536);
         assert_eq!(entry.data["dropped_bytes"], 128);
         assert!(entry.data.get("raw_base64").is_none());
+    }
+
+    #[test]
+    fn durable_mode_flushes_evidence_boundaries() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let mut journal =
+            Journal::create_with_durability(&path, 4096, JournalDurability::Durable).unwrap();
+
+        journal
+            .append_api(&serde_json::json!({"method": "test"}))
+            .unwrap();
+        assert_eq!(journal.unflushed_records, 0);
+        journal
+            .append_state(1, &serde_json::json!({"revision": 1}))
+            .unwrap();
+        assert_eq!(journal.unflushed_records, 0);
+        assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 2);
     }
 }

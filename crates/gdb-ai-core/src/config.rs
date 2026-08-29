@@ -10,6 +10,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub gdb: GdbConfig,
     pub limits: Limits,
+    pub journal: JournalConfig,
     pub artifacts: ArtifactConfig,
     pub persistence: PersistenceConfig,
     pub security: SecurityConfig,
@@ -24,6 +25,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             gdb: GdbConfig::default(),
             limits: Limits::default(),
+            journal: JournalConfig::default(),
             artifacts: ArtifactConfig {
                 path: data.join("artifacts"),
             },
@@ -34,6 +36,20 @@ impl Default for Config {
             security: SecurityConfig::default(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalDurability {
+    #[default]
+    Performance,
+    Durable,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JournalConfig {
+    pub durability: JournalDurability,
 }
 
 impl Config {
@@ -263,5 +279,16 @@ impl ServerConfig {
 
     pub fn wait_timeout(&self) -> Duration {
         Duration::from_millis(self.wait_timeout_ms.max(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_explicit_journal_durability() {
+        let config: Config = toml::from_str("[journal]\ndurability = \"durable\"\n").unwrap();
+        assert_eq!(config.journal.durability, JournalDurability::Durable);
     }
 }

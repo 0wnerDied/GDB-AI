@@ -158,7 +158,11 @@ impl SessionHandle {
         // relative persistence configuration previously made startup fail.
         let session_dir = std::fs::canonicalize(session_dir)?;
         let journal_path = session_dir.join("journal.jsonl");
-        let mut journal = Journal::create(&journal_path, config.limits.journal_bytes)?;
+        let mut journal = Journal::create_with_durability(
+            &journal_path,
+            config.limits.journal_bytes,
+            config.journal.durability,
+        )?;
         journal.append_session_created(&id.0)?;
         let initial_state = SessionState::creating(id.clone());
         let (state_sender, state) = watch::channel(initial_state.clone());
