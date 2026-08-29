@@ -7,11 +7,11 @@ unknown state-changing event taints consistency instead of being guessed.
 
 ## Verified on 2026-08-29
 
-- Required CI
-  [run 33225096633](https://github.com/0wnerDied/GDB-AI/actions/runs/33225096633)
-  passed at functional baseline `4195050`.
+- The compatibility jobs in CI
+  [run 33240437655](https://github.com/0wnerDied/GDB-AI/actions/runs/33240437655)
+  passed at release-audit baseline `c01fc1a`.
 - The matrix built checksum-pinned GDB 9.2, 10.2, 11.2, and 12.1 for MI3 and
-  GDB 13.2, 14.2, 15.2, 16.3, and 17.1 for MI4. Every version passed the same
+  GDB 13.2, 14.2, 15.2, 16.3, and 17.2 for MI4. Every version passed the same
   local-launch vertical test.
 - The full locked workspace passed native launch, attach, core, gdbserver,
   raw reconciliation, tracked state, Agent operations, public session
