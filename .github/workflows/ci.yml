@@ -266,7 +266,12 @@ jobs:
           sudo apt-get install -y file musl-tools
       - name: Verify release tag and build identity
         run: |
-          test "$(git cat-file -t "$GITHUB_REF")" = tag
+          # 2026-08-29: checkout flattens the local tag ref to GITHUB_SHA;
+          # verify the fetched remote tag object and its target instead.
+          tag_object=$(git ls-remote --exit-code origin "$GITHUB_REF" | \
+            awk 'NR == 1 { print $1 }')
+          test "$(git cat-file -t "$tag_object")" = tag
+          test "$(git rev-parse "${tag_object}^{}")" = "$GITHUB_SHA"
           source_date_epoch=$(git show -s --format=%ct "$GITHUB_SHA")
           echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
           # 2026-08-29: GNU builds inherited the runner's glibc requirement;
