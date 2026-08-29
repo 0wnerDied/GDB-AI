@@ -745,18 +745,14 @@ impl Gateway {
         bytes: &[u8],
         sensitivity: &str,
     ) -> Result<String> {
-        if let Some(session_id) = session_id {
-            let used = self.store.artifact_bytes(session_id)?;
-            if used.saturating_add(bytes.len()) > self.config.limits.session_artifact_bytes {
-                return Err(Error::new(
-                    ErrorCode::OutputLimit,
-                    "session artifact quota exceeded",
-                ));
-            }
-        }
-        let uri = self.artifacts.put(bytes)?;
-        self.store
-            .register_artifact(&uri, session_id, bytes.len(), sensitivity)?;
+        let uri = self.store.put_artifact(
+            &self.artifacts,
+            bytes,
+            session_id,
+            sensitivity,
+            self.config.limits.session_artifact_bytes,
+            self.config.limits.total_artifact_bytes,
+        )?;
         self.metrics.artifact_written(bytes.len());
         Ok(uri)
     }

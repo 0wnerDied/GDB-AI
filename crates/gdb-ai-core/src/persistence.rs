@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::{
     Error, ErrorCode, Result,
+    artifact::ArtifactStore,
     domain::{OperationRecord, SessionId, SessionState, TrackingDefinition, WriteLease},
     policy::{Effect, Profile},
     protocol::ApiResponse,
@@ -390,34 +391,95 @@ impl Store {
             .transpose()
     }
 
-    pub fn register_artifact(
+    pub fn put_artifact(
         &self,
-        uri: &str,
+        artifacts: &ArtifactStore,
+        bytes: &[u8],
         session_id: Option<&SessionId>,
-        size: usize,
         sensitivity: &str,
-    ) -> Result<()> {
+        session_limit: usize,
+        total_limit: usize,
+    ) -> Result<String> {
         let incoming_rank = artifact_sensitivity_rank(sensitivity).ok_or_else(|| {
             Error::new(
                 ErrorCode::InvalidArgument,
                 format!("unknown artifact sensitivity {sensitivity}"),
             )
         })?;
+        let uri = ArtifactStore::uri(bytes);
         self.with_connection(|connection| {
             let transaction = connection.transaction().map_err(sql_error)?;
             let existing = transaction
                 .query_row(
-                    "SELECT sensitivity FROM artifacts WHERE uri=?1",
-                    params![uri],
-                    |row| row.get::<_, String>(0),
+                    "SELECT size, sensitivity FROM artifacts WHERE uri=?1",
+                    params![&uri],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()
                 .map_err(sql_error)?;
+            if let Some((size, _)) = &existing
+                && *size != bytes.len() as i64
+            {
+                return Err(Error::new(
+                    ErrorCode::Internal,
+                    "artifact metadata size does not match its digest content",
+                ));
+            }
+            let already_owned = match session_id {
+                Some(session_id) => transaction
+                    .query_row(
+                        "SELECT 1 FROM artifact_owners WHERE uri=?1 AND session_id=?2",
+                        params![&uri, session_id.0],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map_err(sql_error)?
+                    .is_some(),
+                None => false,
+            };
+            if let Some(session_id) = session_id
+                && !already_owned
+            {
+                let used = transaction
+                    .query_row(
+                        "SELECT COALESCE(SUM(artifacts.size), 0)
+                         FROM artifacts
+                         JOIN artifact_owners ON artifact_owners.uri=artifacts.uri
+                         WHERE artifact_owners.session_id=?1",
+                        params![session_id.0],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(sql_error)?;
+                if (used.max(0) as usize).saturating_add(bytes.len()) > session_limit {
+                    return Err(Error::new(
+                        ErrorCode::OutputLimit,
+                        "session artifact quota exceeded",
+                    ));
+                }
+            }
+            if existing.is_none() {
+                let used = transaction
+                    .query_row("SELECT COALESCE(SUM(size), 0) FROM artifacts", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(sql_error)?;
+                // 2026-08-29: Per-session limits allowed many sessions to
+                // exhaust the shared artifact filesystem. Reserve global
+                // capacity in the serialized metadata transaction first.
+                if (used.max(0) as usize).saturating_add(bytes.len()) > total_limit {
+                    return Err(Error::new(
+                        ErrorCode::OutputLimit,
+                        "global artifact quota exceeded",
+                    ));
+                }
+            }
+            artifacts.put(bytes)?;
             // 2026-08-29: A later registration unconditionally replaced the
             // sensitivity of a shared digest and could downgrade secret target
             // evidence to a public label. Global labels only move upward.
             let sensitivity = existing
-                .as_deref()
+                .as_ref()
+                .map(|(_, sensitivity)| sensitivity.as_str())
                 .filter(|existing| {
                     artifact_sensitivity_rank(existing).unwrap_or(u8::MAX) >= incoming_rank
                 })
@@ -430,9 +492,9 @@ impl Store {
                  ON CONFLICT(uri) DO UPDATE SET
                    sensitivity=excluded.sensitivity",
                     params![
-                        uri,
+                        &uri,
                         session_id.map(|session_id| session_id.0.as_str()),
-                        size,
+                        bytes.len(),
                         sensitivity,
                         unix_ms()
                     ],
@@ -443,12 +505,12 @@ impl Store {
                     .execute(
                         "INSERT OR IGNORE INTO artifact_owners (uri, session_id)
                      VALUES (?1, ?2)",
-                        params![uri, session_id.0],
+                        params![&uri, session_id.0],
                     )
                     .map_err(sql_error)?;
             }
             transaction.commit().map_err(sql_error)?;
-            Ok(())
+            Ok(uri)
         })
     }
 
@@ -496,6 +558,17 @@ impl Store {
                     params![session_id.0],
                     |row| row.get::<_, i64>(0),
                 )
+                .map_err(sql_error)
+        })?;
+        Ok(total.max(0) as usize)
+    }
+
+    pub fn total_artifact_bytes(&self) -> Result<usize> {
+        let total = self.with_connection(|connection| {
+            connection
+                .query_row("SELECT COALESCE(SUM(size), 0) FROM artifacts", [], |row| {
+                    row.get::<_, i64>(0)
+                })
                 .map_err(sql_error)
         })?;
         Ok(total.max(0) as usize)
@@ -722,54 +795,87 @@ mod tests {
     fn content_addressed_artifacts_retain_every_session_owner() {
         let directory = tempdir().unwrap();
         let store = Store::open(directory.path().join("state.sqlite")).unwrap();
+        let artifacts = ArtifactStore::new(directory.path().join("artifacts")).unwrap();
         let first = SessionId("sess_first".into());
         let second = SessionId("sess_second".into());
-        store
-            .register_artifact(
-                "gdbai://artifact/sha256:test",
+        let uri = store
+            .put_artifact(
+                &artifacts,
+                b"shared!",
                 Some(&first),
-                7,
                 "target-memory",
+                usize::MAX,
+                usize::MAX,
             )
             .unwrap();
         store
-            .register_artifact("gdbai://artifact/sha256:test", Some(&second), 7, "public")
+            .put_artifact(
+                &artifacts,
+                b"shared!",
+                Some(&second),
+                "public",
+                usize::MAX,
+                usize::MAX,
+            )
             .unwrap();
         assert_eq!(
-            store
-                .artifact_sessions("gdbai://artifact/sha256:test")
-                .unwrap(),
+            store.artifact_sessions(&uri).unwrap(),
             vec!["sess_first", "sess_second"]
         );
         assert_eq!(store.artifact_bytes(&first).unwrap(), 7);
         assert_eq!(store.artifact_bytes(&second).unwrap(), 7);
         assert_eq!(
-            store
-                .artifact("gdbai://artifact/sha256:test")
-                .unwrap()
-                .unwrap()
-                .sensitivity,
+            store.artifact(&uri).unwrap().unwrap().sensitivity,
             "target-memory"
         );
         store
-            .register_artifact("gdbai://artifact/sha256:upgrade", None, 1, "public")
+            .put_artifact(&artifacts, b"u", None, "public", usize::MAX, usize::MAX)
             .unwrap();
-        store
-            .register_artifact("gdbai://artifact/sha256:upgrade", None, 1, "secret")
+        let upgrade = store
+            .put_artifact(&artifacts, b"u", None, "secret", usize::MAX, usize::MAX)
             .unwrap();
         assert_eq!(
-            store
-                .artifact("gdbai://artifact/sha256:upgrade")
-                .unwrap()
-                .unwrap()
-                .sensitivity,
+            store.artifact(&upgrade).unwrap().unwrap().sensitivity,
             "secret"
         );
         assert!(
             store
-                .register_artifact("gdbai://artifact/sha256:other", None, 1, "unknown")
+                .put_artifact(
+                    &artifacts,
+                    b"other",
+                    None,
+                    "unknown",
+                    usize::MAX,
+                    usize::MAX,
+                )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn artifact_quotas_are_reserved_before_writing() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(directory.path().join("state.sqlite")).unwrap();
+        let artifacts = ArtifactStore::new(directory.path().join("artifacts")).unwrap();
+        let first = SessionId("sess_first".into());
+        let second = SessionId("sess_second".into());
+        store
+            .put_artifact(&artifacts, b"1234", Some(&first), "public", 4, 4)
+            .unwrap();
+        store
+            .put_artifact(&artifacts, b"1234", Some(&second), "public", 4, 4)
+            .unwrap();
+        assert_eq!(store.total_artifact_bytes().unwrap(), 4);
+        let global = store
+            .put_artifact(&artifacts, b"g", None, "public", 4, 4)
+            .unwrap_err();
+        assert_eq!(global.code, ErrorCode::OutputLimit);
+        let session = store
+            .put_artifact(&artifacts, b"s", Some(&first), "public", 4, 8)
+            .unwrap_err();
+        assert_eq!(session.code, ErrorCode::OutputLimit);
+        assert!(artifacts.get(&ArtifactStore::uri(b"g"), 1).is_err());
+        assert!(artifacts.get(&ArtifactStore::uri(b"s"), 1).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

@@ -114,6 +114,8 @@ impl Config {
             && self.limits.value_children > 0
             && self.limits.value_depth > 0
             && self.limits.session_artifact_bytes > 0
+            && self.limits.total_artifact_bytes >= self.limits.session_artifact_bytes
+            && self.limits.total_artifact_bytes <= i64::MAX as usize
             && self.limits.journal_bytes > 0
             && self.limits.process_memory_bytes > 0
             && self.limits.process_cpu_seconds > 0
@@ -215,6 +217,7 @@ pub struct Limits {
     pub value_children: usize,
     pub value_depth: usize,
     pub session_artifact_bytes: usize,
+    pub total_artifact_bytes: usize,
     pub journal_bytes: usize,
     pub process_memory_bytes: u64,
     pub process_cpu_seconds: u64,
@@ -236,6 +239,7 @@ impl Default for Limits {
             value_children: 1_000,
             value_depth: 8,
             session_artifact_bytes: 512 * 1024 * 1024,
+            total_artifact_bytes: 4 * 1024 * 1024 * 1024,
             journal_bytes: 64 * 1024 * 1024,
             process_memory_bytes: 2 * 1024 * 1024 * 1024,
             process_cpu_seconds: 3_600,

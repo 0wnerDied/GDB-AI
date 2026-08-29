@@ -1015,6 +1015,7 @@ struct SessionWorker {
     module_rebind_needed: bool,
     tracking_memory_limit: usize,
     artifact_limit: usize,
+    total_artifact_limit: usize,
     fatal: bool,
     metric_active: bool,
 }
@@ -1155,6 +1156,7 @@ impl SessionWorker {
             module_rebind_needed: false,
             tracking_memory_limit: config.limits.memory_read_bytes,
             artifact_limit: config.limits.session_artifact_bytes,
+            total_artifact_limit: config.limits.total_artifact_bytes,
             fatal: false,
             metric_active: false,
         };
@@ -1851,15 +1853,6 @@ impl SessionWorker {
                 let size = usize::try_from(status.spooled_bytes).map_err(|_| {
                     Error::new(ErrorCode::OutputLimit, "inferior output spool is too large")
                 })?;
-                let used = self
-                    .store
-                    .artifact_bytes(&self.reducer.state().session_id)?;
-                if used.saturating_add(size) > self.artifact_limit {
-                    return Err(Error::new(
-                        ErrorCode::OutputLimit,
-                        "session artifact byte limit reached",
-                    ));
-                }
                 // ponytail: Output spools are operator-bounded and default to
                 // 8 MiB. Add streaming file ingestion only if that bound grows.
                 let path = self.inferior_output.evidence_path().ok_or_else(|| {
@@ -1872,12 +1865,13 @@ impl SessionWorker {
                         "inferior output spool size changed during finalization",
                     ));
                 }
-                let uri = self.artifacts.put(&bytes)?;
-                self.store.register_artifact(
-                    &uri,
+                let uri = self.store.put_artifact(
+                    &self.artifacts,
+                    &bytes,
                     Some(&self.reducer.state().session_id),
-                    bytes.len(),
                     "target-io",
+                    self.artifact_limit,
+                    self.total_artifact_limit,
                 )?;
                 self.metrics.artifact_written(bytes.len());
                 Ok(uri)

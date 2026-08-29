@@ -57,8 +57,9 @@ impl ArtifactStore {
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<String> {
-        let digest = format!("{:x}", Sha256::digest(bytes));
-        let path = self.root.join("sha256").join(&digest);
+        let uri = Self::uri(bytes);
+        let digest = uri.strip_prefix("gdbai://artifact/sha256:").unwrap();
+        let path = self.root.join("sha256").join(digest);
         match OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -83,7 +84,11 @@ impl ArtifactStore {
             }
             Err(error) => return Err(error.into()),
         }
-        Ok(format!("gdbai://artifact/sha256:{digest}"))
+        Ok(uri)
+    }
+
+    pub fn uri(bytes: &[u8]) -> String {
+        format!("gdbai://artifact/sha256:{:x}", Sha256::digest(bytes))
     }
 
     pub fn get(&self, uri: &str, max_bytes: usize) -> Result<Vec<u8>> {
