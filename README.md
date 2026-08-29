@@ -55,72 +55,20 @@ that every Agent frontend would otherwise need to implement:
 
 The repository is independently versioned as `gdb-ai`; the executable is
 `gdb-ai`, the current protocol namespace is `gdb.ai/v1`, and resources use
-`gdbai://`. Current project status and deferred work are in
-[PLAN.md](PLAN.md); the completed
-North-star specification and implementation record are preserved in the
-[plan archive](docs/archive/north-star-plan-2026-08-29.md). Completed release
-gates G1-G4 and their evidence are in the
-[release-gate archive](docs/archive/release-gates-g1-g4-2026-08-29.md). The
-completed behavior-preserving module split is in the
-[G5 archive](docs/archive/behavior-preserving-refactor-g5-2026-08-29.md).
+`gdbai://`.
 
 ## Verification status
 
-The 2026-08-29 native MI audit baseline `c01fc1a` passed the complete verify
-job and all nine compatibility jobs in CI
-[run 33240437655](https://github.com/0wnerDied/GDB-AI/actions/runs/33240437655).
-It exercised the locked workspace, Clippy, Rust 1.88, schemas, both SDKs,
-bounded fuzz campaigns, and checksum-pinned GDB 9.2-12.1 with MI3 plus GDB
-13.2-17.2 with MI4.
+Required CI builds the locked Rust workspace, runs Clippy, schemas, SDK tests,
+bounded fuzz campaigns, and exercises checksum-pinned GDB 9.2-12.1 with MI3
+plus GDB 13.2-17.2 with MI4. Target tests cover x86-64 and AArch64 user space,
+local launch, attach, core files, gdbserver, remote RSP, noisy PTY traffic,
+signals, and conditional Linux kernel inspection under QEMU.
 
-Post-baseline release closure through `eca9806` completed artifact manifest
-and exact-range resources, operation-owned HTTP cleanup, loopback/Origin and
-MCP-version enforcement, durable PTY evidence modes, deterministic contracts,
-the nine-tool default projection, storage quotas/retention/GC, and operational
-watermarks. Its final tree passed 88 core unit tests, 15 server unit tests,
-format checks, and workspace Clippy with warnings denied. G5 code through
-`6ac934e` then split operations, session ownership, transports, resources, and
-Gateway tests without changing the protocol or runtime ownership model.
-
-The same matrix covered x86-64 and AArch64 user space. AArch64 passed both
-qemu-user RSP inspection and a native Debian VM running launch, attach, core,
-and gdbserver scenarios. Public Debian 6.1 and 6.12 x86-64 kernels and a
-Debian 6.12 AArch64 kernel passed the conditional kernel-provider test under
-QEMU TCG. A local 10,000-cycle create/launch/stop/close soak of the same
-product code completed in 777.71 seconds with no session, startup, parser,
-timeout, or consistency failure.
-
-The North-star code surface and declared runtime matrix are qualified at this
-functional baseline. Repeated paired Agent A/B/C/D evaluation is explicitly
-deferred and is not a current correctness or release gate; the existing blind
-pilots remain usability evidence only. Release-tag artifact hashes and
-provenance are release-owner distribution metadata, not another project gate.
-See
-[compatibility status](docs/compatibility.md), the [active release plan](PLAN.md),
-and the archived
-[baseline status](docs/archive/north-star-plan-2026-08-29.md#55-current-progress-and-resume-point).
-
-A matched blind Sol xhigh pilot completed SUCTF 2026 `SU_minivfs` with both
-native GDB and GDB/AI. GDB/AI finished in 20:31 and native GDB in 24:56; one
-paired task is evidence of usability, not a general effect claim. The
-controls, replay evidence, and observed limitations are recorded in archived
-[section 52.2](docs/archive/north-star-plan-2026-08-29.md#522-matched-sol-completion-trial).
-
-## Code layout
-
-The Rust workspace keeps three real dependency boundaries:
-
-```text
-crates/gdb-ai-mi/      byte-oriented GDB/MI codec and lossless AST
-crates/gdb-ai-core/    Gateway, operations, sessions, policy, evidence
-crates/gdb-ai/         CLI, MCP/JSON-RPC service, transports, resources
-```
-
-Within core, canonical handlers live under `gateway/operations/` and the
-single session owner lives in `session/actor.rs`. The executable separates
-shared protocol dispatch from `server/stream.rs`, `server/http.rs`, and
-`server/resources.rs`. See the [architecture document](docs/architecture.md)
-for dependency and concurrency rules.
+See [compatibility](docs/compatibility.md) for the supported matrix and
+[GitHub Actions](https://github.com/0wnerDied/GDB-AI/actions) for current test
+results. Release artifacts identify the exact source tag and checksums they
+qualify. Agent-effect comparisons are not part of the compatibility claim.
 
 ## Implemented system
 
@@ -314,3 +262,7 @@ installed `gdb` executable through GDB's existing GDB/MI machine interface.
 ## License
 
 [GPL-3.0-or-later](LICENSE).
+
+Architecture, protocol, operations, security, compatibility, and kernel
+guides are available under [docs](docs). Contributor work is tracked in
+[PLAN.md](PLAN.md).

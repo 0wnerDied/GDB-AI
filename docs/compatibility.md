@@ -5,12 +5,9 @@ support is probed with MI commands and refreshed after launch, attach, core,
 or remote target selection. Unknown MI fields and classes are retained; an
 unknown state-changing event taints consistency instead of being guessed.
 
-## Verified on 2026-08-29
+## Verified matrix
 
-- The compatibility jobs in CI
-  [run 33240437655](https://github.com/0wnerDied/GDB-AI/actions/runs/33240437655)
-  passed at release-audit baseline `c01fc1a`.
-- The matrix built checksum-pinned GDB 9.2, 10.2, 11.2, and 12.1 for MI3 and
+- Required CI builds checksum-pinned GDB 9.2, 10.2, 11.2, and 12.1 for MI3 and
   GDB 13.2, 14.2, 15.2, 16.3, and 17.2 for MI4. Every version passed the same
   local-launch vertical test.
 - The full locked workspace passed native launch, attach, core, gdbserver,
@@ -22,23 +19,18 @@ unknown state-changing event taints consistency instead of being guessed.
   kernels plus Debian 6.12.105 AArch64. They exercise architecture-specific
   current-task resolution, both module layouts, tasks, stacks, panic context,
   and allowlisted monitor commands.
-- Rust 1.88, stable Rust, schemas, both SDKs, and 60-second libFuzzer campaigns
-  for the MI parser, MI framer, and state reducer passed required CI.
-- A local 10,000-cycle session lifecycle soak completed in 777.71 seconds
-  with no session, startup, parser, timeout, or consistency failure.
-
-Repeated paired Agent A/B/C/D effect evaluation is explicitly deferred. It is
-future product research, not a compatibility or correctness gate. Publishing
-a release tag still requires artifact hashes and provenance for that tag.
+- Rust 1.88, stable Rust, schemas, both SDKs, and bounded libFuzzer campaigns
+  for the MI parser, MI framer, and state reducer are required checks.
+- The lifecycle soak exercises 10,000 session create, launch, stop, and close
+  cycles and fails on session, startup, parser, timeout, or consistency errors.
 
 Missing host facilities remain explicitly unavailable or conditional; they
 are never converted to success merely because another matrix entry passed.
 
-## Native GDB/MI release audit
+## Native GDB/MI compatibility
 
-The adjacent binutils-gdb source checkout was audited at every available GDB
-9 through 17 release tag: 9.1, 9.2, 10.1, 10.2, 11.1, 11.2, 12.1, 13.1,
-13.2, 14.1, 14.2, 15.1, 15.2, 16.1, 16.2, 16.3, 17.1, and 17.2.
+GDB/AI uses only interfaces present in the supported GDB 9 through 17 release
+lines:
 
 - GDB 9.1 through 12.1 register `mi1`, `mi2`, `mi3`, and the latest-version
   `mi` alias. GDB 13.1 and 13.2 additionally register `mi4`; GDB 14.1 removes
@@ -57,9 +49,7 @@ The adjacent binutils-gdb source checkout was audited at every available GDB
   adapter uses controlled `-interpreter-exec console` rather than inventing
   non-existent MI commands.
 
-Runtime qualification intentionally builds the latest maintenance release in
-each supported major line instead of rebuilding interface-identical point
-releases. The current matrix advances the GDB 17 lane to checksum-pinned 17.2;
-the source audit above covers both 17.1 and 17.2. The official 17.2 source was
-also built in the pinned Ubuntu 24.04 image and passed the same vertical test
-locally with MI4.
+Runtime qualification builds the latest supported maintenance release in each
+major line. Unknown fields and future informational notifications remain
+bounded and preserved rather than causing strict-version deserialization
+failures.

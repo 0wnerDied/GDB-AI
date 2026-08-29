@@ -1,6 +1,15 @@
 Do not overengineer, anticipate nonexistent extreme scenarios, or add
 excessive fallback handling.
 
+# Documentation Audience
+
+Write README and public documentation for GDB/AI users and Agents. Describe
+observable behavior, interfaces, supported environments, security boundaries,
+and reproducible verification. Do not publish local audit snapshots, transient
+commit comparisons, assistant workflow, source line counts, or internal
+implementation progress there. Keep contributor roadmaps in `PLAN.md` and
+release-specific provenance in release notes and CI artifacts.
+
 # Code Comments and Bug-Fix Notes
 
 Comment non-obvious invariants, state transitions, concurrency ordering,
