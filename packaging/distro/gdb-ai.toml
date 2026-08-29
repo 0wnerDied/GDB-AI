@@ -21,6 +21,24 @@ path = "/var/lib/gdb-ai/artifacts"
 sqlite = "/var/lib/gdb-ai/gdb-ai.sqlite"
 sessions = "/var/lib/gdb-ai/sessions"
 
+[output]
+evidence = "bounded_spool"
+max_bytes = 8388608
+
+[storage]
+max_closed_sessions = 256
+closed_session_retention_ms = 604800000
+max_audit_rows = 100000
+audit_retention_ms = 2592000000
+max_snapshots_per_session = 256
+max_operations_per_session = 4096
+
+[limits]
+session_artifact_bytes = 536870912
+owner_artifact_bytes = 1073741824
+total_artifact_bytes = 4294967296
+journal_bytes = 67108864
+
 [security]
 default_profile = "debug_control"
 workspace_roots = ["/workspace"]
