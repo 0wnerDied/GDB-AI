@@ -4,6 +4,11 @@ Run `gdb-ai doctor` before serving. Use stdio for one local MCP client, a Unix
 socket for multiple local clients, or loopback HTTP behind a same-host TLS
 reverse proxy. HTTP never binds directly to a non-loopback address.
 
+Without an explicit config, persistent state lives under
+`$XDG_STATE_HOME/gdb-ai` or `$HOME/.local/state/gdb-ai`. A service account
+without either variable should configure absolute artifact, SQLite, and
+session paths instead of relying on the process-scoped temporary fallback.
+
 Every session returns an expiring write lease. Renew it with
 `session.acquire_write_lease`; expiration never interrupts a running target.
 Normal mutations and clean close still require that lease. If consistency is

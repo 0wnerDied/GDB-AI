@@ -20,9 +20,12 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let data = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("gdb-ai"));
+        // 2026-08-29: Falling back to shared /tmp/gdb-ai mixed state across
+        // users and let system cleanup remove durable session evidence.
+        let data = default_state_directory(
+            std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
+            std::env::var_os("HOME").map(PathBuf::from),
+        );
         Self {
             server: ServerConfig::default(),
             gdb: GdbConfig::default(),
@@ -40,6 +43,12 @@ impl Default for Config {
             security: SecurityConfig::default(),
         }
     }
+}
+
+fn default_state_directory(xdg: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+    xdg.map(|path| path.join("gdb-ai"))
+        .or_else(|| home.map(|path| path.join(".local/state/gdb-ai")))
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("gdb-ai-{}", std::process::id())))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,5 +375,17 @@ mod tests {
         assert_eq!(config.journal.durability, JournalDurability::Durable);
         assert_eq!(config.output.evidence, OutputEvidenceMode::BoundedSpool);
         assert_eq!(config.output.max_bytes, 4096);
+    }
+
+    #[test]
+    fn defaults_state_below_xdg_or_home() {
+        assert_eq!(
+            default_state_directory(Some("/state".into()), Some("/home/user".into())),
+            PathBuf::from("/state/gdb-ai")
+        );
+        assert_eq!(
+            default_state_directory(None, Some("/home/user".into())),
+            PathBuf::from("/home/user/.local/state/gdb-ai")
+        );
     }
 }
