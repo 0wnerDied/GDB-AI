@@ -344,6 +344,53 @@ async fn local_debugging_vertical_slice() {
             .map(serde_json::Map::len),
         Some(1)
     );
+    let catchpoint = successful(
+        gateway
+            .dispatch(
+                request(
+                    "catchpoint",
+                    Some(&session_id),
+                    "breakpoint.create",
+                    listed.revision,
+                    json!({
+                        "lease_id": lease_id,
+                        "kind": "catchpoint",
+                        "catch": "exec"
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let catchpoint_id = catchpoint.result.as_ref().unwrap()["breakpoints"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find_map(|candidate| {
+            let id = candidate["id"].as_str()?;
+            (id != breakpoint_id).then(|| id.to_owned())
+        })
+        .unwrap();
+    let breakpoint = successful(
+        gateway
+            .dispatch(
+                request(
+                    "catchpoint-delete",
+                    Some(&session_id),
+                    "breakpoint.delete",
+                    catchpoint.revision,
+                    json!({"lease_id": lease_id, "breakpoint_id": catchpoint_id}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(
+        breakpoint.result.as_ref().unwrap()["breakpoints"]
+            .as_object()
+            .map(serde_json::Map::len),
+        Some(1)
+    );
     let invalid_wait = gateway
         .dispatch(
             request(

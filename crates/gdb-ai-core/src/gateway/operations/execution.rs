@@ -80,6 +80,25 @@ pub(super) fn breakpoint_scope(
     Ok(command)
 }
 
+fn catchpoint_command(kind: &str) -> Result<MiCommand> {
+    match kind {
+        "throw" => MiCommand::new("-catch-throw"),
+        "catch" => MiCommand::new("-catch-catch"),
+        "load" => MiCommand::new("-catch-load"),
+        "unload" => MiCommand::new("-catch-unload"),
+        // 2026-08-29: GDB 9.1 through 17.2 expose these catch commands only
+        // through the CLI. Sending invented MI commands made every release
+        // reject otherwise valid structured catchpoint requests.
+        "exec" | "fork" | "vfork" | "syscall" => MiCommand::new("-interpreter-exec")?
+            .bare("console")
+            .map(|command| command.string(format!("catch {kind}"))),
+        _ => Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "unsupported catchpoint kind",
+        )),
+    }
+}
+
 pub(super) fn breakpoint_number(entry: &SessionEntry, parameters: &Value) -> Result<String> {
     if let Some(number) = parameters.get("backend_number").and_then(Value::as_str) {
         return Ok(number.to_owned());
@@ -276,23 +295,7 @@ impl Gateway {
             command
         } else if kind == "catchpoint" {
             needs_location = false;
-            let catch = string(&request.parameters, "catch")?;
-            MiCommand::new(match catch.as_str() {
-                "throw" => "-catch-throw",
-                "catch" => "-catch-catch",
-                "exec" => "-catch-exec",
-                "fork" => "-catch-fork",
-                "vfork" => "-catch-vfork",
-                "syscall" => "-catch-syscall",
-                "load" => "-catch-load",
-                "unload" => "-catch-unload",
-                _ => {
-                    return Err(Error::new(
-                        ErrorCode::InvalidArgument,
-                        "unsupported catchpoint kind",
-                    ));
-                }
-            })?
+            catchpoint_command(&string(&request.parameters, "catch")?)?
         } else {
             if !matches!(kind, "software" | "hardware" | "temporary" | "instruction") {
                 return Err(Error::new(
@@ -549,4 +552,23 @@ fn valid_signal_name(signal: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::catchpoint_command;
+
+    #[test]
+    fn uses_native_mi_only_for_native_catchpoint_commands() {
+        assert_eq!(
+            catchpoint_command("throw").unwrap().encoded(1),
+            b"1-catch-throw\n"
+        );
+        for kind in ["exec", "fork", "vfork", "syscall"] {
+            assert_eq!(
+                catchpoint_command(kind).unwrap().encoded(2),
+                format!("2-interpreter-exec console \"catch {kind}\"\n").as_bytes()
+            );
+        }
+    }
 }
