@@ -30,9 +30,9 @@ use tokio::{
 
 use super::{
     MAX_HTTP_PENDING_DURATION, MAX_MESSAGE_BYTES, MAX_PENDING_REQUESTS, MCP_VERSION, Phase,
-    RequestCancellation, RpcFault, apply_cancel_mode, canonical_rpc_request, core_fault,
-    dispatch_rpc, initialize, present_canonical_response, request_cancellation, request_key,
-    rpc_error, rpc_fault, rpc_result, valid_request_id,
+    RequestCancellation, RpcFault, admit_canonical_operation, apply_cancel_mode,
+    canonical_rpc_request, dispatch_rpc, initialize, request_cancellation, request_key, rpc_error,
+    rpc_fault, rpc_result, valid_request_id,
 };
 use crate::AnyError;
 
@@ -326,40 +326,32 @@ async fn http_mcp(
     }
     let response_id = id.clone();
     let (operation_id, operation) = if let Some((request, presentation)) = canonical {
-        let ticket = match state
-            .gateway
-            .admit_operation(
-                request,
-                caller.clone(),
-                deadline.saturating_duration_since(Instant::now()),
-            )
-            .await
+        let (operation_id, waiter) = match admit_canonical_operation(
+            state.gateway.clone(),
+            caller.clone(),
+            request,
+            presentation,
+            Some(deadline.saturating_duration_since(Instant::now())),
+        )
+        .await
         {
-            Ok(ticket) => ticket,
+            Ok(operation) => operation,
             Err(error) => {
                 if let Some(client) = state.sessions.write().await.get_mut(session_id) {
                     client.pending.remove(&key);
                 }
-                return json_http_response(
-                    rpc_fault(id, core_fault(format!("{:?}", error.code), error.message)),
-                    Some(session_id),
-                );
+                return json_http_response(rpc_fault(id, error), Some(session_id));
             }
         };
-        let operation_id = ticket.operation_id.0;
-        let gateway = state.gateway.clone();
-        let operation_caller = caller.clone();
-        let waited_id = operation_id.clone();
-        let waiter = tokio::spawn(async move {
-            let record = gateway
-                .wait_operation(&waited_id, &operation_caller)
-                .await
-                .map_err(|error| core_fault(format!("{:?}", error.code), error.message))?;
-            let response = record.result.ok_or_else(|| {
-                core_fault("INTERNAL", "completed operation has no canonical response")
-            })?;
-            present_canonical_response(response, presentation)
-        });
+        if let Some(pending) = state
+            .sessions
+            .write()
+            .await
+            .get_mut(session_id)
+            .and_then(|client| client.pending.get_mut(&key))
+        {
+            pending.cancellation.operation_id = Some(operation_id.clone());
+        }
         (Some(operation_id), waiter)
     } else {
         let gateway = state.gateway.clone();
@@ -707,8 +699,7 @@ mod tests {
             cancel_waiter: Some(waiter),
             cancellation: RequestCancellation {
                 mode: CancelMode::DetachWaiter,
-                session_id: None,
-                lease_id: None,
+                operation_id: None,
             },
             deadline,
         }

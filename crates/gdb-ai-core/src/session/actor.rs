@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::{
-    Capability, CapabilityStatus, CommandReply, OutputRing, PendingModuleBreakpoint,
-    PublishedEvent, SessionCapabilities, command_deadline,
+    ActiveOperation, Capability, CapabilityStatus, CommandReply, OperationCancelMode, OutputRing,
+    PendingModuleBreakpoint, PublishedEvent, SessionCapabilities, command_deadline,
 };
 use crate::{
     Error, ErrorCode, Result,
@@ -24,8 +24,8 @@ use crate::{
     },
     config::{Config, OutputEvidenceMode},
     domain::{
-        DomainEvent, InferiorStatus, JournaledEvent, OutputSource, SessionState, StopId,
-        TrackingDefinition, ValueBinding,
+        DomainEvent, InferiorStatus, JournaledEvent, OperationId, OutputSource, SessionState,
+        StopId, TrackingDefinition, ValueBinding,
     },
     journal::Journal,
     metrics::Metrics,
@@ -40,6 +40,7 @@ use crate::{
 pub(super) enum WorkerRequest {
     Command {
         command: MiCommand,
+        operation: Option<ActiveOperation>,
         deadline: tokio::time::Instant,
         response: oneshot::Sender<Result<CommandReply>>,
     },
@@ -135,6 +136,11 @@ pub(super) enum ControlRequest {
         deadline: tokio::time::Instant,
         response: oneshot::Sender<Result<CommandReply>>,
     },
+    CancelOperation {
+        operation_id: OperationId,
+        mode: OperationCancelMode,
+        response: oneshot::Sender<Result<()>>,
+    },
     Close {
         response: oneshot::Sender<Result<()>>,
     },
@@ -184,6 +190,7 @@ pub(super) struct SessionWorker {
     stale_backend_values: Vec<String>,
     deferred_restoration: Vec<MiCommand>,
     pending_module_breakpoints: BTreeMap<String, PendingModuleBreakpoint>,
+    active_resume_operation: Option<OperationId>,
     module_rebind_needed: bool,
     tracking_memory_limit: usize,
     artifact_limit: usize,
@@ -326,6 +333,7 @@ impl SessionWorker {
             stale_backend_values: Vec::new(),
             deferred_restoration: Vec::new(),
             pending_module_breakpoints: BTreeMap::new(),
+            active_resume_operation: None,
             module_rebind_needed: false,
             tracking_memory_limit: config.limits.memory_read_bytes,
             artifact_limit: config.limits.session_artifact_bytes,
@@ -633,6 +641,7 @@ impl SessionWorker {
         match request {
             WorkerRequest::Command {
                 command,
+                operation,
                 deadline,
                 response,
             } => {
@@ -644,7 +653,10 @@ impl SessionWorker {
                     let _ = response.send(Err(error));
                     return false;
                 }
-                let _ = response.send(self.execute_until(command, deadline).await);
+                let _ = response.send(
+                    self.execute_operation_until(command, operation, deadline)
+                        .await,
+                );
                 self.cleanup_one_stale_value().await;
             }
             WorkerRequest::Transaction {
@@ -992,6 +1004,16 @@ impl SessionWorker {
                 let _ = response.send(result);
                 self.fatal
             }
+            ControlRequest::CancelOperation {
+                operation_id,
+                mode,
+                response,
+            } => {
+                let result = self.cancel_operation(&operation_id, mode).await;
+                let closed = result.is_ok() && mode == OperationCancelMode::CloseSession;
+                let _ = response.send(result);
+                closed
+            }
             ControlRequest::Close { response } => {
                 let result = self.close().await;
                 let _ = response.send(result);
@@ -1015,6 +1037,32 @@ impl SessionWorker {
             self.metric_active = false;
         }
         Ok(())
+    }
+
+    async fn cancel_operation(
+        &mut self,
+        operation_id: &OperationId,
+        mode: OperationCancelMode,
+    ) -> Result<()> {
+        // 2026-08-29: A delayed cancellation used a generic interrupt and
+        // could stop a later resume. Only the actor can atomically verify
+        // which operation still owns the target before applying control.
+        self.require_active_resume(operation_id)?;
+        match mode {
+            OperationCancelMode::InterruptTarget => self.backend.signal_interrupt(),
+            OperationCancelMode::CloseSession => self.close().await,
+        }
+    }
+
+    fn require_active_resume(&self, operation_id: &OperationId) -> Result<()> {
+        if operation_owns_resume(self.active_resume_operation.as_ref(), operation_id) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorCode::Conflict,
+                "operation no longer owns the active target resume",
+            ))
+        }
     }
 
     fn finalize_output_evidence(&mut self) -> Result<OutputEvidenceStatus> {
@@ -1356,6 +1404,19 @@ impl SessionWorker {
                     self.fatal = true;
                     return Err(Error::new(ErrorCode::GdbExited, "session closed"));
                 }
+                ExecutionInput::Control(Some(ControlRequest::CancelOperation {
+                    operation_id,
+                    mode,
+                    response,
+                })) => {
+                    let result = self.cancel_operation(&operation_id, mode).await;
+                    let closed = result.is_ok() && mode == OperationCancelMode::CloseSession;
+                    let _ = response.send(result);
+                    if closed {
+                        self.fatal = true;
+                        return Err(Error::new(ErrorCode::Cancelled, "operation closed session"));
+                    }
+                }
                 ExecutionInput::Control(Some(ControlRequest::Interrupt {
                     command,
                     deadline,
@@ -1505,6 +1566,27 @@ impl SessionWorker {
         }
     }
 
+    async fn execute_operation_until(
+        &mut self,
+        command: MiCommand,
+        operation: Option<ActiveOperation>,
+        deadline: tokio::time::Instant,
+    ) -> Result<CommandReply> {
+        if operation
+            .as_ref()
+            .is_some_and(ActiveOperation::is_cancelled)
+        {
+            return Err(Error::new(
+                ErrorCode::Cancelled,
+                "operation was cancelled before its MI command started",
+            ));
+        }
+        if command_resumes_target(&command) {
+            self.active_resume_operation = operation.map(|operation| operation.id().clone());
+        }
+        self.execute_until(command, deadline).await
+    }
+
     fn handle_unmatched_result(&mut self, record: &MiRecord) -> Result<()> {
         let MiRecord::Result { token, class, .. } = record else {
             return Ok(());
@@ -1629,6 +1711,16 @@ impl SessionWorker {
 
     fn apply_event(&mut self, event: DomainEvent) -> Result<()> {
         let stopped = matches!(&event, DomainEvent::TargetStopped { .. });
+        if matches!(
+            &event,
+            DomainEvent::TargetStopped { .. }
+                | DomainEvent::InferiorExited { .. }
+                | DomainEvent::TargetDisconnected
+                | DomainEvent::TargetDetached
+                | DomainEvent::BackendExited { .. }
+        ) {
+            self.active_resume_operation = None;
+        }
         if let DomainEvent::BreakpointDeleted { backend_number } = &event {
             self.pending_module_breakpoints.remove(backend_number);
         }
@@ -1918,6 +2010,26 @@ fn stream_len(record: &MiRecord) -> usize {
     }
 }
 
+fn command_resumes_target(command: &MiCommand) -> bool {
+    matches!(
+        command.name.as_str(),
+        "-exec-run"
+            | "-exec-continue"
+            | "-exec-step"
+            | "-exec-next"
+            | "-exec-finish"
+            | "-exec-step-instruction"
+            | "-exec-next-instruction"
+            | "-exec-until"
+            | "-exec-jump"
+            | "-exec-return"
+    )
+}
+
+fn operation_owns_resume(active: Option<&OperationId>, requested: &OperationId) -> bool {
+    active == Some(requested)
+}
+
 fn command_timeout(token: u64) -> Error {
     Error::new(
         ErrorCode::Timeout,
@@ -2052,6 +2164,17 @@ mod tests {
         let mut timed_out = HashSet::from([7]);
         assert_eq!(take_delayed_token(&mut timed_out, &delayed), Some(7));
         assert!(timed_out.is_empty());
+    }
+
+    #[test]
+    fn stale_operation_does_not_own_a_later_resume() {
+        let earlier = OperationId::new();
+        let later = OperationId::new();
+        assert!(!operation_owns_resume(Some(&later), &earlier));
+        assert!(operation_owns_resume(Some(&later), &later));
+        assert!(command_resumes_target(
+            &MiCommand::new("-exec-continue").unwrap()
+        ));
     }
 
     #[test]

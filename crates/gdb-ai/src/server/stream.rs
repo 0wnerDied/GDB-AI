@@ -20,9 +20,9 @@ use tokio::{
 
 use super::{
     MAX_MESSAGE_BYTES, MAX_PENDING_REQUESTS, Phase, RequestCancellation, RpcOutput,
-    apply_cancel_mode, dispatch_rpc, initialize, progress_notification, progress_token,
-    read_line_bounded, request_cancellation, request_key, rpc_error, rpc_fault, rpc_result,
-    valid_request_id, write_rpc,
+    admit_canonical_operation, apply_cancel_mode, canonical_rpc_request, dispatch_rpc, initialize,
+    progress_notification, progress_token, read_line_bounded, request_cancellation, request_key,
+    rpc_error, rpc_fault, rpc_result, valid_request_id, write_rpc,
 };
 use crate::AnyError;
 
@@ -144,7 +144,7 @@ where
                     write_rpc(&mut output, rpc_error(id, -32600, "duplicate request id or too many pending requests")).await?;
                     continue;
                 }
-                let cancellation = match request_cancellation(method, &params) {
+                let mut cancellation = match request_cancellation(method, &params) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
                         write_rpc(&mut output, rpc_fault(id, error)).await?;
@@ -165,28 +165,63 @@ where
                     )
                     .await?;
                 }
-                let gateway = gateway.clone();
-                let caller = caller.clone();
+                let canonical = match canonical_rpc_request(
+                    method,
+                    params.clone(),
+                    advanced_tools,
+                    caller.admin,
+                    &sequence,
+                ) {
+                    Ok(canonical) => canonical,
+                    Err(error) => {
+                        write_rpc(&mut output, rpc_fault(id, error)).await?;
+                        continue;
+                    }
+                };
+                let (operation_id, operation) = if let Some((request, presentation)) = canonical {
+                    match admit_canonical_operation(
+                        gateway.clone(),
+                        caller.clone(),
+                        request,
+                        presentation,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok((operation_id, waiter)) => (Some(operation_id), waiter),
+                        Err(error) => {
+                            write_rpc(&mut output, rpc_fault(id, error)).await?;
+                            continue;
+                        }
+                    }
+                } else {
+                    let dispatch_gateway = gateway.clone();
+                    let dispatch_caller = caller.clone();
+                    let dispatch_sequence = sequence.clone();
+                    let method = method.to_owned();
+                    (
+                        None,
+                        tokio::spawn(async move {
+                            dispatch_rpc(
+                                &dispatch_gateway,
+                                &dispatch_caller,
+                                advanced_tools,
+                                &dispatch_sequence,
+                                &method,
+                                params,
+                            )
+                            .await
+                        }),
+                    )
+                };
+                cancellation.operation_id = operation_id;
                 let responses = responses.clone();
-                let sequence = sequence.clone();
-                let method = method.to_owned();
                 let task_key = key.clone();
                 // Requests may wait for a target stop; separate tasks let
                 // cancellation and inferior I/O reach the gateway meanwhile.
                 // 2026-08-28: Cancelling the response task used to cancel the
                 // Gateway future after a worker had accepted a mutation. Keep
                 // dispatch detached so idempotency and audit still complete.
-                let operation = tokio::spawn(async move {
-                    dispatch_rpc(
-                        &gateway,
-                        &caller,
-                        advanced_tools,
-                        &sequence,
-                        &method,
-                        params,
-                    )
-                    .await
-                });
                 let handle = tokio::spawn(async move {
                     let response = match operation.await {
                         Ok(result) => result.map_or_else(

@@ -35,6 +35,7 @@ impl Profile {
                 | CanonicalMethod::SessionClose
                 | CanonicalMethod::SessionAcquireWriteLease
                 | CanonicalMethod::SessionReleaseWriteLease
+                | CanonicalMethod::OperationCancel
         ) || (self == Self::OfflineCore && method == CanonicalMethod::TargetOpenCore)
         {
             return Ok(());
@@ -101,6 +102,7 @@ pub fn effect_for_method(method: CanonicalMethod) -> Effect {
         | KernelInspect
         | ArtifactGet
         | EventsWait => Effect::Read,
+        OperationCancel => Effect::Control,
         TargetConnectRemote => Effect::Network,
         MemoryWrite | RegisterWrite | InferiorIoWrite | InferiorIoCloseStdin
         | InferiorIoSendEof | InferiorIoResize => Effect::TargetMutation,

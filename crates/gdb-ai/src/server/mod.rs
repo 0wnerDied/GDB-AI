@@ -12,7 +12,10 @@ use gdb_ai_core::{
     protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod},
 };
 use serde_json::{Map, Value, json};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt},
+    task::JoinHandle,
+};
 
 use crate::tool_catalog::{discriminator_for_tool, method_for_tool, tool_exists, tools};
 
@@ -48,8 +51,7 @@ enum CancelMode {
 #[derive(Clone)]
 struct RequestCancellation {
     mode: CancelMode,
-    session_id: Option<String>,
-    lease_id: Option<String>,
+    operation_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +89,8 @@ inspection; resuming invalidates old frames and values. For stripped PIEs, set \
 module-offset breakpoints with names shown by inspection mappings; a local \
 explicit-loader breakpoint rebinds when its executable mapping appears. Read large evidence through \
 gdbai:// resources. If HTTP returns an operation_id after waiter timeout, query \
-it with gdb_session action=operation_status. Close the session when finished.";
+it with gdb_session action=operation_status; use operation_cancel only when \
+the record reports ACTOR_SCOPED cancellation. Close the session when finished.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {
@@ -132,46 +135,49 @@ fn apply_cancel_mode(
     sequence: Arc<AtomicU64>,
     cancellation: RequestCancellation,
 ) {
-    // 2026-08-28: MCP cancellation only aborted the response waiter while
-    // presenting no explicit way to interrupt or close the target operation.
-    let Some(session_id) = cancellation.session_id else {
+    let Some(operation_id) = cancellation.operation_id else {
         return;
-    };
-    let Some(lease_id) = cancellation.lease_id else {
-        return;
-    };
-    let (method, parameters) = match cancellation.mode {
-        CancelMode::DetachWaiter => return,
-        CancelMode::InterruptTarget => (
-            CanonicalMethod::ExecutionControl,
-            json!({
-                "action": "interrupt",
-                "lease_id": lease_id,
-                "accept_latest_revision": true
-            }),
-        ),
-        CancelMode::CloseSession => (
-            CanonicalMethod::SessionClose,
-            json!({"lease_id": lease_id, "accept_latest_revision": true}),
-        ),
     };
     tokio::spawn(async move {
-        let response = gateway
-            .dispatch(
-                ApiRequest {
-                    api_version: API_VERSION.into(),
-                    request_id: format!("cancel_{}", sequence.fetch_add(1, Ordering::Relaxed)),
-                    session_id: Some(session_id),
-                    method,
-                    expected_revision: None,
-                    idempotency_key: None,
-                    parameters,
-                },
-                &caller,
-            )
-            .await;
-        if let Some(error) = response.error {
-            tracing::warn!(code = ?error.code, message = %error.message, "request cancellation action failed");
+        let result = match cancellation.mode {
+            CancelMode::DetachWaiter => gateway
+                .detach_operation_waiter(&operation_id, &caller)
+                .await
+                .map(|_| ()),
+            CancelMode::InterruptTarget | CancelMode::CloseSession => {
+                let mode = match cancellation.mode {
+                    CancelMode::InterruptTarget => "interrupt_target",
+                    CancelMode::CloseSession => "close_session",
+                    CancelMode::DetachWaiter => unreachable!(),
+                };
+                let response = gateway
+                    .dispatch(
+                        ApiRequest {
+                            api_version: API_VERSION.into(),
+                            request_id: format!(
+                                "cancel_{}",
+                                sequence.fetch_add(1, Ordering::Relaxed)
+                            ),
+                            session_id: None,
+                            method: CanonicalMethod::OperationCancel,
+                            expected_revision: None,
+                            idempotency_key: None,
+                            parameters: json!({
+                                "operation_id": operation_id,
+                                "mode": mode
+                            }),
+                        },
+                        &caller,
+                    )
+                    .await;
+                match response.error {
+                    Some(error) => Err(gdb_ai_core::Error::new(error.code, error.message)),
+                    None => Ok(()),
+                }
+            }
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, %operation_id, "request cancellation action failed");
         }
     });
 }
@@ -192,23 +198,9 @@ fn request_cancellation(method: &str, params: &Value) -> Result<RequestCancellat
         "close_session" => CancelMode::CloseSession,
         _ => return Err(RpcFault::invalid("unsupported cancel_mode")),
     };
-    let session_id = parameters
-        .get("session_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let lease_id = parameters
-        .get("lease_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    if !matches!(mode, CancelMode::DetachWaiter) && (session_id.is_none() || lease_id.is_none()) {
-        return Err(RpcFault::invalid(
-            "interrupt_target and close_session require session_id and lease_id",
-        ));
-    }
     Ok(RequestCancellation {
         mode,
-        session_id,
-        lease_id,
+        operation_id: None,
     })
 }
 
@@ -318,6 +310,32 @@ fn present_canonical_response(
             serde_json::to_value(response).map_err(|error| RpcFault::invalid(error.to_string()))
         }
     }
+}
+
+async fn admit_canonical_operation(
+    gateway: Arc<Gateway>,
+    caller: Caller,
+    request: ApiRequest,
+    presentation: CanonicalPresentation,
+    waiter_timeout: Option<Duration>,
+) -> Result<(String, JoinHandle<Result<Value, RpcFault>>), RpcFault> {
+    let ticket = gateway
+        .admit_operation(request, caller.clone(), waiter_timeout)
+        .await
+        .map_err(|error| core_fault(format!("{:?}", error.code), error.message))?;
+    let operation_id = ticket.operation_id.0;
+    let waited_id = operation_id.clone();
+    let waiter = tokio::spawn(async move {
+        let record = gateway
+            .wait_operation(&waited_id, &caller)
+            .await
+            .map_err(|error| core_fault(format!("{:?}", error.code), error.message))?;
+        let response = record.result.ok_or_else(|| {
+            core_fault("INTERNAL", "completed operation has no canonical response")
+        })?;
+        present_canonical_response(response, presentation)
+    });
+    Ok((operation_id, waiter))
 }
 
 #[cfg(test)]

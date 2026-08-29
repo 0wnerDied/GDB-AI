@@ -22,7 +22,9 @@ mod operation;
 mod operations;
 
 use operation::OperationRegistry;
-pub use operation::{OperationTicket, RequestOperationRecord, RequestOperationStatus};
+pub use operation::{
+    OperationTicket, RequestOperationCancellation, RequestOperationRecord, RequestOperationStatus,
+};
 
 #[derive(Clone, Debug)]
 pub struct Caller {

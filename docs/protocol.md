@@ -23,6 +23,9 @@ projections do not remove methods from the canonical API.
 Stdio and Unix stream clients may attach `_meta.progressToken` to a request.
 GDB/AI emits ordered `notifications/progress` records before and after the
 operation while continuing to accept cancellation and I/O requests.
+Canonical operations expose `operation.get` through `gdb_session` action
+`operation_status`. Actor-scoped target cancellation uses `operation.cancel`;
+waiter detachment and target control are distinct operations.
 
 Streamable HTTP supports MCP `2025-11-25`. The negotiated version is stored in
 the transport session and is required in `Mcp-Protocol-Version` on every later
@@ -58,8 +61,7 @@ accept exactly one supported representation. Source line numbers start at 1.
 count, current resumption cursor, and a status resource for resynchronization.
 `STREAM_CLOSED` instead means the session event source has terminated.
 
-The implemented registry currently contains 61 canonical methods. The
-conditional `kernel.inspect` contract accepts `capabilities`, `version`,
+The conditional `kernel.inspect` contract accepts `capabilities`, `version`,
 `base`, `current_task`, `init_task`, `tasks`, `modules`, `stack`, and `panic`.
 `kernel.monitor` remains an audited mutation restricted by the configured
 first-word allowlist. These contracts are generated into both the canonical

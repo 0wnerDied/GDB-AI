@@ -14,8 +14,14 @@ never means the operation stopped or the inferior exited.
 MCP cancellation defaults to `cancel_mode: "detach_waiter"`: it stops the
 client wait while the accepted debugger operation finishes in the background.
 Use `interrupt_target` or `close_session` on a tool request when cancellation
-must enter the session actor (`SessionWorker`) control lane; both require
-`session_id` and `lease_id`.
+must reach the session control lane. The transport binds the cancellation to
+the accepted operation; it does not reuse a current session lease or issue an
+unscoped interrupt.
+
+After a waiter has expired, call `gdb_session` action `operation_cancel` with
+the returned `operation_id`. Target control is accepted only when the record's
+`cancellation` is `ACTOR_SCOPED` and that operation still owns the active
+resume. Otherwise the request fails without affecting a later operation.
 
 Dropping a Streamable HTTP connection does not imply MCP cancellation. The
 Gateway owns the accepted canonical operation until a recorded outcome, while

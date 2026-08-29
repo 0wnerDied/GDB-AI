@@ -4,7 +4,10 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, RwLock as StdRwLock},
+    sync::{
+        Arc, RwLock as StdRwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -22,8 +25,8 @@ use crate::{
     backend::{BackendDescriptor, MiCommand, OutputEvidenceStatus, PtyOutput, session_directory},
     config::Config,
     domain::{
-        BreakpointId, DomainEvent, InferiorStatus, SessionId, SessionState, SnapshotStatus, StopId,
-        TrackingDefinition, ValueBinding, WaitBaseline,
+        BreakpointId, DomainEvent, InferiorStatus, OperationId, SessionId, SessionState,
+        SnapshotStatus, StopId, TrackingDefinition, ValueBinding, WaitBaseline,
     },
     journal::Journal,
     metrics::Metrics,
@@ -34,6 +37,38 @@ use crate::{
 
 tokio::task_local! {
     static ACTIVE_OBSERVATION_SESSION: String;
+    static ACTIVE_OPERATION: ActiveOperation;
+}
+
+#[derive(Clone)]
+pub(crate) struct ActiveOperation {
+    id: OperationId,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ActiveOperation {
+    pub(crate) fn new(id: OperationId, cancelled: Arc<AtomicBool>) -> Self {
+        Self { id, cancelled }
+    }
+
+    pub(super) fn id(&self) -> &OperationId {
+        &self.id
+    }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) async fn scope_operation<T>(
+    operation: ActiveOperation,
+    future: impl Future<Output = T>,
+) -> T {
+    ACTIVE_OPERATION.scope(operation, future).await
+}
+
+fn active_operation() -> Option<ActiveOperation> {
+    ACTIVE_OPERATION.try_with(Clone::clone).ok()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -121,6 +156,12 @@ pub enum OutputRing {
     Target,
     Console,
     Log,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationCancelMode {
+    InterruptTarget,
+    CloseSession,
 }
 
 #[derive(Clone)]
@@ -271,10 +312,21 @@ impl SessionHandle {
         command: MiCommand,
         deadline: tokio::time::Instant,
     ) -> Result<CommandReply> {
+        let operation = active_operation();
+        if operation
+            .as_ref()
+            .is_some_and(ActiveOperation::is_cancelled)
+        {
+            return Err(Error::new(
+                ErrorCode::Cancelled,
+                "operation was cancelled before its MI command started",
+            ));
+        }
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(WorkerRequest::Command {
                 command,
+                operation,
                 deadline,
                 response: sender,
             })
@@ -790,6 +842,25 @@ impl SessionHandle {
             .send(ControlRequest::Interrupt {
                 command,
                 deadline: command_deadline(self.command_timeout),
+                response: sender,
+            })
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+        receiver
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+    }
+
+    pub async fn cancel_operation(
+        &self,
+        operation_id: OperationId,
+        mode: OperationCancelMode,
+    ) -> Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        self.controls
+            .send(ControlRequest::CancelOperation {
+                operation_id,
+                mode,
                 response: sender,
             })
             .await

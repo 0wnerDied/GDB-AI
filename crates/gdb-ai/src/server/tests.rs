@@ -63,7 +63,7 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     )
     .unwrap();
     assert!(matches!(cancellation.mode, CancelMode::InterruptTarget));
-    assert_eq!(cancellation.session_id.as_deref(), Some("sess_test"));
+    assert!(cancellation.operation_id.is_none());
     assert!(!tool_names(false, false).contains(&"gdb_raw"));
     assert!(tool_names(false, true).contains(&"gdb_raw"));
     assert_eq!(

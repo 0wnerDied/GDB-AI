@@ -387,6 +387,48 @@
       "if": {
         "properties": {
           "method": {
+            "const": "operation.cancel"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "mode": {
+                "enum": [
+                  "interrupt_target",
+                  "close_session"
+                ],
+                "type": "string"
+              },
+              "operation_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "operation_id",
+              "mode"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
             "const": "target.launch"
           }
         },
@@ -4120,6 +4162,7 @@
         "session.transcript",
         "session.event",
         "operation.get",
+        "operation.cancel",
         "target.launch",
         "target.attach",
         "target.connect_remote",

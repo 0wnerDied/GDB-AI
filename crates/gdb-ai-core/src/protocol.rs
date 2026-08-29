@@ -41,6 +41,7 @@ canonical_methods! {
     SessionTranscript => "session.transcript",
     SessionEvent => "session.event",
     OperationGet => "operation.get",
+    OperationCancel => "operation.cancel",
     TargetLaunch => "target.launch",
     TargetAttach => "target.attach",
     TargetConnectRemote => "target.connect_remote",

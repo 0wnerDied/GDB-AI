@@ -552,6 +552,10 @@ impl CanonicalMethod {
             ]),
             SessionEvent => MethodContract::plain(vec![required("event_seq", Unsigned)]),
             OperationGet => MethodContract::plain(vec![required("operation_id", String)]),
+            OperationCancel => MethodContract::plain(vec![
+                required("operation_id", String),
+                required("mode", Enum(&["interrupt_target", "close_session"])),
+            ]),
             TargetLaunch => MethodContract::plain(vec![
                 required("program", String),
                 optional("argv", StringArray),
@@ -868,7 +872,11 @@ impl CanonicalMethod {
     pub const fn requires_session(self) -> bool {
         !matches!(
             self,
-            Self::SessionCreate | Self::SessionList | Self::OperationGet | Self::ArtifactGet
+            Self::SessionCreate
+                | Self::SessionList
+                | Self::OperationGet
+                | Self::OperationCancel
+                | Self::ArtifactGet
         )
     }
 }
