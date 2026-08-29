@@ -1,12 +1,6 @@
 # GDB/AI
 
 <p align="center">
-  <img src="docs/assets/gdb-ai-control-plane.png"
-       alt="GDB/AI connects Agents to a stateful debugging control plane above GDB and the inferior"
-       width="100%">
-</p>
-
-<p align="center">
   <a href="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-2ea44f"></a>
   <img alt="Rust 1.88+" src="https://img.shields.io/badge/Rust-1.88%2B-dea584?logo=rust">
@@ -18,6 +12,13 @@
   <strong>A stateful debugger control plane for modern Agents.</strong><br>
   Dynamic debugging · vulnerability validation · authorized exploit development
 </p>
+
+<p align="center">
+  <img src="docs/assets/gdb-ai-architecture.svg"
+       alt="Detailed GDB/AI architecture from Agent clients through the stateful control plane to native GDB and debug targets"
+       width="100%">
+</p>
+<p align="center"><em>Figure 1. GDB/AI system architecture and isolated data paths.</em></p>
 
 **GDB/AI (Agent Interface)** is a stateful interface for modern Agents doing
 dynamic debugging, vulnerability validation, and authorized vulnerability
@@ -33,16 +34,12 @@ MI control traffic, and reduces asynchronous records into explicit state.
 
 ## How it works
 
-```mermaid
-flowchart TB
-    Agent["Agent · IDE · SDK"] --> API["GDB/AI semantic API<br/>MCP · JSON-RPC · SDK"]
-    API --> Control["Stateful control plane<br/>policy · scheduler · reducer · evidence"]
-    Control -->|"tokenized commands"| GDB["GNU GDB<br/>native GDB/MI backend"]
-    GDB -->|"result + async records"| Control
-    Control <-->|"bounded I/O"| PTY["Dedicated inferior PTY"]
-    GDB --> Target["Native · core · gdbserver · remote target"]
-    PTY <--> Target
-```
+<p align="center">
+  <img src="docs/assets/gdb-ai-operation-sequence.svg"
+       alt="Sequence of a GDB/AI continue operation showing distinct MI results, asynchronous state events, inferior I/O, and evidence"
+       width="100%">
+</p>
+<p align="center"><em>Figure 2. A stop-producing operation and its evidence boundary.</em></p>
 
 GDB/AI keeps GDB/MI as the backend boundary and takes over the stateful work
 that every Agent frontend would otherwise need to implement:
