@@ -1,5 +1,75 @@
 use super::*;
 
+async fn kernel_current_text(
+    entry: &SessionEntry,
+    parameters: &Value,
+    state: &crate::domain::SessionState,
+) -> Result<(String, u64)> {
+    let reply = entry
+        .handle
+        .command(MiCommand::new("-data-list-register-names")?)
+        .await?;
+    let names = result_string_list(&reply.record, "register-names");
+    if find_register_name(&names, "gs_base").is_some() {
+        // 2026-08-28: Newer x86 kernels moved current_task into pcpu_hot,
+        // while older distribution symbols expose the standalone per-CPU
+        // variable. Try only the two documented layouts and preserve any
+        // timeout or transport failure from the first evaluation.
+        let modern = "*(struct task_struct **)((unsigned long)$gs_base+(unsigned long)&pcpu_hot.current_task)";
+        match kernel_text(entry, parameters, state, modern).await {
+            Ok(value) => Ok(value),
+            Err(error) if error.code == ErrorCode::GdbError => kernel_text(
+                entry,
+                parameters,
+                state,
+                "*(struct task_struct **)((unsigned long)$gs_base+(unsigned long)&current_task)",
+            )
+            .await,
+            Err(error) => Err(error),
+        }
+    } else if let Some(sp_el0) = find_register_name(&names, "sp_el0") {
+        kernel_text(
+            entry,
+            parameters,
+            state,
+            &format!("(struct task_struct *)${sp_el0}"),
+        )
+        .await
+    } else {
+        Err(Error::new(
+            ErrorCode::CapabilityMissing,
+            "current task requires x86-64 gs_base or AArch64 sp_el0",
+        ))
+    }
+}
+
+async fn kernel_text(
+    entry: &SessionEntry,
+    parameters: &Value,
+    state: &crate::domain::SessionState,
+    expression: &str,
+) -> Result<(String, u64)> {
+    let command = context_options(
+        MiCommand::new("-data-evaluate-expression")?.string(expression),
+        parameters,
+        state,
+    )?;
+    let reply = safe_evaluate_command(&entry.handle, command).await?;
+    let value = result_text(&reply.record, "value")
+        .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB omitted expression value"))?;
+    Ok((value, reply.evidence_seq))
+}
+
+async fn kernel_address(
+    entry: &SessionEntry,
+    parameters: &Value,
+    state: &crate::domain::SessionState,
+    expression: &str,
+) -> Result<(u64, u64)> {
+    let (value, evidence_seq) = kernel_text(entry, parameters, state, expression).await?;
+    Ok((parse_gdb_u64(&value)?, evidence_seq))
+}
+
 impl Gateway {
     pub(super) async fn kernel_inspect(&self, request: &ApiRequest) -> Result<Value> {
         if !self.config.security.kernel_enabled {
