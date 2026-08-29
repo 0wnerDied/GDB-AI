@@ -9,7 +9,9 @@ pub fn quote_c_string(value: &[u8]) -> String {
             b'\r' => encoded.push_str("\\r"),
             b'\t' => encoded.push_str("\\t"),
             0x20..=0x7e => encoded.push(char::from(*byte)),
-            _ => encoded.push_str(&format!("\\{:03o}", byte)),
+            // 2026-08-29: Keep the shared encoder valid under the declared
+            // Rust 1.88 Clippy gate by using captured format arguments.
+            _ => encoded.push_str(&format!("\\{byte:03o}")),
         }
     }
     encoded.push('"');
