@@ -206,11 +206,26 @@ async fn rebinds_module_offset_after_explicit_loader_exec() {
         .find(|breakpoint| breakpoint.id.0 == public_id)
         .unwrap();
     assert!(!rebound.pending);
-    let pc = state
-        .inferiors
-        .values()
-        .flat_map(|inferior| inferior.threads.values())
-        .find_map(|thread| thread.frame.as_ref()?.address.as_deref())
+    // 2026-08-29: GDB may omit the optional frame from an async stop record.
+    // Query the stopped frame explicitly before comparing the rebound PC.
+    let frame = gateway
+        .dispatch(
+            request(
+                "rebound-frame",
+                Some(&session_id),
+                "inspection.get",
+                None,
+                json!({
+                    "view": "frame",
+                    "stop_id": state.stop_id.as_ref().unwrap()
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(frame.error.is_none(), "{:?}", frame.error);
+    let pc = frame.result.as_ref().unwrap()["frame"]["address"]
+        .as_str()
         .unwrap();
     assert_eq!(rebound.locations[0].address.as_deref(), Some(pc));
     gateway.shutdown().await;
