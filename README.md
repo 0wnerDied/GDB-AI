@@ -108,6 +108,8 @@ inferior restoration after GDB death.
 
 - Linux and Rust 1.88 or newer
 - GDB 13 or newer for MI4, or GDB 9 or newer for MI3 compatibility
+- Official Linux x86-64 releases use a statically linked musl binary and do
+  not depend on the host glibc version
 - Bubblewrap for optional mount/network hardening (`auto` reports absence;
   `required` fails closed); it is not a complete untrusted-code sandbox
 - A C compiler for integration tests

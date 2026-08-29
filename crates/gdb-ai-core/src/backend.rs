@@ -1,6 +1,10 @@
 use async_trait::async_trait;
 use gdb_ai_mi::{MiFramer, MiLimits, MiRecord, encode_command, parse_record, quote_c_string};
-use nix::{pty::openpty, unistd::ttyname};
+use nix::{
+    pty::openpty,
+    sys::resource::{Resource, setrlimit},
+    unistd::ttyname,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -698,15 +702,15 @@ impl GdbBackend {
         // only async-signal-safe libc calls and captured integer values.
         unsafe {
             command.pre_exec(move || {
-                set_limit(libc::RLIMIT_AS, address_space)?;
-                set_limit(libc::RLIMIT_CPU, cpu_seconds)?;
-                set_limit(libc::RLIMIT_FSIZE, file_bytes)?;
-                set_limit(libc::RLIMIT_NOFILE, open_files)?;
+                set_limit(Resource::RLIMIT_AS, address_space)?;
+                set_limit(Resource::RLIMIT_CPU, cpu_seconds)?;
+                set_limit(Resource::RLIMIT_FSIZE, file_bytes)?;
+                set_limit(Resource::RLIMIT_NOFILE, open_files)?;
                 // 2026-08-28: RLIMIT_NPROC is counted for the host UID and
                 // prevented bubblewrap from creating its namespace. Apply it
                 // only when an operator explicitly configures a nonzero value.
                 if processes > 0 {
-                    set_limit(libc::RLIMIT_NPROC, processes)?;
+                    set_limit(Resource::RLIMIT_NPROC, processes)?;
                 }
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
                     return Err(std::io::Error::last_os_error());
@@ -968,17 +972,10 @@ fn process_descendants(root: u32) -> Vec<i32> {
     descendants
 }
 
-fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> std::io::Result<()> {
-    let limit = libc::rlimit {
-        rlim_cur: value as libc::rlim_t,
-        rlim_max: value as libc::rlim_t,
-    };
-    // SAFETY: setrlimit copies the provided struct during this call.
-    if unsafe { libc::setrlimit(resource, &limit) } == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+fn set_limit(resource: Resource, value: u64) -> std::io::Result<()> {
+    // 2026-08-29: libc's private resource type differs between GNU and musl;
+    // use nix's portable wrapper so both official and developer builds work.
+    setrlimit(resource, value as libc::rlim_t, value as libc::rlim_t).map_err(Into::into)
 }
 
 fn sandbox_available(mode: SandboxMode) -> Result<bool> {

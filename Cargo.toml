@@ -21,7 +21,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 libc = "0.2"
-nix = { version = "0.30", features = ["fs", "process", "signal", "term"] }
+nix = { version = "0.30", features = ["fs", "process", "resource", "signal", "term"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
