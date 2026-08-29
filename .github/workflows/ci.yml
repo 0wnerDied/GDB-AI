@@ -14,12 +14,13 @@ jobs:
     env:
       GDB_AI_REQUIRE_INTEGRATION: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      # 2026-08-29: Release qualification must not execute mutable action refs.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
-          toolchain: stable
+          toolchain: 1.88.0
           components: clippy,rustfmt
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
           cache: npm
@@ -37,16 +38,12 @@ jobs:
           gcc --version
           output=$(printf '1-gdb-exit\n' | gdb -q -nx --interpreter=mi4)
           grep -q '1\^exit' <<<"$output"
-      - name: Install minimum Rust toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Rust tests
         run: cargo test --locked --workspace --all-targets
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Check minimum Rust version
-        run: cargo +1.88.0 check --locked --workspace --all-targets
       - name: Verify schemas
         run: cd schemas && sha256sum -c SHA256SUMS
       - name: Verify Python sources
@@ -95,17 +92,17 @@ jobs:
       GDB_AI_REQUIRE_INTEGRATION: "1"
       GDB_AI_REQUIRE_KERNEL_INTEGRATION: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
-          toolchain: stable
+          toolchain: 1.88.0
       - name: Install kernel debugger prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             busybox-static cpio curl gdb gdb-multiarch \
             qemu-system-arm qemu-system-x86 xz-utils
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/gdb-ai-kernel/downloads
           key: debian-kernel-${{ matrix.series }}-2026-08-28
@@ -118,10 +115,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
-          toolchain: stable
+          toolchain: 1.88.0
       - name: Install AArch64 system-test prerequisites
         run: |
           sudo apt-get update
@@ -196,11 +193,11 @@ jobs:
             bison build-essential ca-certificates curl flex git \
             libexpat1-dev libgmp-dev libmpfr-dev libreadline-dev \
             texinfo xz-utils zstd
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.88.0
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/gdb/${{ matrix.version }}
           key: gdb-${{ matrix.version }}-${{ matrix.sha256 }}-${{ matrix.image }}
