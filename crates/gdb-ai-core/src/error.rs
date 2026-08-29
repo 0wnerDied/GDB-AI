@@ -25,6 +25,8 @@ pub enum ErrorCode {
     TargetUnavailable,
     Timeout,
     Cancelled,
+    EventGap,
+    StreamClosed,
     OutputLimit,
     MemoryPreconditionFailed,
     PartialRead,

@@ -40,6 +40,10 @@ Successful responses retain the method-specific `result` and also promote
 canonical response envelope. Clients can therefore handle pagination and
 bounded-output metadata without knowing each result's internal shape.
 
+`events.wait` reports `EVENT_GAP` with the requested cursor, dropped event
+count, current resumption cursor, and a status resource for resynchronization.
+`STREAM_CLOSED` instead means the session event source has terminated.
+
 The implemented registry currently contains 61 canonical methods. The
 conditional `kernel.inspect` contract accepts `capabilities`, `version`,
 `base`, `current_task`, `init_task`, `tasks`, `modules`, `stack`, and `panic`.
