@@ -135,36 +135,6 @@ impl Gateway {
     }
 }
 
-fn event_receive_error(
-    error: tokio::sync::broadcast::error::RecvError,
-    session_id: &str,
-    requested_after: u64,
-    current_event_seq: u64,
-) -> Error {
-    // 2026-08-29: Collapsing lag and closure into INTERNAL gave clients no
-    // way to distinguish a recoverable cursor gap from a terminal stream.
-    match error {
-        tokio::sync::broadcast::error::RecvError::Lagged(skipped) => Error::new(
-            ErrorCode::EventGap,
-            format!("event subscriber missed {skipped} events"),
-        )
-        .retryable()
-        .with_details(json!({
-            "requested_after": requested_after,
-            "dropped_events": skipped,
-            "available_after": current_event_seq,
-            "current_event_seq": current_event_seq,
-            "resync": format!("gdbai://session/{session_id}/status")
-        })),
-        tokio::sync::broadcast::error::RecvError::Closed => {
-            Error::new(ErrorCode::StreamClosed, "session event stream closed").with_details(json!({
-                "current_event_seq": current_event_seq,
-                "session": format!("gdbai://session/{session_id}/status")
-            }))
-        }
-    }
-}
-
 fn breakpoint_location(parameters: &Value) -> Result<String> {
     let location = parameters.get("location").unwrap_or(parameters);
     if let Some(function) = location.get("function").and_then(Value::as_str) {

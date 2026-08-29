@@ -1,5 +1,35 @@
 use super::*;
 
+fn event_receive_error(
+    error: tokio::sync::broadcast::error::RecvError,
+    session_id: &str,
+    requested_after: u64,
+    current_event_seq: u64,
+) -> Error {
+    // 2026-08-29: Collapsing lag and closure into INTERNAL gave clients no
+    // way to distinguish a recoverable cursor gap from a terminal stream.
+    match error {
+        tokio::sync::broadcast::error::RecvError::Lagged(skipped) => Error::new(
+            ErrorCode::EventGap,
+            format!("event subscriber missed {skipped} events"),
+        )
+        .retryable()
+        .with_details(json!({
+            "requested_after": requested_after,
+            "dropped_events": skipped,
+            "available_after": current_event_seq,
+            "current_event_seq": current_event_seq,
+            "resync": format!("gdbai://session/{session_id}/status")
+        })),
+        tokio::sync::broadcast::error::RecvError::Closed => {
+            Error::new(ErrorCode::StreamClosed, "session event stream closed").with_details(json!({
+                "current_event_seq": current_event_seq,
+                "session": format!("gdbai://session/{session_id}/status")
+            }))
+        }
+    }
+}
+
 impl Gateway {
     pub(super) async fn artifact_get(
         &self,
@@ -108,5 +138,37 @@ impl Gateway {
                 event_receive_error(error, &current.session_id.0, after, current.event_seq)
             })?;
         Ok(serde_json::to_value(event)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receive_errors_preserve_resynchronization_semantics() {
+        let gap = event_receive_error(
+            tokio::sync::broadcast::error::RecvError::Lagged(7),
+            "sess_test",
+            10,
+            30,
+        );
+        assert_eq!(gap.code, ErrorCode::EventGap);
+        assert!(gap.retryable);
+        assert_eq!(gap.details.as_ref().unwrap()["dropped_events"], 7);
+        assert_eq!(gap.details.as_ref().unwrap()["available_after"], 30);
+        assert_eq!(
+            gap.details.as_ref().unwrap()["resync"],
+            "gdbai://session/sess_test/status"
+        );
+
+        let closed = event_receive_error(
+            tokio::sync::broadcast::error::RecvError::Closed,
+            "sess_test",
+            10,
+            30,
+        );
+        assert_eq!(closed.code, ErrorCode::StreamClosed);
+        assert!(!closed.retryable);
     }
 }

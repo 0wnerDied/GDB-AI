@@ -5,33 +5,6 @@ use crate::{
 };
 
 #[test]
-fn event_receive_errors_preserve_resynchronization_semantics() {
-    let gap = event_receive_error(
-        tokio::sync::broadcast::error::RecvError::Lagged(7),
-        "sess_test",
-        10,
-        30,
-    );
-    assert_eq!(gap.code, ErrorCode::EventGap);
-    assert!(gap.retryable);
-    assert_eq!(gap.details.as_ref().unwrap()["dropped_events"], 7);
-    assert_eq!(gap.details.as_ref().unwrap()["available_after"], 30);
-    assert_eq!(
-        gap.details.as_ref().unwrap()["resync"],
-        "gdbai://session/sess_test/status"
-    );
-
-    let closed = event_receive_error(
-        tokio::sync::broadcast::error::RecvError::Closed,
-        "sess_test",
-        10,
-        30,
-    );
-    assert_eq!(closed.code, ErrorCode::StreamClosed);
-    assert!(!closed.retryable);
-}
-
-#[test]
 fn safe_expression_rejects_calls_and_mutations() {
     for expression in [
         "global_value",
