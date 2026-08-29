@@ -1082,15 +1082,24 @@ fn remove_session_directory(root: &Path, session_id: &SessionId) -> Result<bool>
     let candidate = root.join(&session_id.0);
     match std::fs::symlink_metadata(&candidate) {
         Ok(metadata) if metadata.file_type().is_dir() => {
-            let canonical = std::fs::canonicalize(&candidate)?;
+            // 2026-08-29: Concurrent retention passes can select the same
+            // closed session. Its disappearance means cleanup already won.
+            let canonical = match std::fs::canonicalize(&candidate) {
+                Ok(canonical) => canonical,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
             if canonical.parent() != Some(root.as_path()) {
                 return Err(Error::new(
                     ErrorCode::Internal,
                     "session directory escapes the storage root",
                 ));
             }
-            std::fs::remove_dir_all(canonical)?;
-            Ok(true)
+            match std::fs::remove_dir_all(canonical) {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error.into()),
+            }
         }
         Ok(_) => Err(Error::new(
             ErrorCode::Internal,
@@ -1164,7 +1173,7 @@ fn sql_error(error: rusqlite::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, atomic::AtomicBool},
+        sync::{Arc, Barrier, atomic::AtomicBool},
         time::Duration,
     };
 
@@ -1318,6 +1327,30 @@ mod tests {
         assert!(StorageLock::acquire(&path).is_err());
         drop(first);
         StorageLock::acquire(path).unwrap();
+    }
+
+    #[test]
+    fn concurrent_session_directory_removal_is_idempotent() {
+        let directory = tempdir().unwrap();
+        let session = SessionId("sess_race".into());
+        std::fs::create_dir(directory.path().join(&session.0)).unwrap();
+        let barrier = Arc::new(Barrier::new(32));
+        let threads = (0..32)
+            .map(|_| {
+                let root = directory.path().to_owned();
+                let session = session.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    remove_session_directory(&root, &session)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+        assert!(!directory.path().join(session.0).exists());
     }
 
     #[test]
