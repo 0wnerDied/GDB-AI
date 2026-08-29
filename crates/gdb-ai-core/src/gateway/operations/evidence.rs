@@ -96,7 +96,20 @@ impl Gateway {
         // 2026-08-28: Inlining a complete large artifact caused the outer
         // response limiter to replace it with another artifact. Page raw bytes
         // below the envelope budget instead.
-        let (bytes, total_bytes) = self.artifacts.get_range(&uri, offset, max_bytes)?;
+        // 2026-08-29: The first range read verifies the complete artifact;
+        // running that hash on a Tokio worker stalled unrelated requests.
+        let artifacts = self.artifacts.clone();
+        let artifact_uri = uri.clone();
+        let (bytes, total_bytes) = tokio::task::spawn_blocking(move || {
+            artifacts.get_range(&artifact_uri, offset, max_bytes)
+        })
+        .await
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("artifact read task failed: {error}"),
+            )
+        })??;
         let next_offset = offset + bytes.len() as u64;
         Ok(json!({
             "uri": uri,

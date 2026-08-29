@@ -629,7 +629,7 @@ impl SessionWorker {
             self.inferior_output
                 .wait_closed(Duration::from_secs(1))
                 .await;
-            if let Err(error) = self.finalize_output_evidence() {
+            if let Err(error) = self.finalize_output_evidence().await {
                 tracing::error!(%error, "inferior output evidence finalization failed");
                 self.mark_failed();
             }
@@ -1030,7 +1030,7 @@ impl SessionWorker {
         self.inferior_output
             .wait_closed(Duration::from_secs(1))
             .await;
-        self.finalize_output_evidence()?;
+        self.finalize_output_evidence().await?;
         self.apply_event(DomainEvent::SessionClosed)?;
         if self.metric_active {
             self.metrics.session_closed();
@@ -1065,67 +1065,92 @@ impl SessionWorker {
         }
     }
 
-    fn finalize_output_evidence(&mut self) -> Result<OutputEvidenceStatus> {
+    async fn finalize_output_evidence(&mut self) -> Result<OutputEvidenceStatus> {
         if self.output_evidence_finalized {
             return Ok(self.inferior_output.evidence_status());
         }
-        let mut status = self.inferior_output.finish_evidence();
+        let output = Arc::clone(&self.inferior_output);
+        let store = Arc::clone(&self.store);
+        let artifacts = self.artifacts.clone();
+        let session_id = self.reducer.state().session_id.clone();
+        let evidence_mode = self.output_evidence_mode;
+        let artifact_limits = ArtifactLimits {
+            session_bytes: self.artifact_limit,
+            owner_bytes: self.owner_artifact_limit,
+            total_bytes: self.total_artifact_limit,
+        };
+        // 2026-08-29: Joining the spool writer and reading, hashing, and
+        // publishing its file synchronously blocked the SessionActor.
+        let (status, artifact_bytes, stored_bytes) = tokio::task::spawn_blocking(move || {
+            let mut status = output.finish_evidence();
+            let mut artifact_bytes = 0;
+            let mut stored_bytes = None;
+            if evidence_mode == OutputEvidenceMode::Artifact && status.error.is_none() {
+                let result = (|| {
+                    let size = usize::try_from(status.spooled_bytes).map_err(|_| {
+                        Error::new(ErrorCode::OutputLimit, "inferior output spool is too large")
+                    })?;
+                    // ponytail: Output spools are operator-bounded and default
+                    // to 8 MiB. Add streaming ingestion only if that bound grows.
+                    let path = output
+                        .evidence_path()
+                        .map(|path| path.to_path_buf())
+                        .ok_or_else(|| {
+                            Error::new(ErrorCode::Internal, "inferior output spool path is missing")
+                        })?;
+                    let bytes = std::fs::read(&path)?;
+                    if bytes.len() != size {
+                        return Err(Error::new(
+                            ErrorCode::Internal,
+                            "inferior output spool size changed during finalization",
+                        ));
+                    }
+                    let uri = store.put_artifact(
+                        &artifacts,
+                        &bytes,
+                        Some(&session_id),
+                        "target-io",
+                        artifact_limits,
+                    )?;
+                    artifact_bytes = bytes.len();
+                    stored_bytes = store.total_artifact_bytes().ok();
+                    Ok((uri, path))
+                })();
+                match result {
+                    Ok((uri, path)) => {
+                        output.set_artifact_uri(uri.clone());
+                        status.artifact_uri = Some(uri);
+                        status.durability = "artifact";
+                        let _ = std::fs::remove_file(path);
+                    }
+                    Err(error) => {
+                        // 2026-08-29: Keeping an artifact failure only in this
+                        // local result made the later close response claim complete
+                        // evidence. Persist the failure in the shared PTY status.
+                        status.complete = false;
+                        status.error = Some(error.to_string());
+                        output.set_evidence_error(error.to_string());
+                    }
+                }
+            }
+            (status, artifact_bytes, stored_bytes)
+        })
+        .await
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("output evidence finalization task failed: {error}"),
+            )
+        })?;
         // 2026-08-29: Drop metrics alone hid successfully preserved PTY
         // evidence, so count each finalized spool exactly once.
         self.metrics.inferior_output_spooled(status.spooled_bytes);
-        if self.output_evidence_mode == OutputEvidenceMode::Artifact && status.error.is_none() {
-            let result = (|| {
-                let size = usize::try_from(status.spooled_bytes).map_err(|_| {
-                    Error::new(ErrorCode::OutputLimit, "inferior output spool is too large")
-                })?;
-                // ponytail: Output spools are operator-bounded and default to
-                // 8 MiB. Add streaming file ingestion only if that bound grows.
-                let path = self.inferior_output.evidence_path().ok_or_else(|| {
-                    Error::new(ErrorCode::Internal, "inferior output spool path is missing")
-                })?;
-                let bytes = std::fs::read(path)?;
-                if bytes.len() != size {
-                    return Err(Error::new(
-                        ErrorCode::Internal,
-                        "inferior output spool size changed during finalization",
-                    ));
-                }
-                let uri = self.store.put_artifact(
-                    &self.artifacts,
-                    &bytes,
-                    Some(&self.reducer.state().session_id),
-                    "target-io",
-                    ArtifactLimits {
-                        session_bytes: self.artifact_limit,
-                        owner_bytes: self.owner_artifact_limit,
-                        total_bytes: self.total_artifact_limit,
-                    },
-                )?;
-                self.metrics.artifact_written(bytes.len());
-                if let Ok(stored) = self.store.total_artifact_bytes() {
-                    self.metrics
-                        .artifact_storage(stored, self.total_artifact_limit);
-                }
-                Ok(uri)
-            })();
-            match result {
-                Ok(uri) => {
-                    self.inferior_output.set_artifact_uri(uri.clone());
-                    status.artifact_uri = Some(uri);
-                    status.durability = "artifact";
-                    if let Some(path) = self.inferior_output.evidence_path() {
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
-                Err(error) => {
-                    // 2026-08-29: Keeping an artifact failure only in this
-                    // local result made the later close response claim complete
-                    // evidence. Persist the failure in the shared PTY status.
-                    status.complete = false;
-                    status.error = Some(error.to_string());
-                    self.inferior_output.set_evidence_error(error.to_string());
-                }
-            }
+        if artifact_bytes > 0 {
+            self.metrics.artifact_written(artifact_bytes);
+        }
+        if let Some(stored) = stored_bytes {
+            self.metrics
+                .artifact_storage(stored, self.total_artifact_limit);
         }
         self.output_evidence_finalized = true;
         let evidence = serde_json::to_value(&status)?;

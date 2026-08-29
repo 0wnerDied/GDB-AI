@@ -219,8 +219,6 @@ impl Gateway {
     }
 
     pub(super) async fn session_transcript(&self, request: &ApiRequest) -> Result<Value> {
-        use std::io::{Read as _, Seek as _};
-
         let session_id = SessionId::parse(required_session(request)?)?;
         let journal_path = self.session_journal_path(&session_id).await?;
         let offset = request
@@ -234,12 +232,27 @@ impl Gateway {
             .and_then(Value::as_u64)
             .unwrap_or(64 * 1024)
             .clamp(1, 64 * 1024) as usize;
-        let mut file = std::fs::File::open(journal_path)?;
-        let length = file.metadata()?.len();
-        let offset = offset.min(length);
-        file.seek(std::io::SeekFrom::Start(offset))?;
-        let mut bytes = vec![0; max_bytes.min((length - offset) as usize)];
-        file.read_exact(&mut bytes)?;
+        // 2026-08-29: Transcript reads and seeks ran synchronously on the
+        // async request worker, so a retained large journal stalled sessions.
+        let (offset, bytes, length) =
+            tokio::task::spawn_blocking(move || -> Result<(u64, Vec<u8>, u64)> {
+                use std::io::{Read as _, Seek as _};
+
+                let mut file = std::fs::File::open(journal_path)?;
+                let length = file.metadata()?.len();
+                let offset = offset.min(length);
+                file.seek(std::io::SeekFrom::Start(offset))?;
+                let mut bytes = vec![0; max_bytes.min((length - offset) as usize)];
+                file.read_exact(&mut bytes)?;
+                Ok((offset, bytes, length))
+            })
+            .await
+            .map_err(|error| {
+                Error::new(
+                    ErrorCode::Internal,
+                    format!("transcript read task failed: {error}"),
+                )
+            })??;
         let text = std::str::from_utf8(&bytes).ok();
         Ok(json!({
             "offset": offset,
@@ -252,8 +265,6 @@ impl Gateway {
     }
 
     pub(super) async fn session_event(&self, request: &ApiRequest) -> Result<Value> {
-        use std::io::BufRead as _;
-
         let session_id = SessionId::parse(required_session(request)?)?;
         let wanted = unsigned(&request.parameters, "event_seq")?;
         if wanted == 0 {
@@ -263,16 +274,31 @@ impl Gateway {
             ));
         }
         let path = self.session_journal_path(&session_id).await?;
-        for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
-            let entry: crate::journal::JournalEntry = serde_json::from_str(&line?)?;
-            if entry.seq == wanted {
-                return Ok(serde_json::to_value(entry)?);
+        let entry = tokio::task::spawn_blocking(move || -> Result<_> {
+            use std::io::BufRead as _;
+
+            for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
+                let entry: crate::journal::JournalEntry = serde_json::from_str(&line?)?;
+                if entry.seq == wanted {
+                    return Ok(Some(entry));
+                }
+                if entry.seq > wanted {
+                    break;
+                }
             }
-            if entry.seq > wanted {
-                break;
-            }
-        }
-        Err(Error::new(ErrorCode::NotFound, "journal event not found"))
+            Ok(None)
+        })
+        .await
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("journal scan task failed: {error}"),
+            )
+        })??;
+        entry
+            .map(serde_json::to_value)
+            .transpose()?
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "journal event not found"))
     }
 
     pub(super) async fn session_journal_path(
