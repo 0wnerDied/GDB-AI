@@ -1262,10 +1262,42 @@ async fn local_debugging_vertical_slice() {
             &caller,
         );
         tokio::pin!(probe);
-        tokio::select! {
-            response = &mut probe => panic!("probe completed before cancellation: {response:?}"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-        }
+        // 2026-08-29: A fixed delay could cancel before slow TCG finished
+        // breakpoint insertion, so no cleanup guard owned the late side
+        // effect. The probe installs its guard before resuming; cancel only
+        // after the target is observably running.
+        tokio::time::timeout(cleanup_timeout, async {
+            loop {
+                let status = gateway.dispatch(
+                    request(
+                        "cancelled-probe-status",
+                        Some(&close_session),
+                        "session.get",
+                        None,
+                        json!({}),
+                    ),
+                    &caller,
+                );
+                let status = tokio::select! {
+                    response = &mut probe => {
+                        panic!("probe completed before cancellation: {response:?}")
+                    }
+                    status = status => successful(status),
+                };
+                let state = status.result.as_ref().unwrap();
+                let running = state["inferiors"].as_object().is_some_and(|inferiors| {
+                    inferiors
+                        .values()
+                        .any(|inferior| inferior["status"] == "RUNNING")
+                });
+                if running {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("probe did not become cancellable before its deadline");
     }
     let interrupted = successful(
         gateway
