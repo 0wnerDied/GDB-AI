@@ -188,7 +188,6 @@ jobs:
     env:
       GDB_AI_REQUIRE_INTEGRATION: "1"
       GDB_AI_EXPECTED_MI: ${{ matrix.expected_mi }}
-      GDB_AI_GDB_PATH: ${{ runner.temp }}/gdb/${{ matrix.version }}/bin/gdb
     steps:
       - name: Install compatibility prerequisites
         run: |
@@ -211,8 +210,11 @@ jobs:
             "${{ matrix.version }}" \
             "${{ matrix.sha256 }}" \
             "$RUNNER_TEMP/gdb/${{ matrix.version }}"
-          "$GDB_AI_GDB_PATH" --version | head -n 1
+          "$RUNNER_TEMP/gdb/${{ matrix.version }}/bin/gdb" --version | head -n 1
       - name: Verify GDB/AI vertical slice
         run: |
-          cargo test --locked -p gdb-ai-core --test vertical \
+          # 2026-08-29: The runner context is unavailable in job-level env;
+          # bind the qualified binary here so workflow validation can start.
+          GDB_AI_GDB_PATH="$RUNNER_TEMP/gdb/${{ matrix.version }}/bin/gdb" \
+            cargo test --locked -p gdb-ai-core --test vertical \
             local_debugging_vertical_slice -- --exact --nocapture
