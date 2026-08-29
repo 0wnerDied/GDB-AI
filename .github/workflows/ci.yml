@@ -58,7 +58,10 @@ jobs:
       - name: Install fuzz toolchain
         run: |
           rustup toolchain install nightly-2026-08-01 --profile minimal
-          cargo install cargo-fuzz --version 0.13.2 --locked
+          # 2026-08-29: Build cargo-fuzz with the pinned nightly because its
+          # locked cargo-platform dependency requires newer Rust than MSRV.
+          cargo +nightly-2026-08-01 install cargo-fuzz \
+            --version 0.13.2 --locked
       - name: Run fuzz campaigns
         run: |
           mkdir -p "$RUNNER_TEMP/mi-corpus" "$RUNNER_TEMP/reducer-corpus"
