@@ -1,8 +1,12 @@
+use std::path::Path;
+
 use serde::Serialize;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    domain::{InferiorStatus, SessionState, TargetOrigin},
+    Result,
+    domain::{Address, InferiorStatus, SessionState, TargetOrigin},
     session::SessionCapabilities,
 };
 
@@ -133,4 +137,129 @@ pub fn crash_signature(state: &SessionState) -> String {
         }
     }
     format!("sha256:{:x}", Sha256::digest(evidence.as_bytes()))
+}
+
+pub(crate) fn mappings(state: &SessionState) -> Result<Value> {
+    // 2026-08-28: A remote PID can collide with an unrelated host PID. Never
+    // consult host /proc unless the reducer recorded a local target origin.
+    if !matches!(
+        state.target_origin,
+        TargetOrigin::Local | TargetOrigin::Attach
+    ) {
+        return Ok(json!({
+            "mappings": [],
+            "partial": true,
+            "limitations": ["target origin does not permit host /proc access"],
+            "source": {"provider": "remote", "mechanism": "unavailable"}
+        }));
+    }
+    let Some(pid) = state.inferiors.values().find_map(|inferior| inferior.pid) else {
+        return Ok(json!({
+            "mappings": [],
+            "partial": true,
+            "limitations": ["target does not expose a local /proc memory map"],
+            "source": {"provider": "remote", "mechanism": "unavailable"}
+        }));
+    };
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    let ranges: Vec<Value> = maps.lines().filter_map(parse_proc_map).collect();
+    Ok(json!({
+        "mappings": ranges,
+        "partial": false,
+        "source": {"provider": "linux-userland", "mechanism": "proc-maps"}
+    }))
+}
+
+fn parse_proc_map(line: &str) -> Option<Value> {
+    let mut fields = line
+        .splitn(6, char::is_whitespace)
+        .filter(|field| !field.is_empty());
+    let (start, end) = fields.next()?.split_once('-')?;
+    let permissions = fields.next()?;
+    let offset = fields.next()?;
+    let device = fields.next()?;
+    let inode = fields.next()?.parse::<u64>().ok()?;
+    // 2026-08-28: splitn leaves the maps column padding in its final field;
+    // returning that padding broke exact path comparison and module lookup.
+    let path = fields.next().unwrap_or("").trim_start();
+    Some(json!({
+        "start": format!("0x{start}"), "end": format!("0x{end}"),
+        "permissions": permissions, "offset": format!("0x{offset}"),
+        "device": device, "inode": inode, "path": path, "source": "linux-proc"
+    }))
+}
+
+pub(crate) fn live_module_offset(
+    state: &SessionState,
+    module: &str,
+    offset: u64,
+) -> Result<Option<String>> {
+    if !matches!(
+        state.target_origin,
+        TargetOrigin::Local | TargetOrigin::Attach
+    ) {
+        return Ok(None);
+    }
+    let Some(pid) = state.inferiors.values().find_map(|inferior| inferior.pid) else {
+        return Ok(None);
+    };
+    let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {
+        return Ok(None);
+    };
+    module_offset_from_maps(&maps, module, offset)
+}
+
+fn module_offset_from_maps(maps: &str, module: &str, offset: u64) -> Result<Option<String>> {
+    let requested_name = Path::new(module).file_name();
+    for mapping in maps.lines().filter_map(parse_proc_map) {
+        let path = mapping["path"].as_str().unwrap_or("");
+        if path != module && requested_name != Path::new(path).file_name() {
+            continue;
+        }
+        let Some(start) = mapping["start"]
+            .as_str()
+            .and_then(|value| u64::from_str_radix(value.trim_start_matches("0x"), 16).ok())
+        else {
+            continue;
+        };
+        let Some(file_offset) = mapping["offset"]
+            .as_str()
+            .and_then(|value| u64::from_str_radix(value.trim_start_matches("0x"), 16).ok())
+        else {
+            continue;
+        };
+        let Some(address) = start
+            .checked_sub(file_offset)
+            .and_then(|base| base.checked_add(offset))
+        else {
+            continue;
+        };
+        return Ok(Some(
+            Address::parse(&format!("0x{address:x}"))?
+                .as_str()
+                .to_owned(),
+        ));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_stripped_pie_module_offsets_from_proc_maps() {
+        let maps = concat!(
+            "555555554000-555555555000 r--p 00000000 00:21 1 /tmp/mini_vfs\n",
+            "555555555000-555555557000 r-xp 00001000 00:21 1 /tmp/mini_vfs\n",
+        );
+        assert_eq!(
+            module_offset_from_maps(maps, "mini_vfs", 0x1c9c).unwrap(),
+            Some("0x0000555555555c9c".into())
+        );
+        assert_eq!(
+            module_offset_from_maps(maps, "other", 0x1c9c).unwrap(),
+            None
+        );
+    }
 }

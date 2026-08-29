@@ -1,6 +1,9 @@
 use gdb_ai_mi::{MiRecord, MiResult, MiValue};
 
-use crate::domain::{DomainEvent, FrameSummary, OutputSource, StopReason};
+use crate::{
+    Error, ErrorCode, Result,
+    domain::{DomainEvent, FrameSummary, OutputSource, StopReason},
+};
 
 pub fn normalize(record: &MiRecord) -> Option<DomainEvent> {
     match record {
@@ -31,6 +34,14 @@ pub fn normalize(record: &MiRecord) -> Option<DomainEvent> {
         }),
         MiRecord::Result { .. } | MiRecord::StatusAsync { .. } | MiRecord::Prompt => None,
     }
+}
+
+pub(crate) fn breakpoint_number(record: &MiRecord) -> Result<String> {
+    MiResult::find(record.results(), "bkpt")
+        .and_then(MiValue::results)
+        .and_then(|fields| MiResult::find_str(fields, "number"))
+        .map(str::to_owned)
+        .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB returned no breakpoint number"))
 }
 
 fn stopped(results: &[MiResult]) -> Option<DomainEvent> {

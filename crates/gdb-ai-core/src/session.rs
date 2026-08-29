@@ -29,10 +29,10 @@ use crate::{
     },
     journal::Journal,
     metrics::Metrics,
-    normalize::normalize,
-    operations::{breakpoint_number_from_record, live_module_offset},
+    normalize::{breakpoint_number, normalize},
     persistence::{ArtifactLimits, Store},
     policy::Profile,
+    providers::live_module_offset,
     reducer::StateReducer,
     ring::{ByteRing, RingRead},
 };
@@ -1994,7 +1994,7 @@ impl SessionWorker {
                     self.command_timeout,
                 )
                 .await?;
-            let new_backend_number = breakpoint_number_from_record(&reply.record)?;
+            let new_backend_number = breakpoint_number(&reply.record)?;
             self.apply_event(DomainEvent::BreakpointRebound {
                 id: breakpoint.id.clone(),
                 old_backend_number: breakpoint.backend_number.clone(),
