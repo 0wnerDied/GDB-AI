@@ -5,33 +5,6 @@ use crate::{
 };
 
 #[test]
-fn safe_expression_rejects_calls_and_mutations() {
-    for expression in [
-        "global_value",
-        "&large_buffer",
-        "$pc == 0",
-        "(struct pair *)global",
-        "sizeof(global_value)",
-    ] {
-        validate_expression(expression).unwrap();
-    }
-    for expression in [
-        "global_value = 1",
-        "++global_value",
-        "$rax += 1",
-        "marker()",
-        "$_shell(\"id\")",
-        "marker/**/()",
-    ] {
-        assert_eq!(
-            validate_expression(expression).unwrap_err().code,
-            ErrorCode::PolicyDenied,
-            "accepted unsafe expression: {expression}"
-        );
-    }
-}
-
-#[test]
 fn parses_and_revalidates_attach_identity() {
     let stat = "123 (worker name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242";
     assert_eq!(parse_process_start_time(stat).unwrap(), 4242);

@@ -1,5 +1,19 @@
 use super::*;
 
+async fn current_value_binding(
+    entry: &SessionEntry,
+    request: &ApiRequest,
+    state: &crate::domain::SessionState,
+) -> Result<ValueBinding> {
+    require_stopped_context(&request.parameters, state)?;
+    let binding = entry
+        .handle
+        .value_binding(string(&request.parameters, "value_id")?)
+        .await?;
+    state.require_stop(&binding.stop_id)?;
+    Ok(binding)
+}
+
 impl Gateway {
     pub(super) async fn value_evaluate(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
