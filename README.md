@@ -126,6 +126,11 @@ cargo +1.88.0 check --locked --workspace --all-targets
 cargo run -p gdb-ai -- doctor
 ```
 
+Use `gdb-ai --version` to inspect the build tag, full commit, dirty flag,
+Rust compiler, and canonical-schema hash. `gdb-ai -V` prints only the software
+version. `doctor` includes the same build identity with its environment and
+backend checks.
+
 Additional checks:
 
 ```sh

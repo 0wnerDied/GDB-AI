@@ -22,8 +22,22 @@ use tool_catalog::tool_names;
 
 type AnyError = Box<dyn StdError + Send + Sync>;
 
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\ntag: ",
+    env!("GDB_AI_BUILD_TAG"),
+    "\ncommit: ",
+    env!("GDB_AI_BUILD_COMMIT"),
+    "\ndirty: ",
+    env!("GDB_AI_BUILD_DIRTY"),
+    "\nrustc: ",
+    env!("GDB_AI_BUILD_RUSTC"),
+    "\ncanonical schema: ",
+    env!("GDB_AI_BUILD_SCHEMA_SHA256"),
+);
+
 #[derive(Parser)]
-#[command(name = "gdb-ai", version, about)]
+#[command(name = "gdb-ai", version, long_version = LONG_VERSION, about)]
 struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
@@ -413,6 +427,7 @@ fn require_api_success(response: &ApiResponse) -> Result<(), AnyError> {
 
 async fn doctor(config: Config) -> Result<(), AnyError> {
     let checks = json!({
+        "build": build_information(),
         "gdb": {
             "path": config.gdb.path,
             "available": std::process::Command::new(&config.gdb.path)
@@ -492,6 +507,17 @@ async fn doctor(config: Config) -> Result<(), AnyError> {
     gateway.shutdown().await;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+fn build_information() -> Value {
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "tag": env!("GDB_AI_BUILD_TAG"),
+        "commit": env!("GDB_AI_BUILD_COMMIT"),
+        "dirty": env!("GDB_AI_BUILD_DIRTY") == "true",
+        "rustc": env!("GDB_AI_BUILD_RUSTC"),
+        "canonical_schema_sha256": env!("GDB_AI_BUILD_SCHEMA_SHA256"),
+    })
 }
 
 fn program_available(program: &str) -> bool {
