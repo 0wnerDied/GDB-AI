@@ -35,8 +35,11 @@ waiter detachment and target control are distinct operations.
 
 Streamable HTTP supports MCP `2025-11-25`. The negotiated version is stored in
 the transport session and is required in `Mcp-Protocol-Version` on every later
-POST or DELETE. Older message versions remain limited to tested stdio/Unix
-compatibility; GDB/AI does not advertise the legacy HTTP+SSE transport.
+POST or DELETE. POST requests advertise `application/json` and
+`text/event-stream`; responses use JSON, while GET returns HTTP 405 because the
+server does not open an optional SSE stream. Older message versions remain
+limited to tested stdio/Unix compatibility; GDB/AI does not advertise the
+legacy HTTP+SSE transport.
 
 Large results return `gdbai://artifact/sha256:...`. Artifact reads re-check
 session ownership; the URI itself is not authorization. `artifact.get` uses

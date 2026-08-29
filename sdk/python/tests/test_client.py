@@ -46,6 +46,11 @@ class ClientTest(unittest.TestCase):
             self.assertEqual(
                 request.get_header("Mcp-protocol-version"), "2025-11-25"
             )
+        for request in requests[:-1]:
+            self.assertEqual(
+                request.get_header("Accept"),
+                "application/json, text/event-stream",
+            )
 
     def test_renew_accepts_the_latest_revision(self) -> None:
         calls = []

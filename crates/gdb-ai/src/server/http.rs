@@ -130,7 +130,7 @@ pub(crate) async fn serve_http(
         idle_timeout,
     };
     let router = Router::new()
-        .route("/mcp", post(http_mcp).delete(http_delete))
+        .route("/mcp", post(http_mcp).get(http_get).delete(http_delete))
         .route("/healthz", get(|| async { StatusCode::NO_CONTENT }))
         .route("/metrics", get(http_metrics))
         .layer(DefaultBodyLimit::max(MAX_MESSAGE_BYTES))
@@ -163,6 +163,9 @@ async fn http_mcp(
     }
     if !authorize_http(&state, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !accepts_mcp_responses(&headers) {
+        return StatusCode::NOT_ACCEPTABLE.into_response();
     }
     let Some(object) = message.as_object() else {
         return json_http_response(
@@ -406,6 +409,18 @@ async fn http_mcp(
         },
     };
     json_http_response(response, Some(session_id))
+}
+
+async fn http_get(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    // 2026-08-29: Router-generated GET rejection skipped the mandatory
+    // Origin check. Validate the connection before declining optional SSE.
+    if !allow_http_origin(&state, &headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if !authorize_http(&state, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    StatusCode::METHOD_NOT_ALLOWED.into_response()
 }
 
 async fn complete_http_operation(
@@ -655,6 +670,26 @@ fn http_protocol_version_matches(headers: &HeaderMap, expected: &str) -> bool {
     supplied.next().is_none() && version.as_bytes() == expected.as_bytes()
 }
 
+fn accepts_mcp_responses(headers: &HeaderMap) -> bool {
+    let mut json = false;
+    let mut event_stream = false;
+    for value in headers.get_all(header::ACCEPT).iter() {
+        let Ok(value) = value.to_str() else {
+            return false;
+        };
+        for media_type in value.split(',') {
+            match media_type.split(';').next().map(str::trim) {
+                Some("application/json") => json = true,
+                Some("text/event-stream") => event_stream = true,
+                _ => {}
+            }
+        }
+    }
+    // 2026-08-29: Accepting JSON-only clients contradicted the declared MCP
+    // Streamable HTTP revision, whose POST contract requires both media types.
+    json && event_stream
+}
+
 fn json_http_response(value: Value, session_id: Option<&str>) -> Response {
     let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"null".to_vec());
     let mut response = Response::new(Body::from(body));
@@ -763,6 +798,27 @@ mod tests {
         )
         .await;
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        let mut incomplete_accept = headers.clone();
+        incomplete_accept.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        let unacceptable = http_mcp(
+            State(state.clone()),
+            incomplete_accept,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": MCP_VERSION,
+                    "clientInfo": {"name": "http-json-only", "version": "1"}
+                }
+            })),
+        )
+        .await;
+        assert_eq!(unacceptable.status(), StatusCode::NOT_ACCEPTABLE);
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
         let unsupported = http_mcp(
             State(state.clone()),
             headers.clone(),
@@ -794,6 +850,10 @@ mod tests {
         )
         .await;
         assert_eq!(initialized.status(), StatusCode::OK);
+        assert_eq!(
+            initialized.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
         let session = initialized.headers().get("mcp-session-id").unwrap().clone();
         headers.insert("mcp-session-id", session);
         let missing_version = http_mcp(
@@ -1125,5 +1185,46 @@ mod tests {
             HeaderValue::from_static("https://agent.example"),
         );
         assert!(!allow_http_origin(&state, &headers));
+    }
+
+    #[tokio::test]
+    async fn http_get_declines_sse_after_origin_validation() {
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let state = HttpState {
+            gateway: Arc::new(Gateway::new(config).unwrap()),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sequence: Arc::new(AtomicU64::new(1)),
+            raw_admin: false,
+            advanced_tools: false,
+            auth_token: None,
+            trusted_origins: parse_trusted_origins(&["https://agent.example".into()]).unwrap(),
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(60),
+        };
+        assert_eq!(
+            http_get(State(state.clone()), HeaderMap::new())
+                .await
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert_eq!(
+            http_get(State(state), headers).await.status(),
+            StatusCode::FORBIDDEN
+        );
     }
 }

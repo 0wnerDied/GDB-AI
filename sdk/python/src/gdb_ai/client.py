@@ -105,7 +105,10 @@ class Client:
         payload = json.dumps(
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
         ).encode()
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if include_session:
@@ -126,7 +129,10 @@ class Client:
 
     def _notify(self, method: str, params: dict[str, Any]) -> None:
         payload = json.dumps({"jsonrpc": "2.0", "method": method, "params": params}).encode()
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if self._mcp_session:
