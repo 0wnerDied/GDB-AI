@@ -34,6 +34,12 @@ impl Gateway {
         // startup is rare, so serialize its reservation and insertion.
         // ponytail: shard reservations only if startup throughput matters.
         let _creation = self.session_creation.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(Error::new(
+                ErrorCode::InvalidState,
+                "gateway is shutting down",
+            ));
+        }
         let live_sessions = self.sessions.read().await.keys().cloned().collect();
         self.maintain_storage(&live_sessions)?;
         if self.sessions.read().await.len() >= self.config.server.max_sessions {

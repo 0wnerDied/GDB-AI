@@ -2,7 +2,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 use tokio::sync::{Mutex, RwLock};
 
@@ -61,6 +64,7 @@ pub struct Gateway {
     idempotency_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     rates: Mutex<BTreeMap<String, RateWindow>>,
     session_creation: Mutex<()>,
+    shutting_down: AtomicBool,
     operations: OperationRegistry,
     _storage_lock: StorageLock,
 }
@@ -94,6 +98,7 @@ impl Gateway {
             idempotency_locks: Mutex::new(BTreeMap::new()),
             rates: Mutex::new(BTreeMap::new()),
             session_creation: Mutex::new(()),
+            shutting_down: AtomicBool::new(false),
             operations: OperationRegistry::new(operation_limit),
             _storage_lock: storage_lock,
         };
@@ -718,6 +723,11 @@ impl Gateway {
     }
 
     pub async fn shutdown(&self) {
+        // 2026-08-30: Shutdown could drain an empty registry while an in-flight
+        // create later inserted a live GDB. Close admission first, then share
+        // the creation gate so every previously admitted session is drained.
+        self.shutting_down.store(true, Ordering::Release);
+        let _creation = self.session_creation.lock().await;
         let sessions = std::mem::take(&mut *self.sessions.write().await);
         for entry in sessions.into_values() {
             let _ = entry.handle.close().await;

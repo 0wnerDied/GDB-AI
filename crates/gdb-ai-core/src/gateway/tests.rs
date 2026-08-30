@@ -576,6 +576,40 @@ async fn idempotency_lock_cleanup_preserves_live_waiters_and_replacements() {
 }
 
 #[tokio::test]
+async fn shutdown_closes_session_admission() {
+    let directory = tempdir().unwrap();
+    let gateway = Gateway::new(Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    })
+    .unwrap();
+    gateway.shutdown().await;
+
+    let response = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "create-after-shutdown".into(),
+                session_id: None,
+                method: crate::protocol::CanonicalMethod::SessionCreate,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &Caller::local("shutdown-test"),
+        )
+        .await;
+    assert_eq!(response.error.unwrap().code, ErrorCode::InvalidState);
+    assert!(gateway.sessions.read().await.is_empty());
+}
+
+#[tokio::test]
 async fn stable_read_for_unknown_session_returns_not_found() {
     let directory = tempdir().unwrap();
     let gateway = Gateway::new(Config {
