@@ -376,6 +376,7 @@ pub struct PtyOutput {
     ring: Mutex<ByteRing>,
     evidence_mode: OutputEvidenceMode,
     spool: Option<OutputSpool>,
+    error: Mutex<Option<String>>,
     closed: AtomicBool,
     closed_notify: Notify,
     rearm_notify: Notify,
@@ -388,6 +389,7 @@ impl PtyOutput {
             ring: Mutex::new(ByteRing::new(capacity)),
             evidence_mode: OutputEvidenceMode::EphemeralRing,
             spool: None,
+            error: Mutex::new(None),
             closed: AtomicBool::new(false),
             closed_notify: Notify::new(),
             rearm_notify: Notify::new(),
@@ -410,6 +412,7 @@ impl PtyOutput {
             ring: Mutex::new(ByteRing::new(capacity)),
             evidence_mode: config.evidence,
             spool,
+            error: Mutex::new(None),
             closed: AtomicBool::new(false),
             closed_notify: Notify::new(),
             rearm_notify: Notify::new(),
@@ -479,7 +482,7 @@ impl PtyOutput {
     }
 
     pub fn evidence_status(&self) -> OutputEvidenceStatus {
-        match &self.spool {
+        let mut status = match &self.spool {
             Some(spool) => spool.status(),
             None => {
                 let (end, dropped) = self.position();
@@ -495,7 +498,15 @@ impl PtyOutput {
                     error: None,
                 }
             }
+        };
+        if status.error.is_none() {
+            status.error = self
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
         }
+        status
     }
 
     pub fn finish_evidence(&self) -> OutputEvidenceStatus {
@@ -520,6 +531,10 @@ impl PtyOutput {
     }
 
     pub fn set_evidence_error(&self, error: String) {
+        *self
+            .error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.clone());
         if let Some(spool) = &self.spool {
             spool.state.complete.store(false, Ordering::Release);
             *spool
@@ -1074,7 +1089,14 @@ where
                     _ = sender.closed() => break,
                 }
             }
-            Err(_) => break,
+            Err(error) => {
+                // 2026-08-30: Non-hangup PTY errors silently ended the reader,
+                // leaving close waiters timing out and evidence looking healthy.
+                output.set_evidence_error(format!("inferior PTY read failed: {error}"));
+                output.mark_closed();
+                let _ = try_notify_pty(&sender, BackendInput::InferiorPty);
+                break;
+            }
         }
     }
 }
@@ -1184,6 +1206,8 @@ mod tests {
 
     struct CountingEof(Arc<AtomicUsize>);
 
+    struct FailingReader;
+
     impl AsyncRead for CountingEof {
         fn poll_read(
             self: Pin<&mut Self>,
@@ -1192,6 +1216,16 @@ mod tests {
         ) -> Poll<std::io::Result<()>> {
             self.0.fetch_add(1, Ordering::Relaxed);
             Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(std::io::Error::other("read failed")))
         }
     }
 
@@ -1301,6 +1335,24 @@ mod tests {
         let output = PtyOutput::new(64);
 
         assert!(!output.wait_closed(Duration::from_millis(1)).await);
+    }
+
+    #[tokio::test]
+    async fn pty_read_errors_close_the_stream_and_evidence() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let output = Arc::new(PtyOutput::new(64));
+
+        read_pty(FailingReader, sender, output.clone()).await;
+
+        assert!(output.closed.load(Ordering::Acquire));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(BackendInput::InferiorPty)
+        ));
+        assert_eq!(
+            output.evidence_status().error.as_deref(),
+            Some("inferior PTY read failed: read failed")
+        );
     }
 
     #[test]
