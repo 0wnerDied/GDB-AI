@@ -83,6 +83,7 @@ impl Gateway {
             &config.storage,
         )?);
         let artifacts = ArtifactStore::new(&config.artifacts.path)?;
+        artifacts.cleanup_temporary_publications()?;
         let metrics = Arc::new(Metrics::default());
         let operation_limit = config
             .storage

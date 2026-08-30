@@ -70,10 +70,19 @@ impl ArtifactStore {
         std::fs::create_dir_all(&digest_root)?;
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
         std::fs::set_permissions(&digest_root, std::fs::Permissions::from_mode(0o700))?;
-        // 2026-08-29: A crash while writing directly to the digest path left
-        // partial content permanently visible. Atomic publication now leaves
-        // only private temporary files, which a single store owner can reap.
-        for entry in std::fs::read_dir(&digest_root)? {
+        Ok(Self {
+            root: std::fs::canonicalize(root)?,
+            verified: Arc::new(Mutex::new(HashMap::new())),
+            verification_hits: Arc::new(AtomicU64::new(0)),
+            verification_misses: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    pub fn cleanup_temporary_publications(&self) -> Result<()> {
+        // 2026-08-30: Every session constructed a store and removed temporary
+        // files, racing with publications from other sessions. Cleanup is now
+        // explicit and only called while the daemon-wide storage lock is held.
+        for entry in std::fs::read_dir(self.root.join("sha256"))? {
             let entry = entry?;
             if entry
                 .file_name()
@@ -83,12 +92,7 @@ impl ArtifactStore {
                 std::fs::remove_file(entry.path())?;
             }
         }
-        Ok(Self {
-            root: std::fs::canonicalize(root)?,
-            verified: Arc::new(Mutex::new(HashMap::new())),
-            verification_hits: Arc::new(AtomicU64::new(0)),
-            verification_misses: Arc::new(AtomicU64::new(0)),
-        })
+        Ok(())
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<String> {
@@ -484,13 +488,15 @@ mod tests {
     }
 
     #[test]
-    fn startup_removes_interrupted_temporary_publications() {
+    fn explicit_cleanup_preserves_live_temporary_publications() {
         let directory = tempdir().unwrap();
         let store = ArtifactStore::new(directory.path()).unwrap();
         let temporary = store.root.join("sha256/.gdb-ai-artifact-interrupted");
         std::fs::write(&temporary, b"partial").unwrap();
 
         ArtifactStore::new(directory.path()).unwrap();
+        assert!(temporary.exists());
+        store.cleanup_temporary_publications().unwrap();
 
         assert!(!temporary.exists());
     }

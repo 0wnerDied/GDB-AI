@@ -78,6 +78,7 @@ pub fn run(config: Config, command: StorageCommand) -> Result<()> {
     let _lock = StorageLock::acquire(config.persistence.sqlite.with_extension("lock"))?;
     let store = Store::open_with_storage(&config.persistence.sqlite, &config.storage)?;
     let artifacts = ArtifactStore::new(&config.artifacts.path)?;
+    artifacts.cleanup_temporary_publications()?;
     match command {
         StorageCommand::Status => {
             let scan = scan(&store, &artifacts, false)?;
