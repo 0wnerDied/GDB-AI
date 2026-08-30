@@ -113,6 +113,7 @@ DeepSeek Harness exposes MCP servers through its official
         transport: stdio
         command: /absolute/path/to/gdb-ai
         args: ['serve', '--stdio']
+        env: {}
         cwd: !!js process.cwd()
 ```
 
