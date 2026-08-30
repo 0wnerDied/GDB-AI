@@ -366,11 +366,18 @@ fn canonical_rpc_request(
                 CanonicalPresentation::Tool,
             )))
         }
-        "gdb.ai/call" => Ok(Some((
-            serde_json::from_value(params.take())
-                .map_err(|error| RpcFault::invalid(error.to_string()))?,
-            CanonicalPresentation::Envelope,
-        ))),
+        "gdb.ai/call" => {
+            // 2026-08-30: MCP 2026 metadata belongs to the transport request,
+            // not the deny-unknown-fields canonical GDB/AI envelope.
+            if let Some(params) = params.as_object_mut() {
+                params.remove("_meta");
+            }
+            Ok(Some((
+                serde_json::from_value(params.take())
+                    .map_err(|error| RpcFault::invalid(error.to_string()))?,
+                CanonicalPresentation::Envelope,
+            )))
+        }
         _ => Ok(None),
     }
 }

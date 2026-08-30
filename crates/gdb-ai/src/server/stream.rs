@@ -751,6 +751,26 @@ mod tests {
         assert_eq!(listed["result"]["resultType"], "complete");
         assert_eq!(listed["result"]["ttlMs"], 86_400_000_u64);
         assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 9);
+        write_rpc(
+            &mut client_output,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "gdb.ai/call",
+                "params": {
+                    "api_version": gdb_ai_core::protocol::API_VERSION,
+                    "request_id": "stateless-list",
+                    "method": "session.list",
+                    "parameters": {},
+                    "_meta": metadata
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let called = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(called["result"]["resultType"], "complete");
+        assert!(called["result"]["result"].as_array().is_some());
         client_output.shutdown().await.unwrap();
         drop(client_output);
         serving.await.unwrap().unwrap();
