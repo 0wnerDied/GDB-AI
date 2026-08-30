@@ -77,6 +77,7 @@ struct OperationEntry {
     state: watch::Sender<RequestOperationRecord>,
     transition: Mutex<()>,
     cancelled: Arc<AtomicBool>,
+    cancellation_applied: AtomicBool,
 }
 
 pub(super) struct OperationRegistry {
@@ -117,6 +118,7 @@ impl OperationRegistry {
             state,
             transition: Mutex::new(()),
             cancelled: Arc::new(AtomicBool::new(false)),
+            cancellation_applied: AtomicBool::new(false),
         });
         entries.insert(id, entry.clone());
         Ok(entry)
@@ -224,11 +226,19 @@ impl Gateway {
             };
             let _transition = entry.transition.lock().await;
             entry.state.send_modify(|record| {
-                record.status = if record.status == RequestOperationStatus::CancelRequested {
-                    RequestOperationStatus::Aborted
-                } else {
-                    status
-                };
+                // 2026-08-30: A cancellation could lose the race with normal
+                // completion yet overwrite a successful result as ABORTED.
+                // Only an actor-applied or cooperatively observed cancel wins.
+                let cooperatively_cancelled = response
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.code == ErrorCode::Cancelled);
+                record.status = completed_status(
+                    status,
+                    record.status,
+                    entry.cancellation_applied.load(Ordering::Acquire),
+                    cooperatively_cancelled,
+                );
                 record.result = Some(response);
             });
         });
@@ -276,8 +286,8 @@ impl Gateway {
         mode: crate::session::OperationCancelMode,
     ) -> Result<RequestOperationRecord> {
         let entry = self.operations.entry(operation_id, caller).await?;
+        let _transition = entry.transition.lock().await;
         let session_id = {
-            let _transition = entry.transition.lock().await;
             let record = entry.state.borrow().clone();
             if record.status.terminal() {
                 return Err(Error::new(
@@ -302,7 +312,7 @@ impl Gateway {
         let session = self.entry(&session_id).await?;
         let operation_id = OperationId::parse(operation_id)?;
         match session.handle.cancel_operation(operation_id, mode).await {
-            Ok(()) => {}
+            Ok(()) => entry.cancellation_applied.store(true, Ordering::Release),
             // A queued operation observes the shared cancellation flag before
             // it sends MI; no active resume exists for the actor to interrupt.
             Err(error) if error.code == ErrorCode::Conflict => {}
@@ -345,6 +355,23 @@ impl Gateway {
             .cancel_request_operation(operation_id, caller, mode)
             .await?;
         Ok(json!({ "operation": record }))
+    }
+}
+
+fn completed_status(
+    outcome: RequestOperationStatus,
+    current: RequestOperationStatus,
+    cancellation_applied: bool,
+    cooperatively_cancelled: bool,
+) -> RequestOperationStatus {
+    if outcome == RequestOperationStatus::OutcomeUnknown {
+        RequestOperationStatus::OutcomeUnknown
+    } else if current == RequestOperationStatus::CancelRequested
+        && (cancellation_applied || cooperatively_cancelled)
+    {
+        RequestOperationStatus::Aborted
+    } else {
+        outcome
     }
 }
 
@@ -445,6 +472,46 @@ mod tests {
         assert_eq!(
             cancellation_for_request(&request),
             RequestOperationCancellation::WaiterOnly
+        );
+    }
+
+    #[test]
+    fn cancellation_that_loses_completion_race_preserves_outcome() {
+        assert_eq!(
+            completed_status(
+                RequestOperationStatus::Succeeded,
+                RequestOperationStatus::CancelRequested,
+                false,
+                false,
+            ),
+            RequestOperationStatus::Succeeded
+        );
+        assert_eq!(
+            completed_status(
+                RequestOperationStatus::Succeeded,
+                RequestOperationStatus::CancelRequested,
+                true,
+                false,
+            ),
+            RequestOperationStatus::Aborted
+        );
+        assert_eq!(
+            completed_status(
+                RequestOperationStatus::Failed,
+                RequestOperationStatus::CancelRequested,
+                false,
+                true,
+            ),
+            RequestOperationStatus::Aborted
+        );
+        assert_eq!(
+            completed_status(
+                RequestOperationStatus::OutcomeUnknown,
+                RequestOperationStatus::CancelRequested,
+                true,
+                false,
+            ),
+            RequestOperationStatus::OutcomeUnknown
         );
     }
 }
