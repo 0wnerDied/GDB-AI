@@ -765,7 +765,9 @@ impl Gateway {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
-        let (start, end, current) = if let Some(range) = request.parameters.get("range") {
+        let (start, end, current, around_limit) = if let Some(range) =
+            request.parameters.get("range")
+        {
             let start = crate::domain::Address::parse(&string(range, "start")?)?;
             let end = crate::domain::Address::parse(&string(range, "end")?)?;
             let start_number = parse_address(start.as_str())?;
@@ -776,7 +778,7 @@ impl Gateway {
                     "disassembly range must be positive and at most 64 KiB",
                 ));
             }
-            (start_number, end_number, None)
+            (start_number, end_number, None, None)
         } else {
             let around = request
                 .parameters
@@ -811,6 +813,7 @@ impl Gateway {
                 address.saturating_sub(before * 16),
                 address.saturating_add(after * 16 + 16),
                 Some(address),
+                Some((before as usize, after as usize)),
             )
         };
         let include_source = bool_value(&request.parameters, "include_source", true);
@@ -840,7 +843,7 @@ impl Gateway {
             .ok()
             .map(|reply| target_architecture(&result_string_list(&reply.record, "register-names")))
             .unwrap_or("unknown");
-        let instructions = disassembly_instructions(&reply.record, current);
+        let instructions = disassembly_instructions(&reply.record, current, around_limit);
         Ok(json!({
             "architecture": architecture,
             "syntax": "target-default",

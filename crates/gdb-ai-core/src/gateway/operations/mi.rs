@@ -199,12 +199,51 @@ pub(super) fn normalized_source_files(record: &MiRecord) -> Vec<Value> {
         .collect()
 }
 
-pub(super) fn disassembly_instructions(record: &MiRecord, current: Option<u64>) -> Vec<Value> {
+pub(super) fn disassembly_instructions(
+    record: &MiRecord,
+    current: Option<u64>,
+    around: Option<(usize, usize)>,
+) -> Vec<Value> {
     let mut instructions = Vec::new();
     for result in record.results() {
         collect_instructions(&result.value, None, None, current, &mut instructions);
     }
+    let Some((current, (before, after))) = current.zip(around) else {
+        return instructions;
+    };
+    limit_disassembly_instructions(instructions, current, before, after)
+}
+
+fn limit_disassembly_instructions(
+    instructions: Vec<Value>,
+    current: u64,
+    before: usize,
+    after: usize,
+) -> Vec<Value> {
+    // 2026-08-30: The byte window deliberately over-reads for variable-width
+    // targets, but returning every decoded instruction inflated Agent context.
+    let pivot = instructions
+        .iter()
+        .position(|instruction| instruction["current"] == true)
+        .or_else(|| {
+            instructions.iter().position(|instruction| {
+                instruction["address"]
+                    .as_str()
+                    .and_then(|address| parse_address(address).ok())
+                    .is_some_and(|address| address >= current)
+            })
+        })
+        .unwrap_or_else(|| instructions.len().saturating_sub(1));
+    let start = pivot.saturating_sub(before);
+    let end = pivot
+        .saturating_add(after)
+        .saturating_add(1)
+        .min(instructions.len());
     instructions
+        .into_iter()
+        .skip(start)
+        .take(end - start)
+        .collect()
 }
 
 pub(super) fn collect_instructions(
@@ -365,5 +404,26 @@ pub(super) fn valid_integer_literal(value: &str) -> bool {
         !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
     } else {
         !unsigned.is_empty() && unsigned.bytes().all(|byte| byte.is_ascii_digit())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounds_overread_disassembly_around_the_current_instruction() {
+        let instructions = (0..10)
+            .map(|index| {
+                json!({
+                    "address": format!("0x{index:x}"),
+                    "current": index == 5
+                })
+            })
+            .collect::<Vec<_>>();
+        let bounded = limit_disassembly_instructions(instructions, 5, 2, 3);
+        assert_eq!(bounded.len(), 6);
+        assert_eq!(bounded[0]["address"], "0x3");
+        assert_eq!(bounded[5]["address"], "0x8");
     }
 }

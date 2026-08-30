@@ -914,7 +914,9 @@ async fn local_debugging_vertical_slice() {
             )
             .await,
     );
-    successful(
+    // 2026-08-30: Keep the response bound to this request; the original
+    // regression assertion accidentally inspected the earlier memory result.
+    let disassembly = successful(
         gateway
             .dispatch(
                 request(
@@ -930,6 +932,11 @@ async fn local_debugging_vertical_slice() {
                 &caller,
             )
             .await,
+    );
+    assert!(
+        disassembly.result.as_ref().unwrap()["instructions"]
+            .as_array()
+            .is_some_and(|instructions| instructions.len() <= 7)
     );
 
     let stable_memory = gateway.dispatch(
