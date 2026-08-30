@@ -873,3 +873,36 @@ async fn mcp_client_labels_share_principal_limits_and_idempotency() {
         idempotency_key(&request, &second)
     );
 }
+
+#[tokio::test]
+async fn ordinary_reads_do_not_duplicate_journal_evidence_in_sqlite() {
+    let directory = tempdir().unwrap();
+    let gateway = Gateway::new(Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    })
+    .unwrap();
+    let response = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "list-without-audit".into(),
+                session_id: None,
+                method: crate::protocol::CanonicalMethod::SessionList,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &Caller::local("read-test"),
+        )
+        .await;
+
+    assert!(response.error.is_none());
+    assert_eq!(gateway.store.audit_counts().unwrap(), (0, 0));
+}

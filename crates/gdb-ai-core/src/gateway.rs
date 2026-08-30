@@ -341,6 +341,11 @@ impl Gateway {
                 }
             }
         }
+        // 2026-08-30: Persisting ordinary observations to two SQLite audit
+        // tables added six retention statements to every Agent read. Their
+        // evidence remains in the session journal; state-changing and volatile
+        // operations retain durable admission and completion audit records.
+        let durable_audit = effect != Effect::Read;
         let profile = entry
             .as_ref()
             .map(|entry| entry.handle.profile())
@@ -502,16 +507,18 @@ impl Gateway {
         if let Some(entry) = &entry {
             entry.handle.record_api(request_value.clone()).await?;
         }
-        self.store.audit(
-            &caller.identity,
-            entry.as_ref().map(|entry| entry.handle.id()),
-            &request.method,
-            effect,
-            true,
-            entry.as_ref().map(|entry| entry.handle.state().revision),
-            &request_value,
-            "accepted",
-        )?;
+        if durable_audit {
+            self.store.audit(
+                &caller.identity,
+                entry.as_ref().map(|entry| entry.handle.id()),
+                &request.method,
+                effect,
+                true,
+                entry.as_ref().map(|entry| entry.handle.state().revision),
+                &request_value,
+                "accepted",
+            )?;
+        }
 
         let mut result = self.execute_method(request, caller).await;
         if result.is_ok()
@@ -536,7 +543,9 @@ impl Gateway {
             _ => None,
         };
         let mut warnings = Vec::new();
-        if let Some(entry) = &completed_entry {
+        if let Some(entry) = &completed_entry
+            && durable_audit
+        {
             let outcome = if result.is_ok() {
                 "completed"
             } else {
