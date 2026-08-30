@@ -4,12 +4,12 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
     context::{WaitSpec, apply_wait, wait_if_requested, wait_spec},
+    encoding::byte_content,
     mi::frame_summary,
     request::{parameters, required_session, string, unsigned},
 };
@@ -266,15 +266,14 @@ impl Gateway {
                     format!("transcript read task failed: {error}"),
                 )
             })??;
-        let text = std::str::from_utf8(&bytes).ok();
-        Ok(json!({
+        let mut result = json!({
             "offset": offset,
             "next_offset": offset + bytes.len() as u64,
             "total_bytes": length,
-            "text": text,
-            "data_base64": BASE64.encode(&bytes),
             "truncated": offset + (bytes.len() as u64) < length
-        }))
+        });
+        result.as_object_mut().unwrap().extend(byte_content(bytes));
+        Ok(result)
     }
 
     pub(super) async fn session_event(&self, request: &ApiRequest) -> Result<Value> {

@@ -1,5 +1,6 @@
 use std::sync::atomic::AtomicU64;
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_core::{
     gateway::{Caller, Gateway},
     protocol::CanonicalMethod,
@@ -394,10 +395,13 @@ fn session_resource_contents(
                 "session resource did not contain the exact requested range",
             ));
         }
-        let blob = result
-            .get("data_base64")
-            .and_then(Value::as_str)
-            .ok_or_else(|| RpcFault::invalid("session resource contained no data"))?;
+        let blob = if let Some(blob) = result.get("data_base64").and_then(Value::as_str) {
+            blob.to_owned()
+        } else if let Some(text) = result.get("text").and_then(Value::as_str) {
+            BASE64.encode(text.as_bytes())
+        } else {
+            return Err(RpcFault::invalid("session resource contained no data"));
+        };
         Ok(json!({"contents": [{
             "uri": uri,
             "mimeType": mime_type,
@@ -647,6 +651,16 @@ mod tests {
         .unwrap();
         assert_eq!(range["contents"][0]["uri"], transcript_range);
         assert_eq!(range["contents"][0]["blob"], "BAUGBw==");
+
+        let text_range = format!("{transcript}?offset=0&length=4");
+        let (_, resource) = parse_session_resource(&text_range).unwrap();
+        let range = session_resource_contents(
+            &text_range,
+            resource,
+            json!({"offset": 0, "next_offset": 4, "text": "ABCD"}),
+        )
+        .unwrap();
+        assert_eq!(range["contents"][0]["blob"], "QUJDRA==");
 
         let pty_range = "gdbai://session/sess_test/output/pty?offset=4&length=4";
         let (_, resource) = parse_session_resource(pty_range).unwrap();

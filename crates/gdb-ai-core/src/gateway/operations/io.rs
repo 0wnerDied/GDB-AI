@@ -1,8 +1,7 @@
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde_json::{Value, json};
 
 use super::{
-    encoding::input_bytes,
+    encoding::{byte_content, input_bytes},
     request::{required_session, unsigned},
 };
 use crate::{
@@ -42,19 +41,20 @@ impl Gateway {
             }
         };
         let read = entry.handle.read_output(ring, offset, max_bytes).await?;
-        let text = std::str::from_utf8(&read.bytes).ok().map(str::to_owned);
         let evidence =
             matches!(ring, OutputRing::Inferior).then(|| entry.handle.inferior_output_evidence());
-        Ok(json!({
+        let mut result = json!({
             "requested_offset": read.requested_offset,
             "available_from": read.available_from,
             "next_offset": read.next_offset,
             "gap": read.gap,
-            "encoding": if text.is_some() { "utf-8" } else { "binary" },
-            "text": text,
-            "data_base64": BASE64.encode(read.bytes),
             "evidence": evidence
-        }))
+        });
+        result
+            .as_object_mut()
+            .unwrap()
+            .extend(byte_content(read.bytes));
+        Ok(result)
     }
 
     pub(super) async fn io_write(&self, request: &ApiRequest) -> Result<Value> {

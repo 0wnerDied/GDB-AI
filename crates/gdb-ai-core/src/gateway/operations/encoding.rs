@@ -1,5 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::{Error, ErrorCode, Result};
 
@@ -106,6 +106,42 @@ pub(super) fn input_bytes(parameters: &Value) -> Result<Vec<u8>> {
     ))
 }
 
+pub(super) fn byte_content(bytes: Vec<u8>) -> Map<String, Value> {
+    // 2026-08-30: Returning UTF-8 as both text and base64 duplicated target
+    // evidence and inflated Agent context. Emit exactly one lossless form.
+    let mut content = Map::new();
+    match String::from_utf8(bytes) {
+        Ok(text) => {
+            content.insert("encoding".into(), Value::String("utf-8".into()));
+            content.insert("text".into(), Value::String(text));
+        }
+        Err(error) => {
+            content.insert("encoding".into(), Value::String("binary".into()));
+            content.insert(
+                "data_base64".into(),
+                Value::String(BASE64.encode(error.into_bytes())),
+            );
+        }
+    }
+    content
+}
+
 pub(super) fn first_word(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or("unknown")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_content_uses_one_lossless_representation() {
+        let text = byte_content(b"hello".to_vec());
+        assert_eq!(text["text"], "hello");
+        assert!(!text.contains_key("data_base64"));
+
+        let binary = byte_content(vec![0xff]);
+        assert_eq!(binary["data_base64"], "/w==");
+        assert!(!binary.contains_key("text"));
+    }
 }
