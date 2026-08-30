@@ -843,6 +843,25 @@ async fn idempotency_lock_cleanup_preserves_live_waiters_and_replacements() {
     ));
 }
 
+#[test]
+fn borrowed_idempotency_fingerprint_preserves_the_wire_hash() {
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "retry-2".into(),
+        session_id: Some("sess_test".into()),
+        method: crate::protocol::CanonicalMethod::MemoryWrite,
+        expected_revision: Some(7),
+        idempotency_key: Some("write-once".into()),
+        parameters: json!({"address": "0x1000", "data_base64": "AA=="}),
+    };
+    let mut legacy = request.clone();
+    legacy.request_id.clear();
+    legacy.idempotency_key = None;
+    let expected = format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap()));
+
+    assert_eq!(idempotency_fingerprint(&request), expected);
+}
+
 #[tokio::test]
 async fn shutdown_closes_session_admission() {
     let directory = tempdir().unwrap();

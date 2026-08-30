@@ -1,3 +1,4 @@
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -1061,12 +1062,32 @@ fn idempotency_key(request: &ApiRequest, caller: &Caller) -> String {
     )
 }
 
+#[derive(Serialize)]
+struct FingerprintRequest<'a> {
+    api_version: &'a str,
+    request_id: &'static str,
+    session_id: &'a Option<String>,
+    method: crate::protocol::CanonicalMethod,
+    expected_revision: Option<u64>,
+    idempotency_key: Option<&'static str>,
+    parameters: &'a Value,
+}
+
 // 2026-08-28: A key without a request fingerprint returned an earlier result
 // for different parameters. Exclude transport request IDs so real retries match.
 fn idempotency_fingerprint(request: &ApiRequest) -> String {
-    let mut canonical = request.clone();
-    canonical.request_id.clear();
-    canonical.idempotency_key = None;
+    // 2026-08-30: Cloning the request copied its complete caller-controlled
+    // parameter tree. A borrowed view preserves the existing canonical JSON
+    // field order and fingerprint while replacing only the excluded fields.
+    let canonical = FingerprintRequest {
+        api_version: &request.api_version,
+        request_id: "",
+        session_id: &request.session_id,
+        method: request.method,
+        expected_revision: request.expected_revision,
+        idempotency_key: None,
+        parameters: &request.parameters,
+    };
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     format!("{:x}", Sha256::digest(bytes))
 }
