@@ -503,6 +503,7 @@ impl Gateway {
         let mut presented = BTreeMap::new();
         for definition in entry.handle.tracking().await? {
             let tracking_id = definition.id().0.clone();
+            let mut presentation = None;
             let observation = match definition {
                 TrackingDefinition::Expression {
                     expression,
@@ -572,13 +573,38 @@ impl Gateway {
                         Err(error) => Err(error),
                     };
                     match bytes {
-                        Ok((bytes, evidence_seq)) => json!({
-                            "address_expression": address_expression,
-                            "length": bytes.len(),
-                            "sha256": format!("{:x}", Sha256::digest(&bytes)),
-                            "data_base64": BASE64.encode(&bytes),
-                            "evidence_seq": evidence_seq
-                        }),
+                        Ok((bytes, evidence_seq)) => {
+                            let length = bytes.len();
+                            let sha256 = format!("{:x}", Sha256::digest(&bytes));
+                            let data_base64 = BASE64.encode(&bytes);
+                            // 2026-08-30: Presentation decoded the just-created
+                            // base64 value back into a second full memory buffer.
+                            // Build both views while the captured bytes are live.
+                            if length > self.config.limits.inline_memory_bytes {
+                                let preview_hex = hex_encode(&bytes[..length.min(64)]);
+                                let uri = self.put_artifact(
+                                    Some(entry.handle.id()),
+                                    &bytes,
+                                    "tracked-memory",
+                                )?;
+                                presentation = Some(json!({
+                                    "address_expression": &address_expression,
+                                    "length": length,
+                                    "sha256": &sha256,
+                                    "preview_hex": preview_hex,
+                                    "artifact": uri,
+                                    "truncated": true,
+                                    "evidence_seq": evidence_seq
+                                }));
+                            }
+                            json!({
+                                "address_expression": &address_expression,
+                                "length": length,
+                                "sha256": sha256,
+                                "data_base64": data_base64,
+                                "evidence_seq": evidence_seq
+                            })
+                        }
                         Err(error) => {
                             warnings.push(json!({
                                 "code": "TRACKED_MEMORY_UNAVAILABLE",
@@ -592,26 +618,7 @@ impl Gateway {
             };
             // 2026-08-28: Tracked memory was copied into snapshots and SQLite
             // as base64. Keep bytes only in bounded worker history and artifacts.
-            let presentation = match observation
-                .get("data_base64")
-                .and_then(Value::as_str)
-                .and_then(|encoded| BASE64.decode(encoded).ok())
-            {
-                Some(bytes) if bytes.len() > self.config.limits.inline_memory_bytes => {
-                    let uri =
-                        self.put_artifact(Some(entry.handle.id()), &bytes, "tracked-memory")?;
-                    json!({
-                        "address_expression": observation.get("address_expression"),
-                        "length": observation.get("length"),
-                        "sha256": observation.get("sha256"),
-                        "preview_hex": hex_encode(&bytes[..bytes.len().min(64)]),
-                        "artifact": uri,
-                        "truncated": true,
-                        "evidence_seq": observation.get("evidence_seq")
-                    })
-                }
-                _ => observation.clone(),
-            };
+            let presentation = presentation.unwrap_or_else(|| observation.clone());
             observations.insert(tracking_id.clone(), observation);
             presented.insert(tracking_id, presentation);
         }
