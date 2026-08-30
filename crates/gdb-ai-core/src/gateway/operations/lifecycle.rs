@@ -141,6 +141,7 @@ impl Gateway {
         };
         self.store.upsert_lease(&lease)?;
         current.replace(lease.clone());
+        drop(current);
         entry
             .handle
             .record_event(DomainEvent::ControllerChanged {
@@ -152,13 +153,19 @@ impl Gateway {
 
     pub(super) async fn session_release_write_lease(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
-        let released = entry
-            .lease
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| Error::new(ErrorCode::NotFound, "write lease not found"))?;
-        self.store.delete_lease(entry.handle.id())?;
+        // 2026-08-30: Removing memory state before durable state let a
+        // concurrent acquire persist a new lease that this old release then
+        // deleted. Keep both changes under the one lease serialization point.
+        let released = {
+            let mut current = entry.lease.lock().await;
+            let released = current
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| Error::new(ErrorCode::NotFound, "write lease not found"))?;
+            self.store.delete_lease(entry.handle.id())?;
+            current.take();
+            released
+        };
         entry
             .handle
             .record_event(DomainEvent::ControllerChanged {

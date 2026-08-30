@@ -328,6 +328,84 @@ async fn completion_audit_failure_preserves_an_executed_mutation() {
 }
 
 #[tokio::test]
+async fn failed_lease_release_keeps_the_live_lease() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let sqlite = directory.path().join("state.sqlite");
+    let gateway = Gateway::new(Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: sqlite.clone(),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    })
+    .unwrap();
+    let caller = Caller::local("lease-release-test");
+    let created = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "create-release-test".into(),
+                session_id: None,
+                method: crate::protocol::CanonicalMethod::SessionCreate,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    let session_id = created.session_id.unwrap();
+    let lease_id = created.result.unwrap()["write_lease"]["lease_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    rusqlite::Connection::open(sqlite)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_lease_delete BEFORE DELETE ON leases
+             BEGIN SELECT RAISE(ABORT, 'injected lease delete failure'); END;",
+        )
+        .unwrap();
+
+    let released = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "release-test".into(),
+                session_id: Some(session_id.clone()),
+                method: crate::protocol::CanonicalMethod::SessionReleaseWriteLease,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({
+                    "accept_latest_revision": true,
+                    "lease_id": lease_id
+                }),
+            },
+            &caller,
+        )
+        .await;
+
+    assert!(released.error.is_some());
+    assert!(
+        gateway
+            .entry(&session_id)
+            .await
+            .unwrap()
+            .lease
+            .lock()
+            .await
+            .is_some()
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn concurrent_idempotent_create_runs_once() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
