@@ -4,7 +4,10 @@ use std::{
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -37,6 +40,7 @@ use super::{
 use crate::AnyError;
 
 struct HttpPending {
+    generation: u64,
     cancel_waiter: Option<oneshot::Sender<()>>,
     cancellation: RequestCancellation,
     deadline: Instant,
@@ -52,6 +56,7 @@ struct HttpCompletion {
     sessions: Arc<RwLock<HashMap<String, HttpClient>>>,
     session_id: String,
     key: String,
+    generation: u64,
     response_id: Value,
     deadline: Instant,
     tracked: Option<TrackedOperation>,
@@ -299,6 +304,7 @@ async fn http_mcp(
         Err(error) => return json_http_response(rpc_fault(id, error), Some(session_id)),
     };
     let deadline = Instant::now() + MAX_HTTP_PENDING_DURATION;
+    let pending_generation = state.sequence.fetch_add(1, Ordering::Relaxed);
     let (cancel_waiter, cancelled) = oneshot::channel();
     let reserved = {
         let mut sessions = state.sessions.write().await;
@@ -309,6 +315,7 @@ async fn http_mcp(
                 client.pending.insert(
                     key.clone(),
                     HttpPending {
+                        generation: pending_generation,
                         cancel_waiter: Some(cancel_waiter),
                         cancellation,
                         deadline,
@@ -396,6 +403,7 @@ async fn http_mcp(
             sessions: state.sessions.clone(),
             session_id: session_id.to_owned(),
             key,
+            generation: pending_generation,
             response_id,
             deadline,
             tracked: operation_id.map(|operation_id| TrackedOperation {
@@ -493,10 +501,23 @@ async fn complete_http_operation(
         .await
         .get_mut(&completion.session_id)
     {
-        client.pending.remove(&completion.key);
+        remove_http_pending(client, &completion.key, completion.generation);
         client.last_active = Instant::now();
     }
     let _ = completion.response.send(value);
+}
+
+fn remove_http_pending(client: &mut HttpClient, key: &str, generation: u64) {
+    // 2026-08-30: A cancelled request ID could be reused while its completion
+    // task was still running. Match the reservation generation so the old
+    // completion cannot remove the replacement request.
+    if client
+        .pending
+        .get(key)
+        .is_some_and(|pending| pending.generation == generation)
+    {
+        client.pending.remove(key);
+    }
 }
 
 async fn evict_http_sessions(state: &HttpState) {
@@ -756,8 +777,13 @@ mod tests {
 
     use super::super::CancelMode;
 
-    fn detached_http_pending(waiter: oneshot::Sender<()>, deadline: Instant) -> HttpPending {
+    fn detached_http_pending(
+        generation: u64,
+        waiter: oneshot::Sender<()>,
+        deadline: Instant,
+    ) -> HttpPending {
         HttpPending {
+            generation,
             cancel_waiter: Some(waiter),
             cancellation: RequestCancellation {
                 mode: CancelMode::DetachWaiter,
@@ -778,12 +804,24 @@ mod tests {
         assert_eq!(late.operation_id.as_deref(), Some("op_late"));
 
         let (waiter, _cancelled) = oneshot::channel();
-        let mut pending = detached_http_pending(waiter, Instant::now());
+        let mut pending = detached_http_pending(1, waiter, Instant::now());
         assert!(bind_http_operation(Some(&mut pending), "op_pending", cancellation).is_none());
         assert_eq!(
             pending.cancellation.operation_id.as_deref(),
             Some("op_pending")
         );
+
+        let mut client = HttpClient {
+            phase: Phase::Ready,
+            protocol_version: MCP_VERSION.into(),
+            caller: Caller::local("pending-generation-test"),
+            pending: HashMap::from([("same-id".into(), pending)]),
+            last_active: Instant::now(),
+        };
+        remove_http_pending(&mut client, "same-id", 0);
+        assert!(client.pending.contains_key("same-id"));
+        remove_http_pending(&mut client, "same-id", 1);
+        assert!(client.pending.is_empty());
     }
 
     #[tokio::test]
@@ -1018,7 +1056,7 @@ mod tests {
                 caller: caller.clone(),
                 pending: HashMap::from([(
                     "1".into(),
-                    detached_http_pending(cancel_waiter, deadline),
+                    detached_http_pending(1, cancel_waiter, deadline),
                 )]),
                 last_active: Instant::now(),
             },
@@ -1036,6 +1074,7 @@ mod tests {
                 sessions: sessions.clone(),
                 session_id: "mcp_test".into(),
                 key: "1".into(),
+                generation: 1,
                 response_id: json!(1),
                 deadline,
                 tracked: None,
@@ -1054,13 +1093,17 @@ mod tests {
             .get_mut("mcp_test")
             .unwrap()
             .pending
-            .insert("2".into(), detached_http_pending(cancel_waiter, deadline));
+            .insert(
+                "2".into(),
+                detached_http_pending(2, cancel_waiter, deadline),
+            );
         let (response, received) = oneshot::channel();
         complete_http_operation(
             HttpCompletion {
                 sessions: sessions.clone(),
                 session_id: "mcp_test".into(),
                 key: "2".into(),
+                generation: 2,
                 response_id: json!(2),
                 deadline,
                 tracked: None,
@@ -1080,7 +1123,10 @@ mod tests {
             .get_mut("mcp_test")
             .unwrap()
             .pending
-            .insert("3".into(), detached_http_pending(cancel_waiter, deadline));
+            .insert(
+                "3".into(),
+                detached_http_pending(3, cancel_waiter, deadline),
+            );
         let operation = tokio::spawn(async {
             std::future::pending::<()>().await;
             Ok(json!({"unreachable": true}))
@@ -1092,6 +1138,7 @@ mod tests {
                 sessions: sessions.clone(),
                 session_id: "mcp_test".into(),
                 key: "3".into(),
+                generation: 3,
                 response_id: json!(3),
                 deadline,
                 tracked: None,
@@ -1146,6 +1193,7 @@ mod tests {
                 pending: HashMap::from([(
                     "expired".into(),
                     detached_http_pending(
+                        1,
                         expired_waiter,
                         Instant::now() - Duration::from_millis(1),
                     ),
@@ -1167,7 +1215,7 @@ mod tests {
             .pending
             .insert(
                 "delete".into(),
-                detached_http_pending(delete_waiter, Instant::now() + Duration::from_secs(60)),
+                detached_http_pending(2, delete_waiter, Instant::now() + Duration::from_secs(60)),
             );
         let mut headers = HeaderMap::new();
         headers.insert("mcp-session-id", HeaderValue::from_static("mcp_test"));
