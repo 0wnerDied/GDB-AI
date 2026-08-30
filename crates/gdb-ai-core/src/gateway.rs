@@ -1088,8 +1088,9 @@ fn idempotency_fingerprint(request: &ApiRequest) -> String {
         idempotency_key: None,
         parameters: &request.parameters,
     };
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    format!("{:x}", Sha256::digest(bytes))
+    let mut digest = Sha256::new();
+    serde_json::to_writer(&mut digest, &canonical).unwrap_or_default();
+    format!("{:x}", digest.finalize())
 }
 
 fn now_unix_ms() -> u64 {
