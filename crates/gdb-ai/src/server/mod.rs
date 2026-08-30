@@ -557,9 +557,29 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         ) {
             result.remove("capabilities");
         }
+        match method {
+            CanonicalMethod::BreakpointCreate | CanonicalMethod::BreakpointUpdate
+                if result.get("breakpoint").is_some_and(Value::is_object) =>
+            {
+                result.remove("breakpoints");
+            }
+            CanonicalMethod::BreakpointDelete
+                if result.get("deleted").is_some_and(Value::is_object) =>
+            {
+                result.remove("breakpoints");
+            }
+            _ => {}
+        }
         if result
             .get("stop_id")
             .is_some_and(|stop_id| !stop_id.is_null())
+            || matches!(
+                method,
+                CanonicalMethod::BreakpointCreate
+                    | CanonicalMethod::BreakpointUpdate
+                    | CanonicalMethod::BreakpointDelete
+                    | CanonicalMethod::BreakpointList
+            )
         {
             state = None;
         }

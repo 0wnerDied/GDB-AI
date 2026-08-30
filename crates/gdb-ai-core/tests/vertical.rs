@@ -320,6 +320,10 @@ async fn local_debugging_vertical_slice() {
         .and_then(|breakpoint| breakpoint["id"].as_str())
         .unwrap()
         .to_owned();
+    assert_eq!(
+        breakpoint.result.as_ref().unwrap()["breakpoint"]["id"],
+        breakpoint_id
+    );
     let breakpoint = successful(
         gateway
             .dispatch(

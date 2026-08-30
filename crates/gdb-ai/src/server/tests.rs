@@ -178,3 +178,33 @@ fn tool_results_omit_on_demand_evidence_and_repeated_stop_state() {
     let raw = tool_result(raw, CanonicalMethod::RawMi);
     assert!(raw["structuredContent"]["result"].get("command").is_some());
 }
+
+#[test]
+fn breakpoint_tool_results_return_only_the_affected_breakpoint() {
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "breakpoint".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::BreakpointCreate,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let response = ApiResponse::success(
+        &request,
+        Some(SessionState::creating(
+            SessionId::parse("sess_test").unwrap(),
+        )),
+        json!({
+            "breakpoint": {"id": "bp_64", "backend_number": "64"},
+            "breakpoints": (0..64)
+                .map(|index| (index.to_string(), json!({"id": format!("bp_{index}")})))
+                .collect::<Map<String, Value>>()
+        }),
+    );
+    let result = tool_result(response, CanonicalMethod::BreakpointCreate);
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["result"]["breakpoint"]["id"], "bp_64");
+    assert!(structured["result"].get("breakpoints").is_none());
+    assert!(structured.get("state").is_none());
+}

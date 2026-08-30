@@ -341,6 +341,7 @@ impl Gateway {
             command = command.string(location);
         }
         let reply = entry.handle.command(command).await?;
+        let inserted_number = inserted_breakpoint_number(&reply.record).ok();
         if let Some(fields) =
             MiResult::find(reply.record.results(), "bkpt").and_then(MiValue::results)
         {
@@ -365,7 +366,17 @@ impl Gateway {
                     .await?;
             }
         }
-        Ok(json!({ "command": reply, "breakpoints": entry.handle.state().breakpoints }))
+        let state = entry.handle.state();
+        // 2026-08-30: Returning the complete registry after every insert made
+        // repeated Agent breakpoint creation produce quadratic MCP output.
+        let breakpoint = inserted_number
+            .as_ref()
+            .and_then(|number| state.breakpoints.get(number));
+        Ok(json!({
+            "command": reply,
+            "breakpoint": breakpoint,
+            "breakpoints": state.breakpoints
+        }))
     }
 
     pub(super) async fn breakpoint_update(&self, request: &ApiRequest) -> Result<Value> {
@@ -422,7 +433,7 @@ impl Gateway {
                         .handle
                         .command(
                             MiCommand::new("-break-after")?
-                                .bare(number)?
+                                .bare(number.clone())?
                                 .bare(ignore.to_string())?,
                         )
                         .await?,
@@ -437,10 +448,12 @@ impl Gateway {
         }
         let replies = update?;
         let list = list?;
+        let state = entry.handle.state();
         Ok(json!({
             "command": replies.last(),
             "commands": replies,
-            "breakpoints": entry.handle.state().breakpoints,
+            "breakpoint": state.breakpoints.get(&number),
+            "breakpoints": state.breakpoints,
             "evidence_seq": list.evidence_seq
         }))
     }
@@ -448,14 +461,21 @@ impl Gateway {
     pub(super) async fn breakpoint_delete(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
         let number = breakpoint_number(&entry, &request.parameters)?;
+        let deleted = entry
+            .handle
+            .state()
+            .breakpoints
+            .get(&number)
+            .map(|breakpoint| breakpoint.id.clone());
         let reply = entry
             .handle
-            .command(MiCommand::new("-break-delete")?.bare(number)?)
+            .command(MiCommand::new("-break-delete")?.bare(number.clone())?)
             .await?;
         let list = entry.handle.command(MiCommand::new("-break-list")?).await?;
         reconcile_breakpoints(&entry.handle, &list.record).await?;
         Ok(json!({
             "command": reply,
+            "deleted": {"breakpoint_id": deleted, "backend_number": number},
             "breakpoints": entry.handle.state().breakpoints,
             "evidence_seq": list.evidence_seq
         }))
