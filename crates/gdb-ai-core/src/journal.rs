@@ -36,6 +36,26 @@ pub struct JournalEntry {
     pub data: Value,
 }
 
+#[derive(Serialize)]
+struct EncodedJournalEntry<'a, T> {
+    seq: u64,
+    #[serde(rename = "type")]
+    kind: &'a str,
+    data: T,
+}
+
+#[derive(Serialize)]
+struct StateRevision<'a, T> {
+    revision: u64,
+    state: &'a T,
+}
+
+#[derive(Serialize)]
+struct SnapshotResult<'a, T> {
+    snapshot_id: &'a str,
+    snapshot: &'a T,
+}
+
 pub struct Journal {
     writer: BufWriter<File>,
     next_seq: u64,
@@ -134,34 +154,36 @@ impl Journal {
     }
 
     pub fn append_domain(&mut self, event: DomainEvent) -> Result<JournaledEvent> {
-        let data = serde_json::to_value(&event)?;
-        let seq = self.append("normalized.event", data)?;
+        let seq = self.append("normalized.event", &event)?;
         Ok(JournaledEvent::new(seq, event))
     }
 
-    pub fn append_state(&mut self, revision: u64, state: &Value) -> Result<u64> {
-        let sequence = self.append(
-            "state.revision",
-            serde_json::json!({ "revision": revision, "state": state }),
-        )?;
+    pub fn append_state<T: Serialize>(&mut self, revision: u64, state: &T) -> Result<u64> {
+        let sequence = self.append("state.revision", StateRevision { revision, state })?;
         self.flush_boundary(sequence)
     }
 
-    pub fn append_snapshot(&mut self, snapshot_id: &str, snapshot: &Value) -> Result<u64> {
+    pub fn append_snapshot<T: Serialize>(
+        &mut self,
+        snapshot_id: &str,
+        snapshot: &T,
+    ) -> Result<u64> {
         let sequence = self.append(
             "snapshot.result",
-            serde_json::json!({ "snapshot_id": snapshot_id, "snapshot": snapshot }),
+            SnapshotResult {
+                snapshot_id,
+                snapshot,
+            },
         )?;
         self.flush_boundary(sequence)
     }
 
-    fn append(&mut self, kind: &str, data: Value) -> Result<u64> {
+    fn append<T: Serialize>(&mut self, kind: &str, data: T) -> Result<u64> {
         let seq = self.next_seq;
-        let entry = JournalEntry {
-            seq,
-            kind: kind.to_owned(),
-            data,
-        };
+        // 2026-08-30: Domain events, snapshots, and large session states used
+        // to allocate an intermediate JSON tree before the journal encoded
+        // them. Serialize borrowed payloads directly without changing JSONL.
+        let entry = EncodedJournalEntry { seq, kind, data };
         let mut encoded = serde_json::to_vec(&entry)?;
         encoded.push(b'\n');
         // 2026-08-28: Journals performed an fsync for every record and had no

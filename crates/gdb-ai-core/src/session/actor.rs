@@ -1897,10 +1897,9 @@ impl SessionWorker {
         if changed {
             // 2026-08-28: State revisions were persisted to SQLite but absent
             // from the append-only replay evidence.
-            let appended = self.journal.append_state(
-                self.reducer.state().revision,
-                &serde_json::to_value(self.reducer.state())?,
-            );
+            let appended = self
+                .journal
+                .append_state(self.reducer.state().revision, self.reducer.state());
             self.journal_result(appended)?;
             self.persist()?;
         }
