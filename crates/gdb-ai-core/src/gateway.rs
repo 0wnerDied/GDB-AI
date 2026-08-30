@@ -208,10 +208,10 @@ impl Gateway {
                 return cached;
             }
         }
-        let state = self
-            .entry_for_request(&request)
-            .await
-            .map(|entry| entry.handle.state());
+        // 2026-08-30: Successful requests already return their post-operation
+        // state. Retain the cheap session entry and clone state only on error
+        // instead of copying growing registries before every Agent request.
+        let initial_entry = self.entry_for_request(&request).await;
         let result = self.dispatch_checked(&request, caller, admitted).await;
         let mut response = match result {
             Ok((state, result, warnings)) => {
@@ -227,7 +227,7 @@ impl Gateway {
                     .entry_for_request(&request)
                     .await
                     .map(|entry| entry.handle.state())
-                    .or(state);
+                    .or_else(|| initial_entry.map(|entry| entry.handle.state()));
                 ApiResponse::failure(&request, error, state)
             }
         };
