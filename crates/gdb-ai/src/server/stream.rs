@@ -287,8 +287,10 @@ where
                 );
             }
             Some((reservation, response)) = response_rx.recv() => {
-                if let Some((key, generation)) = reservation {
-                    remove_stream_pending(&mut pending, &key, generation);
+                if let Some((key, generation)) = reservation
+                    && !remove_stream_pending(&mut pending, &key, generation)
+                {
+                    continue;
                 }
                 write_rpc(&mut output, response).await?;
             }
@@ -301,15 +303,22 @@ where
     Ok(())
 }
 
-fn remove_stream_pending(pending: &mut HashMap<String, StreamPending>, key: &str, generation: u64) {
+fn remove_stream_pending(
+    pending: &mut HashMap<String, StreamPending>,
+    key: &str,
+    generation: u64,
+) -> bool {
     // 2026-08-30: A completed response could remain queued while cancellation
-    // freed and reused its request ID. Match the reservation generation so an
-    // old response cannot remove the replacement request.
+    // freed and reused its request ID. Deliver only the matching generation so
+    // the old response cannot be mistaken for the replacement request.
     if pending
         .get(key)
         .is_some_and(|request| request.generation == generation)
     {
         pending.remove(key);
+        true
+    } else {
+        false
     }
 }
 
@@ -628,9 +637,9 @@ mod tests {
             },
         )]);
 
-        remove_stream_pending(&mut pending, "same-id", 1);
+        assert!(!remove_stream_pending(&mut pending, "same-id", 1));
         assert!(pending.contains_key("same-id"));
-        remove_stream_pending(&mut pending, "same-id", 2);
+        assert!(remove_stream_pending(&mut pending, "same-id", 2));
         assert!(pending.is_empty());
     }
 
