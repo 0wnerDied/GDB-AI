@@ -439,6 +439,17 @@ impl StateReducer {
             DomainEvent::SnapshotStarted { stop_id }
                 if self.state.stop_id.as_ref() == Some(stop_id) =>
             {
+                // 2026-08-30: A synchronous enrichment attempt replaced the
+                // committed minimal snapshot before the new value existed.
+                // Keep the last readable snapshot until commit succeeds.
+                if self
+                    .state
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.status == SnapshotStatus::Ready)
+                {
+                    return false;
+                }
                 self.state.snapshot = Some(SnapshotRef {
                     snapshot_id: format!("snap_{stop_id}"),
                     stop_id: stop_id.clone(),
@@ -460,6 +471,9 @@ impl StateReducer {
                 if self.state.stop_id.as_ref() == Some(stop_id) =>
             {
                 if let Some(snapshot) = &mut self.state.snapshot {
+                    if snapshot.status == SnapshotStatus::Ready {
+                        return false;
+                    }
                     snapshot.status = SnapshotStatus::Failed;
                     snapshot.partial = true;
                 }
@@ -719,6 +733,45 @@ mod tests {
         apply(&mut reducer, 6, DomainEvent::TargetDisconnected);
         assert!(reducer.state().stop_id.is_none());
         assert!(reducer.state().snapshot.is_none());
+    }
+
+    #[test]
+    fn failed_enrichment_preserves_the_committed_snapshot() {
+        let mut reducer =
+            StateReducer::new(SessionState::creating(SessionId("sess_snapshot".into())));
+        apply(&mut reducer, 1, DomainEvent::BackendStarted);
+        apply(
+            &mut reducer,
+            2,
+            DomainEvent::TargetStopped {
+                backend_inferior: Some("i1".into()),
+                backend_thread: None,
+                reason: "breakpoint-hit".into(),
+                reason_detail: None,
+                frame: None,
+            },
+        );
+        let stop_id = reducer.state().stop_id.clone().unwrap();
+        apply(
+            &mut reducer,
+            3,
+            DomainEvent::SnapshotReady {
+                stop_id: stop_id.clone(),
+                partial: true,
+            },
+        );
+        let committed = reducer.state().snapshot.clone();
+
+        apply(
+            &mut reducer,
+            4,
+            DomainEvent::SnapshotStarted {
+                stop_id: stop_id.clone(),
+            },
+        );
+        apply(&mut reducer, 5, DomainEvent::SnapshotFailed { stop_id });
+
+        assert_eq!(reducer.state().snapshot, committed);
     }
 
     #[test]
