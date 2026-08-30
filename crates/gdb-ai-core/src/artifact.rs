@@ -33,8 +33,6 @@ struct ArtifactFingerprint {
     length: u64,
     modified_seconds: i64,
     modified_nanoseconds: i64,
-    changed_seconds: i64,
-    changed_nanoseconds: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,8 +55,10 @@ impl From<&std::fs::Metadata> for ArtifactFingerprint {
             length: metadata.len(),
             modified_seconds: metadata.mtime(),
             modified_nanoseconds: metadata.mtime_nsec(),
-            changed_seconds: metadata.ctime(),
-            changed_nanoseconds: metadata.ctime_nsec(),
+            // 2026-08-30: Removing the temporary hard link after atomic
+            // publication changes ctime without changing artifact content.
+            // Device, inode, length, and mtime retain the useful identity
+            // checks without rejecting concurrent readers of the winner.
         }
     }
 }
