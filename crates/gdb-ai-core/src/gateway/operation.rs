@@ -211,7 +211,7 @@ impl Gateway {
             }
             let dispatch = tokio::spawn(crate::session::scope_operation(
                 active_operation,
-                async move { gateway.dispatch(request, &caller).await },
+                async move { gateway.dispatch_admitted(request, &caller).await },
             ));
             let response = match dispatch.await {
                 Ok(response) => response,

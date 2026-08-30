@@ -112,6 +112,23 @@ impl Gateway {
     }
 
     pub async fn dispatch(&self, request: ApiRequest, caller: &Caller) -> ApiResponse {
+        self.dispatch_inner(request, caller, false).await
+    }
+
+    pub(super) async fn dispatch_admitted(
+        &self,
+        request: ApiRequest,
+        caller: &Caller,
+    ) -> ApiResponse {
+        self.dispatch_inner(request, caller, true).await
+    }
+
+    async fn dispatch_inner(
+        &self,
+        request: ApiRequest,
+        caller: &Caller,
+        admitted: bool,
+    ) -> ApiResponse {
         tracing::debug!(
             caller = %caller.identity,
             method = %request.method,
@@ -194,7 +211,7 @@ impl Gateway {
             .entry_for_request(&request)
             .await
             .map(|entry| entry.handle.state());
-        let result = self.dispatch_checked(&request, caller).await;
+        let result = self.dispatch_checked(&request, caller, admitted).await;
         let mut response = match result {
             Ok((state, result, warnings)) => {
                 let mut response = ApiResponse::success(&request, state, result);
@@ -262,8 +279,14 @@ impl Gateway {
         &self,
         request: &ApiRequest,
         caller: &Caller,
+        admitted: bool,
     ) -> Result<(Option<crate::domain::SessionState>, Value, Vec<Warning>)> {
-        self.validate_request(request)?;
+        // 2026-08-30: Canonical MCP operations are fully validated before
+        // admission. Avoid repeating schema and request-size traversal when
+        // their Gateway-owned task dispatches the same immutable request.
+        if !admitted {
+            self.validate_request(request)?;
+        }
         self.check_rate(&caller.identity).await?;
 
         let mut effect = effect_for_method(request.method);
