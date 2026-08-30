@@ -690,9 +690,9 @@ impl Gateway {
         if let Some(session_id) = &request.session_id {
             crate::domain::SessionId::parse(session_id)?;
         }
-        if serde_json::to_vec(request)?.len() > 1024 * 1024 {
-            return Err(Error::new(ErrorCode::OutputLimit, "request exceeds 1 MiB"));
-        }
+        // 2026-08-30: HTTP, stdio, and Unix reject wire messages above 1 MiB
+        // before deserialization. Re-serializing the owned request here
+        // doubled work without reducing memory or expanding that boundary.
         Ok(())
     }
 
