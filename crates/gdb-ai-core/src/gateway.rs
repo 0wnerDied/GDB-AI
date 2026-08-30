@@ -149,11 +149,8 @@ impl Gateway {
                         .await
                         .map(|entry| entry.handle.state());
                     drop(retry_guard);
-                    if retry_lock
-                        .as_ref()
-                        .is_some_and(|lock| Arc::strong_count(lock) == 2)
-                    {
-                        self.idempotency_locks.lock().await.remove(key);
+                    if let Some(lock) = &retry_lock {
+                        self.release_idempotency_lock(key, lock).await;
                     }
                     return ApiResponse::failure(&request, error, state);
                 }
@@ -168,11 +165,8 @@ impl Gateway {
                             .await
                             .map(|entry| entry.handle.state());
                         drop(retry_guard);
-                        if retry_lock
-                            .as_ref()
-                            .is_some_and(|lock| Arc::strong_count(lock) == 2)
-                        {
-                            self.idempotency_locks.lock().await.remove(key);
+                        if let Some(lock) = &retry_lock {
+                            self.release_idempotency_lock(key, lock).await;
                         }
                         return ApiResponse::failure(&request, error, state);
                     }
@@ -180,11 +174,8 @@ impl Gateway {
             };
             if let Some(cached) = cached {
                 drop(retry_guard);
-                if retry_lock
-                    .as_ref()
-                    .is_some_and(|lock| Arc::strong_count(lock) == 2)
-                {
-                    self.idempotency_locks.lock().await.remove(key);
+                if let Some(lock) = &retry_lock {
+                    self.release_idempotency_lock(key, lock).await;
                 }
                 return cached;
             }
@@ -229,10 +220,8 @@ impl Gateway {
             cache.insert(key, (request_hash, response.clone()));
         }
         drop(retry_guard);
-        if let (Some(key), Some(lock)) = (retry_key, retry_lock)
-            && Arc::strong_count(&lock) == 2
-        {
-            self.idempotency_locks.lock().await.remove(&key);
+        if let (Some(key), Some(lock)) = (retry_key, retry_lock) {
+            self.release_idempotency_lock(&key, &lock).await;
         }
         tracing::debug!(
             method = %request.method,
@@ -241,6 +230,18 @@ impl Gateway {
             "canonical response"
         );
         response
+    }
+
+    async fn release_idempotency_lock(&self, key: &str, candidate: &Arc<Mutex<()>>) {
+        // 2026-08-30: Checking Arc ownership before locking the registry let
+        // a waiter clone the old lock before removal, then a new request create
+        // a second lock for the same key. Check identity and ownership atomically.
+        let mut locks = self.idempotency_locks.lock().await;
+        if locks.get(key).is_some_and(|current| {
+            Arc::ptr_eq(current, candidate) && Arc::strong_count(current) == 2
+        }) {
+            locks.remove(key);
+        }
     }
 
     async fn dispatch_checked(

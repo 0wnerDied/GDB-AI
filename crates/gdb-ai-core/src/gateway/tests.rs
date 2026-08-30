@@ -534,6 +534,48 @@ fn every_session_method_rejects_a_missing_session_id() {
 }
 
 #[tokio::test]
+async fn idempotency_lock_cleanup_preserves_live_waiters_and_replacements() {
+    let directory = tempdir().unwrap();
+    let gateway = Gateway::new(Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    })
+    .unwrap();
+    let key = "same-request";
+    let original = Arc::new(Mutex::new(()));
+    gateway
+        .idempotency_locks
+        .lock()
+        .await
+        .insert(key.into(), original.clone());
+
+    let waiter = original.clone();
+    gateway.release_idempotency_lock(key, &original).await;
+    assert!(gateway.idempotency_locks.lock().await.contains_key(key));
+    drop(waiter);
+    gateway.release_idempotency_lock(key, &original).await;
+    assert!(!gateway.idempotency_locks.lock().await.contains_key(key));
+
+    let replacement = Arc::new(Mutex::new(()));
+    gateway
+        .idempotency_locks
+        .lock()
+        .await
+        .insert(key.into(), replacement.clone());
+    gateway.release_idempotency_lock(key, &original).await;
+    assert!(Arc::ptr_eq(
+        &gateway.idempotency_locks.lock().await[key],
+        &replacement
+    ));
+}
+
+#[tokio::test]
 async fn stable_read_for_unknown_session_returns_not_found() {
     let directory = tempdir().unwrap();
     let gateway = Gateway::new(Config {
