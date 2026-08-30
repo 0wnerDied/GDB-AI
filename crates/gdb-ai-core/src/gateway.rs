@@ -839,11 +839,16 @@ impl Gateway {
             response.truncated = true;
             self.metrics.response_truncated();
         } else {
+            // 2026-08-30: Artifact publication failure retained the original
+            // artifact list, so the fallback envelope could still exceed the
+            // configured response bound and did not disclose truncation.
             response.result = None;
             response.state = None;
             response.warnings.clear();
             response.evidence.clear();
             response.continuation = None;
+            response.artifacts.clear();
+            response.truncated = true;
             response.error = Some(crate::protocol::ApiError {
                 code: ErrorCode::OutputLimit,
                 message: "response exceeded inline limit and artifact creation failed".into(),

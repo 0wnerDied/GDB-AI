@@ -546,6 +546,44 @@ fn bounds_the_complete_response_envelope() {
 }
 
 #[test]
+fn bounds_the_fallback_when_artifact_publication_fails() {
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.limits.tool_response_bytes = 1_024;
+    config.limits.session_artifact_bytes = 1_024;
+    config.limits.owner_artifact_bytes = 1_024;
+    config.limits.total_artifact_bytes = 1_024;
+    config.output.max_bytes = 1_024;
+    let gateway = Gateway::new(config).unwrap();
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "bounded-fallback".into(),
+        session_id: None,
+        method: crate::protocol::CanonicalMethod::SessionList,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let mut response = ApiResponse::success(&request, None, json!({"large": "x".repeat(2_048)}));
+    response.artifacts = vec!["a".repeat(1_024); 4];
+
+    gateway.bound_response(&request, &mut response);
+
+    assert!(serde_json::to_vec(&response).unwrap().len() <= 1_024);
+    assert!(response.artifacts.is_empty());
+    assert!(response.truncated);
+}
+
+#[test]
 fn rejects_unknown_or_wrong_typed_method_parameters() {
     let directory = tempdir().unwrap();
     let gateway = Gateway::new(Config {
