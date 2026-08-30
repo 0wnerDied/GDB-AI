@@ -639,6 +639,7 @@ async fn local_debugging_vertical_slice() {
             )
             .await,
     );
+    assert_eq!(memory.result.as_ref().unwrap()["stop_id"], second_stop);
     let search = successful(
         gateway
             .dispatch(
@@ -658,6 +659,7 @@ async fn local_debugging_vertical_slice() {
             )
             .await,
     );
+    assert_eq!(search.result.as_ref().unwrap()["stop_id"], second_stop);
     assert_eq!(search.result.as_ref().unwrap()["partial"], false);
     assert_eq!(
         search.result.as_ref().unwrap()["matches"]
@@ -787,7 +789,7 @@ async fn local_debugging_vertical_slice() {
         unauthorized.error.unwrap().code,
         gdb_ai_core::ErrorCode::PolicyDenied
     );
-    successful(
+    let compared = successful(
         gateway
             .dispatch(
                 request(
@@ -806,6 +808,7 @@ async fn local_debugging_vertical_slice() {
             )
             .await,
     );
+    assert_eq!(compared.result.as_ref().unwrap()["stop_id"], second_stop);
     let value = successful(
         gateway
             .dispatch(
@@ -956,6 +959,7 @@ async fn local_debugging_vertical_slice() {
             .as_array()
             .is_some_and(|instructions| instructions.len() <= 7)
     );
+    assert_eq!(disassembly.result.as_ref().unwrap()["stop_id"], second_stop);
 
     let stable_memory = gateway.dispatch(
         request(

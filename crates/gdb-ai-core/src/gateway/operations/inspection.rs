@@ -865,7 +865,10 @@ impl Gateway {
             .map(|reply| target_architecture(&result_string_list(&reply.record, "register-names")))
             .unwrap_or("unknown");
         let instructions = disassembly_instructions(&reply.record, current, around_limit);
+        // 2026-08-30: Disassembly omitted its stop identity, so MCP repeated
+        // the session state and callers could not attribute cached evidence.
         Ok(json!({
+            "stop_id": state.stop_id,
             "architecture": architecture,
             "syntax": "target-default",
             "range": {"start": format!("0x{start:016x}"), "end": format!("0x{end:016x}")},

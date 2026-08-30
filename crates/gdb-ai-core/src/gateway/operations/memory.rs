@@ -306,9 +306,12 @@ impl Gateway {
         .await?;
         let partial = bytes.len() != length;
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        // 2026-08-30: Memory observations omitted their stop identity, which
+        // made Agent evidence ambiguous and forced MCP to repeat session state.
         if bytes.len() > self.config.limits.inline_memory_bytes {
             let uri = self.put_artifact(Some(entry.handle.id()), &bytes, "target-memory")?;
             Ok(json!({
+                "stop_id": state.stop_id,
                 "address": address,
                 "requested_length": length,
                 "read_length": bytes.len(),
@@ -321,6 +324,7 @@ impl Gateway {
             }))
         } else {
             Ok(json!({
+                "stop_id": state.stop_id,
                 "address": address,
                 "requested_length": length,
                 "read_length": bytes.len(),
@@ -410,6 +414,7 @@ impl Gateway {
         .await?;
         let matches = expected_bytes_match(&request.parameters, &bytes)?;
         Ok(json!({
+            "stop_id": state.stop_id,
             "address": address,
             "length": length,
             "matches": matches,
@@ -454,6 +459,7 @@ impl Gateway {
         // only infer it from two lengths. Mark partial evidence explicitly.
         let partial = bytes.len() < length;
         Ok(json!({
+            "stop_id": state.stop_id,
             "start": start,
             "requested_length": length,
             "searched_length": bytes.len(),
