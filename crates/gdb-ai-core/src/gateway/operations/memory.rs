@@ -29,11 +29,32 @@ fn memory_contents(record: &MiRecord) -> Result<Vec<u8>> {
     })?;
     let mut bytes = Vec::new();
     for item in aggregate_items(memory, "memory") {
-        if let Some(contents) = MiResult::find_str(item, "contents") {
-            bytes.extend(hex_decode(contents)?);
+        let offset = MiResult::find_str(item, "offset")
+            .ok_or_else(|| Error::new(ErrorCode::GdbError, "memory block has no offset"))?;
+        let offset = usize::try_from(parse_address(offset)?)
+            .map_err(|_| Error::new(ErrorCode::OutputLimit, "memory block offset is too large"))?;
+        // 2026-08-30: GDB returns every readable block in the requested
+        // range. Concatenating blocks across an unreadable gap shifted later
+        // bytes to the wrong address, so expose only the contiguous prefix.
+        if offset != bytes.len() {
+            break;
         }
+        let contents = MiResult::find_str(item, "contents")
+            .ok_or_else(|| Error::new(ErrorCode::GdbError, "memory block has no contents"))?;
+        bytes.extend(hex_decode(contents)?);
     }
     Ok(bytes)
+}
+
+fn require_complete_read(actual: usize, requested: usize, allow_partial: bool) -> Result<()> {
+    if !allow_partial && actual != requested {
+        Err(Error::new(
+            ErrorCode::PartialRead,
+            format!("requested {requested} bytes, read {actual}"),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 // 2026-08-28: A single 16 MiB read expands beyond the MI record limit as
@@ -106,6 +127,10 @@ async fn read_memory_bytes_in_observation(
             break;
         }
     }
+    // 2026-08-30: Compare-and-write and memory comparison called this shared
+    // path directly, so a short read could satisfy a precondition for a larger
+    // requested range. Enforce the caller's completeness contract here.
+    require_complete_read(bytes.len(), length, allow_partial)?;
     Ok((bytes, evidence_seq))
 }
 
@@ -253,12 +278,6 @@ impl Gateway {
         )
         .await?;
         let partial = bytes.len() != length;
-        if partial && !bool_value(&request.parameters, "allow_partial", false) {
-            return Err(Error::new(
-                ErrorCode::PartialRead,
-                format!("requested {length} bytes, read {}", bytes.len()),
-            ));
-        }
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
         if bytes.len() > self.config.limits.inline_memory_bytes {
             let uri = self.put_artifact(Some(entry.handle.id()), &bytes, "target-memory")?;
@@ -502,7 +521,10 @@ impl Gateway {
 
 #[cfg(test)]
 mod tests {
-    use super::find_memory_matches;
+    use crate::ErrorCode;
+    use gdb_ai_mi::{MiLimits, parse_record};
+
+    use super::{find_memory_matches, memory_contents, require_complete_read};
 
     #[test]
     fn memory_matcher_preserves_overlaps_and_truncation() {
@@ -512,5 +534,25 @@ mod tests {
         );
         assert_eq!(find_memory_matches(b"aaaa", b"aa", 2), (vec![0, 1], true));
         assert_eq!(find_memory_matches(b"abcdef", b"z", 8), (Vec::new(), false));
+    }
+
+    #[test]
+    fn memory_blocks_stop_at_the_first_unreadable_gap() {
+        let record = parse_record(
+            br#"1^done,memory=[{begin="0x1000",offset="0x0",end="0x1002",contents="aabb"},{begin="0x1002",offset="0x2",end="0x1004",contents="ccdd"},{begin="0x1008",offset="0x8",end="0x100a",contents="eeff"}]"#,
+            MiLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(memory_contents(&record).unwrap(), [0xaa, 0xbb, 0xcc, 0xdd]);
+    }
+
+    #[test]
+    fn complete_memory_reads_reject_short_results() {
+        assert!(require_complete_read(2, 4, true).is_ok());
+        assert_eq!(
+            require_complete_read(2, 4, false).unwrap_err().code,
+            ErrorCode::PartialRead
+        );
     }
 }
