@@ -239,6 +239,24 @@ async fn local_debugging_vertical_slice() {
             .await,
     );
     assert_eq!(minimal_snapshot.result.unwrap()["stop_id"], first_stop);
+    let stop_context = successful(
+        gateway
+            .dispatch(
+                request(
+                    "stop-context",
+                    Some(&session_id),
+                    "inspection.get",
+                    None,
+                    json!({"view": "stop_context"}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let stop_context = stop_context.result.unwrap();
+    assert_eq!(stop_context["stop_id"], first_stop);
+    assert!(stop_context.get("inferiors").is_none());
+    assert!(stop_context.get("breakpoints").is_none());
 
     let event_wait = gateway.dispatch(
         request(

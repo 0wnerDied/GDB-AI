@@ -34,7 +34,28 @@ impl Gateway {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         match view.as_str() {
-            "stop_context" | "target" => Ok(serde_json::to_value(state)?),
+            "stop_context" => {
+                // 2026-08-30: This Agent-facing view returned the complete
+                // session registry, repeating unrelated breakpoints, modules,
+                // threads, and signal policies at every stop.
+                let frame = state.stopped_frame();
+                let reason = match state.stop_reason_detail.as_ref() {
+                    Some(reason) => serde_json::to_value(reason)?,
+                    None => json!(state.stop_reason),
+                };
+                Ok(json!({
+                    "stop_id": state.stop_id,
+                    "reason": reason,
+                    "inferior_id": state.stopped_inferior_id,
+                    "thread_id": state.stopped_thread_id,
+                    "frame": frame,
+                    "snapshot": state.snapshot,
+                    "execution_epoch": state.execution_epoch,
+                    "event_seq": state.event_seq,
+                    "partial": state.stop_id.is_some() && frame.is_none()
+                }))
+            }
+            "target" => Ok(serde_json::to_value(state)?),
             "capabilities" => Ok(serde_json::to_value(entry.handle.capabilities())?),
             "providers" => self.session_providers(request).await,
             "crash" => {
