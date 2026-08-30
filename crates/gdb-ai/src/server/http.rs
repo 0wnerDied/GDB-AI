@@ -588,6 +588,7 @@ async fn complete_http_operation(
         &mut operation,
     )
     .await;
+    let timed_out = completed.is_err();
     let value = match completed {
         Ok(Ok(result)) => result.map_or_else(
             |error| rpc_fault(completion.response_id.clone(), error),
@@ -603,7 +604,7 @@ async fn complete_http_operation(
         Ok(Err(error)) => rpc_error(completion.response_id.clone(), -32603, error.to_string()),
         Err(_) => {
             operation.abort();
-            if let Some(tracked) = completion.tracked {
+            if let Some(tracked) = &completion.tracked {
                 let operation_state = match tracked
                     .gateway
                     .detach_operation_waiter(&tracked.operation_id, &tracked.caller)
@@ -635,6 +636,12 @@ async fn complete_http_operation(
             }
         }
     };
+    if !timed_out && let Some(tracked) = &completion.tracked {
+        tracked
+            .gateway
+            .release_delivered_operation(&tracked.operation_id, &tracked.caller)
+            .await;
+    }
     // 2026-08-29: A dropped HTTP handler used to skip pending cleanup while
     // its detached target operation completed. Completion now owns cleanup.
     if let Some(reservation) = completion.reservation

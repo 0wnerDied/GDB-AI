@@ -232,10 +232,13 @@ where
                         }),
                     )
                 };
+                let delivered_operation = operation_id.clone();
                 cancellation.operation_id = operation_id;
                 let responses = responses.clone();
                 let task_key = key.clone();
                 let response_method = method.to_owned();
+                let response_gateway = gateway.clone();
+                let response_caller = caller.clone();
                 // Requests may wait for a target stop; separate tasks let
                 // cancellation and inferior I/O reach the gateway meanwhile.
                 // 2026-08-28: Cancelling the response task used to cancel the
@@ -256,6 +259,11 @@ where
                         ),
                         Err(error) => rpc_error(id, -32603, error.to_string()),
                     };
+                    if let Some(operation_id) = delivered_operation {
+                        response_gateway
+                            .release_delivered_operation(&operation_id, &response_caller)
+                            .await;
+                    }
                     if let Some(token) = progress_token {
                         let _ = responses
                             .send((

@@ -138,6 +138,19 @@ impl OperationRegistry {
             Err(Error::new(ErrorCode::NotFound, "operation not found"))
         }
     }
+
+    async fn remove_delivered(&self, operation_id: &str, caller: &Caller) -> bool {
+        let mut entries = self.entries.write().await;
+        let removable = entries.get(operation_id).is_some_and(|entry| {
+            (caller.admin || same_principal(&entry.owner, &caller.identity))
+                && entry.state.borrow().status.terminal()
+                && !entry.state.borrow().waiter_detached
+        });
+        if removable {
+            entries.remove(operation_id);
+        }
+        removable
+    }
 }
 
 impl Gateway {
@@ -278,6 +291,13 @@ impl Gateway {
             .state
             .send_modify(|record| record.waiter_detached = true);
         Ok(entry.state.borrow().clone())
+    }
+
+    pub async fn release_delivered_operation(&self, operation_id: &str, caller: &Caller) {
+        // 2026-08-30: Successful MCP calls never expose their internal
+        // operation ID. Drop the terminal response after delivery instead of
+        // retaining thousands of unreachable, potentially large responses.
+        self.operations.remove_delivered(operation_id, caller).await;
     }
 
     pub(super) async fn cancel_request_operation(
@@ -465,6 +485,9 @@ mod tests {
         assert_eq!(record.status, RequestOperationStatus::Succeeded);
         assert!(record.waiter_detached);
         assert!(record.result.unwrap().error.is_none());
+        gateway
+            .release_delivered_operation(&ticket.operation_id.0, &caller)
+            .await;
         assert_eq!(
             gateway
                 .cancel_request_operation(
@@ -477,6 +500,45 @@ mod tests {
                 .code,
             ErrorCode::Conflict
         );
+    }
+
+    #[tokio::test]
+    async fn delivered_operation_releases_its_retained_response() {
+        let gateway = Arc::new(Gateway::new(config()).unwrap());
+        let caller = Caller::local("operation-test");
+        let ticket = gateway
+            .admit_operation(
+                ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "list".into(),
+                    session_id: None,
+                    method: CanonicalMethod::SessionList,
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters: json!({}),
+                },
+                caller.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        gateway
+            .wait_operation(&ticket.operation_id.0, &caller)
+            .await
+            .unwrap();
+        gateway
+            .release_delivered_operation(&ticket.operation_id.0, &caller)
+            .await;
+
+        let error = match gateway
+            .operations
+            .entry(&ticket.operation_id.0, &caller)
+            .await
+        {
+            Ok(_) => panic!("delivered operation remained in the registry"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::NotFound);
     }
 
     #[test]
