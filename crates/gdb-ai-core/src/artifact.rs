@@ -96,6 +96,29 @@ impl ArtifactStore {
         let digest = uri.strip_prefix("gdbai://artifact/sha256:").unwrap();
         let directory = self.root.join("sha256");
         let path = directory.join(digest);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                // 2026-08-30: Re-registering shared evidence rewrote and
+                // synced an identical temporary file. Reuse the verified
+                // immutable digest path without repeating publication I/O.
+                let (_, size) = self.get_range(&uri, 0, 0)?;
+                if size != bytes.len() as u64 {
+                    return Err(Error::new(
+                        ErrorCode::Internal,
+                        "artifact digest path contains unexpected data",
+                    ));
+                }
+                return Ok(uri);
+            }
+            Ok(_) => {
+                return Err(Error::new(
+                    ErrorCode::Internal,
+                    "artifact path is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let temporary = directory.join(format!(".gdb-ai-artifact-{}", Ulid::new()));
         let result = (|| {
             let mut file = OpenOptions::new()
@@ -133,6 +156,17 @@ impl ArtifactStore {
         })();
         let _ = std::fs::remove_file(temporary);
         result?;
+        // 2026-08-30: put() already hashes and verifies the complete content.
+        // Remember the published file identity so its first range read does
+        // not immediately scan the same artifact again.
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::new(
+                ErrorCode::Internal,
+                "artifact path is not a regular file",
+            ));
+        }
+        self.remember_verified(digest, ArtifactFingerprint::from(&metadata))?;
         Ok(uri)
     }
 
@@ -215,15 +249,7 @@ impl ArtifactStore {
                     "artifact content does not match its digest",
                 ));
             }
-            let mut verified = self.verified.lock().map_err(|_| {
-                Error::new(ErrorCode::Internal, "artifact verification cache poisoned")
-            })?;
-            // ponytail: Clear this small cache instead of adding an LRU. Add
-            // one only if more than 1024 concurrently paged artifacts matter.
-            if verified.len() >= 1024 {
-                verified.clear();
-            }
-            verified.insert(digest.to_owned(), fingerprint);
+            self.remember_verified(digest, fingerprint)?;
         }
         file.seek(std::io::SeekFrom::Start(offset))?;
         let length = (metadata.len() - offset).min(max_bytes as u64) as usize;
@@ -249,6 +275,20 @@ impl ArtifactStore {
             self.verification_hits.load(Ordering::Relaxed),
             self.verification_misses.load(Ordering::Relaxed),
         )
+    }
+
+    fn remember_verified(&self, digest: &str, fingerprint: ArtifactFingerprint) -> Result<()> {
+        let mut verified = self
+            .verified
+            .lock()
+            .map_err(|_| Error::new(ErrorCode::Internal, "artifact verification cache poisoned"))?;
+        // ponytail: Clear this small cache instead of adding an LRU. Add one
+        // only if more than 1024 concurrently paged artifacts matter.
+        if verified.len() >= 1024 {
+            verified.clear();
+        }
+        verified.insert(digest.to_owned(), fingerprint);
+        Ok(())
     }
 
     pub fn inventory(&self) -> Result<ArtifactInventory> {
@@ -397,7 +437,7 @@ mod tests {
             store.get_range(&uri, 64 * 1024, 16).unwrap().0,
             vec![b'a'; 16]
         );
-        assert_eq!(store.verification_counts(), (1, 1));
+        assert_eq!(store.verification_counts(), (2, 0));
         assert!(store.verified.lock().unwrap().contains_key(digest));
 
         std::fs::write(store.root.join("sha256").join(digest), b"corrupt").unwrap();
@@ -408,6 +448,17 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn repeated_put_reuses_the_verified_publication() {
+        let directory = tempdir().unwrap();
+        let store = ArtifactStore::new(directory.path()).unwrap();
+        let uri = store.put(b"shared evidence").unwrap();
+
+        assert_eq!(store.put(b"shared evidence").unwrap(), uri);
+        assert_eq!(store.verification_counts(), (1, 0));
+        assert_eq!(store.inventory().unwrap().files.len(), 1);
     }
 
     #[test]
