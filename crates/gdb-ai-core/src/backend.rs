@@ -536,15 +536,15 @@ impl PtyOutput {
             .dropped_bytes()
     }
 
-    pub async fn wait_closed(&self, timeout: Duration) {
+    pub async fn wait_closed(&self, timeout: Duration) -> bool {
         if self.closed.load(Ordering::Acquire) {
-            return;
+            return true;
         }
         let notified = self.closed_notify.notified();
         if self.closed.load(Ordering::Acquire) {
-            return;
+            return true;
         }
-        let _ = tokio::time::timeout(timeout, notified).await;
+        tokio::time::timeout(timeout, notified).await.is_ok()
     }
 }
 
@@ -1282,17 +1282,24 @@ mod tests {
         let output = Arc::new(PtyOutput::new(64));
         let task = tokio::spawn(read_pty(CountingEof(reads.clone()), sender, output.clone()));
 
-        output.wait_closed(Duration::from_secs(1)).await;
+        assert!(output.wait_closed(Duration::from_secs(1)).await);
         assert!(output.closed.load(Ordering::Acquire));
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(reads.load(Ordering::Relaxed), 1);
 
         output.reset();
-        output.wait_closed(Duration::from_secs(1)).await;
+        assert!(output.wait_closed(Duration::from_secs(1)).await);
         assert!(output.closed.load(Ordering::Acquire));
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(reads.load(Ordering::Relaxed), 2);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn pty_close_wait_reports_timeout() {
+        let output = PtyOutput::new(64);
+
+        assert!(!output.wait_closed(Duration::from_millis(1)).await);
     }
 
     #[test]
