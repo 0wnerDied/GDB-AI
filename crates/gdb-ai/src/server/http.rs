@@ -287,6 +287,7 @@ async fn http_mcp(
         Ok(cancellation) => cancellation,
         Err(error) => return json_http_response(rpc_fault(id, error), Some(session_id)),
     };
+    let admitted_cancellation = cancellation.clone();
     let canonical = match canonical_rpc_request(
         method,
         params.clone(),
@@ -346,14 +347,26 @@ async fn http_mcp(
                 return json_http_response(rpc_fault(id, error), Some(session_id));
             }
         };
-        if let Some(pending) = state
-            .sessions
-            .write()
-            .await
-            .get_mut(session_id)
-            .and_then(|client| client.pending.get_mut(&key))
-        {
-            pending.cancellation.operation_id = Some(operation_id.clone());
+        let cancelled_during_admission = {
+            let mut sessions = state.sessions.write().await;
+            bind_http_operation(
+                sessions
+                    .get_mut(session_id)
+                    .and_then(|client| client.pending.get_mut(&key)),
+                &operation_id,
+                admitted_cancellation,
+            )
+        };
+        if let Some(cancellation) = cancelled_during_admission {
+            // 2026-08-30: A concurrent cancellation could remove pending
+            // before admission supplied its operation ID. Apply that recorded
+            // policy now instead of losing cancellation of an accepted run.
+            apply_cancel_mode(
+                state.gateway.clone(),
+                caller.clone(),
+                state.sequence.clone(),
+                cancellation,
+            );
         }
         (Some(operation_id), waiter)
     } else {
@@ -721,6 +734,20 @@ fn cancel_http_waiter(state: &HttpState, caller: Caller, pending: HttpPending) {
     );
 }
 
+fn bind_http_operation(
+    pending: Option<&mut HttpPending>,
+    operation_id: &str,
+    mut cancellation: RequestCancellation,
+) -> Option<RequestCancellation> {
+    if let Some(pending) = pending {
+        pending.cancellation.operation_id = Some(operation_id.to_owned());
+        None
+    } else {
+        cancellation.operation_id = Some(operation_id.to_owned());
+        Some(cancellation)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +765,25 @@ mod tests {
             },
             deadline,
         }
+    }
+
+    #[test]
+    fn cancellation_during_admission_targets_the_accepted_operation() {
+        let cancellation = RequestCancellation {
+            mode: CancelMode::InterruptTarget,
+            operation_id: None,
+        };
+        let late = bind_http_operation(None, "op_late", cancellation.clone()).unwrap();
+        assert!(matches!(late.mode, CancelMode::InterruptTarget));
+        assert_eq!(late.operation_id.as_deref(), Some("op_late"));
+
+        let (waiter, _cancelled) = oneshot::channel();
+        let mut pending = detached_http_pending(waiter, Instant::now());
+        assert!(bind_http_operation(Some(&mut pending), "op_pending", cancellation).is_none());
+        assert_eq!(
+            pending.cancellation.operation_id.as_deref(),
+            Some("op_pending")
+        );
     }
 
     #[tokio::test]
