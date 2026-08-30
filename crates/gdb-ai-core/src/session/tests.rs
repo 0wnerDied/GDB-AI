@@ -460,10 +460,17 @@ async fn cancelled_operation_skips_queued_observation_commands() {
     .unwrap_err();
     assert_eq!(evaluation.code, ErrorCode::Cancelled);
 
-    let refresh = scope_operation(operation, session.refresh_target_capabilities())
+    let refresh = scope_operation(operation.clone(), session.refresh_target_capabilities())
         .await
         .unwrap_err();
     assert_eq!(refresh.code, ErrorCode::Cancelled);
+
+    scope_operation(
+        operation,
+        session.cleanup_command(MiCommand::new("-gdb-version").unwrap()),
+    )
+    .await
+    .unwrap();
     session.close().await.unwrap();
 }
 

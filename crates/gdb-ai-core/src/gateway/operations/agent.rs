@@ -185,7 +185,7 @@ impl ProbeBreakpoint {
             return Ok(());
         };
         self.handle
-            .command(MiCommand::new("-break-delete")?.bare(backend_number)?)
+            .cleanup_command(MiCommand::new("-break-delete")?.bare(backend_number)?)
             .await?;
         // 2026-08-28: Taking the number before GDB confirmed deletion made a
         // failed cleanup impossible to retry from Drop.
@@ -207,7 +207,7 @@ impl Drop for ProbeBreakpoint {
         tokio::spawn(async move {
             let cleanup = async {
                 handle
-                    .command(MiCommand::new("-break-delete")?.bare(backend_number)?)
+                    .cleanup_command(MiCommand::new("-break-delete")?.bare(backend_number)?)
                     .await?;
                 Result::<()>::Ok(())
             }

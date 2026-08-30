@@ -324,6 +324,27 @@ impl SessionHandle {
         if let Some(operation) = &operation {
             operation.require_active()?;
         }
+        self.enqueue_command(command, deadline, operation).await
+    }
+
+    pub(crate) async fn cleanup_command(&self, command: MiCommand) -> Result<CommandReply> {
+        let deadline = command_deadline(self.command_timeout);
+        let _sequence = if self.observation_active() {
+            None
+        } else {
+            Some(self.command_sequence_until(deadline).await?)
+        };
+        // 2026-08-30: A cancelled operation rejected its own compensating GDB
+        // command, leaving cleanup to race later requests in a detached task.
+        self.enqueue_command(command, deadline, None).await
+    }
+
+    async fn enqueue_command(
+        &self,
+        command: MiCommand,
+        deadline: tokio::time::Instant,
+        operation: Option<ActiveOperation>,
+    ) -> Result<CommandReply> {
         let (sender, receiver) = oneshot::channel();
         self.enqueue_until(
             WorkerRequest::Command {
