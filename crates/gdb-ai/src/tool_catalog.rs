@@ -356,11 +356,29 @@ fn available_tools(
 }
 
 fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
-    let branches = tool
+    let actions = tool
         .actions
         .iter()
         .filter(|action| include_advanced || !action.advanced)
-        .map(|action| projected_method_schema(tool.discriminator, *action))
+        .collect::<Vec<_>>();
+    // 2026-08-30: Expanding the same canonical method once per MCP action
+    // repeated 32 KiB of schema. Group aliases while preserving validation.
+    let branches = actions
+        .iter()
+        .enumerate()
+        .filter(|(index, action)| {
+            !actions[..*index]
+                .iter()
+                .any(|seen| seen.method == action.method)
+        })
+        .map(|(_, action)| {
+            let action_names = actions
+                .iter()
+                .filter(|candidate| candidate.method == action.method)
+                .map(|candidate| candidate.name)
+                .collect::<Vec<_>>();
+            projected_method_schema(tool.discriminator, action.method, &action_names)
+        })
         .collect::<Vec<_>>();
     if branches.len() == 1 {
         branches.into_iter().next().unwrap()
@@ -371,8 +389,12 @@ fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
 
 // 2026-08-28: Handwritten MCP fields drifted from canonical validation.
 // Project transport metadata around the same per-method parameter schema.
-fn projected_method_schema(discriminator: Option<&str>, action: ToolAction) -> Value {
-    let mut schema = action.method.parameter_schema();
+fn projected_method_schema(
+    discriminator: Option<&str>,
+    method: CanonicalMethod,
+    action_names: &[&str],
+) -> Value {
+    let mut schema = method.parameter_schema();
     let mut required = schema["required"]
         .as_array()
         .unwrap()
@@ -397,11 +419,15 @@ fn projected_method_schema(discriminator: Option<&str>, action: ToolAction) -> V
             "enum": ["detach_waiter", "interrupt_target", "close_session"]
         }),
     );
-    if action.method.requires_session() {
+    if method.requires_session() {
         required.insert("session_id".into());
     }
     if let Some(discriminator) = discriminator {
-        properties.insert(discriminator.into(), json!({"const": action.name}));
+        let discriminator_schema = match action_names {
+            [action] => json!({"const": action}),
+            actions => json!({"type": "string", "enum": actions}),
+        };
+        properties.insert(discriminator.into(), discriminator_schema);
         required.insert(discriminator.into());
     }
     schema["required"] = Value::Array(required.into_iter().map(Value::String).collect());
@@ -471,5 +497,25 @@ mod tests {
         );
         assert!(method_for_tool("gdb_io", Some("close_stdin"), true, false).is_none());
         assert!(method_for_tool("gdb_agent", Some("experiment"), true, false).is_none());
+    }
+
+    #[test]
+    fn groups_actions_that_share_a_canonical_method() {
+        let tools = tools(false, false);
+        let run = tools.iter().find(|tool| tool["name"] == "gdb_run").unwrap();
+        let control = run["inputSchema"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| branch["properties"]["action"].get("enum").is_some())
+            .unwrap();
+        assert_eq!(
+            control["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        assert!(serde_json::to_vec(&tools).unwrap().len() < 30_000);
     }
 }
