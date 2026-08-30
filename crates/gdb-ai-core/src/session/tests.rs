@@ -441,6 +441,33 @@ async fn safe_evaluate_restores_settings_after_a_late_result() {
 }
 
 #[tokio::test]
+async fn cancelled_operation_skips_queued_observation_commands() {
+    let Some(session) = control_test_session().await else {
+        return;
+    };
+    let operation = ActiveOperation::new(OperationId::new(), Arc::new(AtomicBool::new(true)));
+
+    let evaluation = scope_operation(operation.clone(), async {
+        session
+            .safe_evaluate(
+                MiCommand::new("-data-evaluate-expression")
+                    .unwrap()
+                    .string("1"),
+            )
+            .await
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(evaluation.code, ErrorCode::Cancelled);
+
+    let refresh = scope_operation(operation, session.refresh_target_capabilities())
+        .await
+        .unwrap_err();
+    assert_eq!(refresh.code, ErrorCode::Cancelled);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_value_cleanup_does_not_consume_the_business_deadline() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;

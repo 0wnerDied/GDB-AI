@@ -54,6 +54,7 @@ pub(super) enum WorkerRequest {
     },
     SafeEvaluate {
         command: MiCommand,
+        operation: Option<ActiveOperation>,
         deadline: tokio::time::Instant,
         response: oneshot::Sender<Result<CommandReply>>,
     },
@@ -73,6 +74,7 @@ pub(super) enum WorkerRequest {
         response: oneshot::Sender<Result<()>>,
     },
     RefreshTargetCapabilities {
+        operation: Option<ActiveOperation>,
         response: oneshot::Sender<Result<SessionCapabilities>>,
     },
     RegisterValue {
@@ -536,11 +538,15 @@ impl SessionWorker {
         }
     }
 
-    async fn refresh_target_capabilities(&mut self) -> Result<SessionCapabilities> {
+    async fn refresh_target_capabilities(
+        &mut self,
+        operation: Option<ActiveOperation>,
+    ) -> Result<SessionCapabilities> {
         let reply = self
-            .execute(
+            .execute_operation_until(
                 MiCommand::new("-list-target-features")?,
-                self.command_timeout,
+                operation,
+                command_deadline(self.command_timeout),
             )
             .await?;
         let features = extract_string_list(&reply.record, "features");
@@ -729,6 +735,7 @@ impl SessionWorker {
             }
             WorkerRequest::SafeEvaluate {
                 command,
+                operation,
                 deadline,
                 response,
             } => {
@@ -740,7 +747,10 @@ impl SessionWorker {
                     let _ = response.send(Err(error));
                     return false;
                 }
-                let _ = response.send(self.execute_safe(command, deadline).await);
+                let _ = response.send(
+                    self.execute_safe(command, operation.as_ref(), deadline)
+                        .await,
+                );
                 self.cleanup_one_stale_value().await;
             }
             WorkerRequest::RecordEvent { event, response } => {
@@ -765,13 +775,16 @@ impl SessionWorker {
                 let result = self.journal_result(flushed);
                 let _ = response.send(result);
             }
-            WorkerRequest::RefreshTargetCapabilities { response } => {
+            WorkerRequest::RefreshTargetCapabilities {
+                operation,
+                response,
+            } => {
                 let result = match self.require_known_outcome_name("-list-target-features") {
                     Ok(()) => match self
                         .restore_deferred_commands(command_deadline(self.command_timeout))
                         .await
                     {
-                        Ok(()) => self.refresh_target_capabilities().await,
+                        Ok(()) => self.refresh_target_capabilities(operation).await,
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error),
@@ -1304,6 +1317,7 @@ impl SessionWorker {
     async fn execute_safe(
         &mut self,
         command: MiCommand,
+        operation: Option<&ActiveOperation>,
         deadline: tokio::time::Instant,
     ) -> Result<CommandReply> {
         const SETTINGS: [&str; 3] = [
@@ -1313,6 +1327,9 @@ impl SessionWorker {
         ];
         let mut originals = Vec::new();
         for setting in SETTINGS {
+            if let Some(operation) = operation {
+                operation.require_active()?;
+            }
             let reply = self
                 .execute_until(MiCommand::new("-gdb-show")?.bare(setting)?, deadline)
                 .await?;
@@ -1325,6 +1342,16 @@ impl SessionWorker {
         let mut setup_error = None;
         let mut guarded = Vec::new();
         for setting in SETTINGS {
+            // 2026-08-30: Safe evaluation and capability refresh used to drop
+            // operation identity, so cancelled probes could keep issuing MI
+            // reads. Stop at command boundaries but still restore any setting
+            // already changed below.
+            if let Some(operation) = operation
+                && let Err(error) = operation.require_active()
+            {
+                setup_error = Some(error);
+                break;
+            }
             match self
                 .execute_until(
                     MiCommand::new("-gdb-set")?.bare(setting)?.bare("off")?,
@@ -1346,7 +1373,10 @@ impl SessionWorker {
         }
         let result = match setup_error {
             Some(error) => Err(error),
-            None => self.execute_until(command, deadline).await,
+            None => match operation.map(ActiveOperation::require_active) {
+                Some(Err(error)) => Err(error),
+                _ => self.execute_until(command, deadline).await,
+            },
         };
         let restoration = originals
             .into_iter()

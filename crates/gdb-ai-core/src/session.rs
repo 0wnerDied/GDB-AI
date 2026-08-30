@@ -400,10 +400,17 @@ impl SessionHandle {
         command: MiCommand,
         deadline: tokio::time::Instant,
     ) -> Result<CommandReply> {
+        // 2026-08-30: Command-producing observation helpers previously lost
+        // their canonical operation while queued behind another MI command.
+        let operation = active_operation();
+        if let Some(operation) = &operation {
+            operation.require_active()?;
+        }
         let (sender, receiver) = oneshot::channel();
         self.enqueue_until(
             WorkerRequest::SafeEvaluate {
                 command,
+                operation,
                 deadline,
                 response: sender,
             },
@@ -555,9 +562,18 @@ impl SessionHandle {
     }
 
     async fn send_refresh_target_capabilities(&self) -> Result<SessionCapabilities> {
+        // 2026-08-30: Preserve cancellation at both admission and actor
+        // execution so a cancelled probe cannot continue refreshing GDB.
+        let operation = active_operation();
+        if let Some(operation) = &operation {
+            operation.require_active()?;
+        }
         let (sender, receiver) = oneshot::channel();
         self.requests
-            .send(WorkerRequest::RefreshTargetCapabilities { response: sender })
+            .send(WorkerRequest::RefreshTargetCapabilities {
+                operation,
+                response: sender,
+            })
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
         receiver
