@@ -17,7 +17,7 @@ use crate::{
     metrics::Metrics,
     persistence::{ArtifactLimits, StorageLock, Store, prune_retained_sessions},
     policy::{Effect, Profile, effect_for_method},
-    protocol::{API_VERSION, ApiRequest, ApiResponse},
+    protocol::{API_VERSION, ApiRequest, ApiResponse, Warning},
     session::SessionHandle,
 };
 
@@ -192,7 +192,11 @@ impl Gateway {
             .map(|entry| entry.handle.state());
         let result = self.dispatch_checked(&request, caller).await;
         let mut response = match result {
-            Ok((state, result)) => ApiResponse::success(&request, state, result),
+            Ok((state, result, warnings)) => {
+                let mut response = ApiResponse::success(&request, state, result);
+                response.warnings.extend(warnings);
+                response
+            }
             Err(error) => {
                 // 2026-08-28: Commands can fail after an async stop, GDB exit,
                 // or consistency transition. Return the post-failure state,
@@ -254,7 +258,7 @@ impl Gateway {
         &self,
         request: &ApiRequest,
         caller: &Caller,
-    ) -> Result<(Option<crate::domain::SessionState>, Value)> {
+    ) -> Result<(Option<crate::domain::SessionState>, Value, Vec<Warning>)> {
         self.validate_request(request)?;
         self.check_rate(&caller.identity).await?;
 
@@ -531,13 +535,17 @@ impl Gateway {
             }
             _ => None,
         };
+        let mut warnings = Vec::new();
         if let Some(entry) = &completed_entry {
             let outcome = if result.is_ok() {
                 "completed"
             } else {
                 "failed"
             };
-            self.store.audit(
+            // 2026-08-30: A post-effect audit failure replaced an already
+            // executed mutation with INTERNAL, encouraging an unsafe retry.
+            // Admission audit remains fail-closed; completion gaps are explicit.
+            if let Err(error) = self.store.audit(
                 &caller.identity,
                 Some(entry.handle.id()),
                 &request.method,
@@ -546,7 +554,15 @@ impl Gateway {
                 Some(entry.handle.state().revision),
                 &request_value,
                 outcome,
-            )?;
+            ) {
+                tracing::error!(%error, method = %request.method, "completion audit failed");
+                if result.is_ok() {
+                    warnings.push(Warning {
+                        code: "AUDIT_COMPLETION_FAILED".into(),
+                        message: error.to_string(),
+                    });
+                }
+            }
             let audit_result = match &result {
                 Ok(result) => serde_json::json!({ "result": result }),
                 Err(error) => serde_json::json!({
@@ -557,12 +573,22 @@ impl Gateway {
                     }
                 }),
             };
-            self.store
-                .audit_result(Some(entry.handle.id()), &request.method, &audit_result)?;
+            if let Err(error) =
+                self.store
+                    .audit_result(Some(entry.handle.id()), &request.method, &audit_result)
+            {
+                tracing::error!(%error, method = %request.method, "result audit failed");
+                if result.is_ok() {
+                    warnings.push(Warning {
+                        code: "AUDIT_RESULT_FAILED".into(),
+                        message: error.to_string(),
+                    });
+                }
+            }
         }
         let result = result?;
         let state = completed_entry.map(|entry| entry.handle.state());
-        Ok((state, result))
+        Ok((state, result, warnings))
     }
 
     fn validate_request(&self, request: &ApiRequest) -> Result<()> {

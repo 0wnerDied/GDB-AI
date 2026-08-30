@@ -260,6 +260,74 @@ async fn lease_cleanup_failure_does_not_retain_a_closed_session() {
 }
 
 #[tokio::test]
+async fn completion_audit_failure_preserves_an_executed_mutation() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let sqlite = directory.path().join("state.sqlite");
+    let gateway = Gateway::new(Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: sqlite.clone(),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    })
+    .unwrap();
+    let caller = Caller::local("audit-test");
+    let created = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "create-audit".into(),
+                session_id: None,
+                method: crate::protocol::CanonicalMethod::SessionCreate,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    let session_id = created.session_id.unwrap();
+    rusqlite::Connection::open(sqlite)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_completion_audit BEFORE INSERT ON audit
+             WHEN NEW.outcome = 'completed'
+             BEGIN SELECT RAISE(ABORT, 'injected completion audit failure'); END;",
+        )
+        .unwrap();
+
+    let renewed = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "renew-audit".into(),
+                session_id: Some(session_id),
+                method: crate::protocol::CanonicalMethod::SessionAcquireWriteLease,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({"accept_latest_revision": true}),
+            },
+            &caller,
+        )
+        .await;
+
+    assert!(renewed.error.is_none(), "{:?}", renewed.error);
+    assert!(
+        renewed
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "AUDIT_COMPLETION_FAILED")
+    );
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn concurrent_idempotent_create_runs_once() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
