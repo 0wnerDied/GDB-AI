@@ -97,7 +97,13 @@ impl ArtifactStore {
 
     pub fn put(&self, bytes: &[u8]) -> Result<String> {
         let uri = Self::uri(bytes);
-        let digest = uri.strip_prefix("gdbai://artifact/sha256:").unwrap();
+        self.put_prehashed(&uri, bytes)?;
+        Ok(uri)
+    }
+
+    pub(crate) fn put_prehashed(&self, uri: &str, bytes: &[u8]) -> Result<()> {
+        let digest = artifact_digest(uri)?;
+        debug_assert_eq!(uri, Self::uri(bytes));
         let directory = self.root.join("sha256");
         let path = directory.join(digest);
         match std::fs::symlink_metadata(&path) {
@@ -105,14 +111,14 @@ impl ArtifactStore {
                 // 2026-08-30: Re-registering shared evidence rewrote and
                 // synced an identical temporary file. Reuse the verified
                 // immutable digest path without repeating publication I/O.
-                let (_, size) = self.get_range(&uri, 0, 0)?;
+                let (_, size) = self.get_range(uri, 0, 0)?;
                 if size != bytes.len() as u64 {
                     return Err(Error::new(
                         ErrorCode::Internal,
                         "artifact digest path contains unexpected data",
                     ));
                 }
-                return Ok(uri);
+                return Ok(());
             }
             Ok(_) => {
                 return Err(Error::new(
@@ -160,7 +166,7 @@ impl ArtifactStore {
         })();
         let _ = std::fs::remove_file(temporary);
         result?;
-        // 2026-08-30: put() already hashes and verifies the complete content.
+        // 2026-08-30: URI construction already hashes the complete content.
         // Remember the published file identity so its first range read does
         // not immediately scan the same artifact again.
         let metadata = std::fs::symlink_metadata(&path)?;
@@ -171,7 +177,7 @@ impl ArtifactStore {
             ));
         }
         self.remember_verified(digest, ArtifactFingerprint::from(&metadata))?;
-        Ok(uri)
+        Ok(())
     }
 
     pub fn uri(bytes: &[u8]) -> String {

@@ -692,7 +692,10 @@ impl Store {
                     ));
                 }
             }
-            artifacts.put(bytes)?;
+            // 2026-08-30: Store already hashed the complete payload for its
+            // content URI. Rehashing it in ArtifactStore doubled CPU and memory
+            // bandwidth for every large debugger response.
+            artifacts.put_prehashed(&uri, bytes)?;
             // 2026-08-29: A later registration unconditionally replaced the
             // sensitivity of a shared digest and could downgrade secret target
             // evidence to a public label. Global labels only move upward.
