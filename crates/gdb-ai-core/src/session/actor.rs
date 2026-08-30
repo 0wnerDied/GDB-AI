@@ -1606,10 +1606,21 @@ impl SessionWorker {
                 "operation was cancelled before its MI command started",
             ));
         }
-        if command_resumes_target(&command) {
-            self.active_resume_operation = operation.map(|operation| operation.id().clone());
+        let resumes_target = command_resumes_target(&command);
+        let operation_id = operation.as_ref().map(|operation| operation.id().clone());
+        if resumes_target {
+            self.active_resume_operation = operation_id.clone();
         }
-        self.execute_until(command, deadline).await
+        let result = self.execute_until(command, deadline).await;
+        // 2026-08-30: An immediate ^error left the rejected resume as active.
+        // A late cancel could then interrupt an unrelated following command.
+        if resumes_target
+            && resume_was_rejected(&result)
+            && self.active_resume_operation == operation_id
+        {
+            self.active_resume_operation = None;
+        }
+        result
     }
 
     fn handle_unmatched_result(&mut self, record: &MiRecord) -> Result<()> {
@@ -2051,6 +2062,12 @@ fn command_resumes_target(command: &MiCommand) -> bool {
     )
 }
 
+fn resume_was_rejected(result: &Result<CommandReply>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|error| error.code == ErrorCode::GdbError)
+}
+
 fn operation_owns_resume(active: Option<&OperationId>, requested: &OperationId) -> bool {
     active == Some(requested)
 }
@@ -2200,6 +2217,14 @@ mod tests {
         assert!(command_resumes_target(
             &MiCommand::new("-exec-continue").unwrap()
         ));
+        assert!(resume_was_rejected(&Err(Error::new(
+            ErrorCode::GdbError,
+            "cannot execute"
+        ))));
+        assert!(!resume_was_rejected(&Err(Error::new(
+            ErrorCode::Timeout,
+            "unknown outcome"
+        ))));
     }
 
     #[test]
