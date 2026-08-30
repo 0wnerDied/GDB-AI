@@ -5,24 +5,31 @@ support is probed with MI commands and refreshed after launch, attach, core,
 or remote target selection. Unknown MI fields and classes are retained; an
 unknown state-changing event taints consistency instead of being guessed.
 
-## Verified matrix
+## Qualification matrix
 
 - Required CI builds checksum-pinned GDB 9.2, 10.2, 11.2, and 12.1 for MI3 and
-  GDB 13.2, 14.2, 15.2, 16.3, and 17.2 for MI4. Every version passed the same
+  GDB 13.2, 14.2, 15.2, 16.3, and 17.2 for MI4. Every lane runs the same
   local-launch vertical test.
-- The full locked workspace passed native launch, attach, core, gdbserver,
+- The locked workspace suite covers native launch, attach, core, gdbserver,
   raw reconciliation, tracked state, Agent operations, public session
   lifecycle, delayed-result, disconnect, storage-failure, and noisy-PTY paths.
-- AArch64 passed qemu-user RSP inspection and a native Debian VM running
-  launch, attach, core, and gdbserver scenarios.
-- QEMU TCG tests passed checksum-pinned Debian 6.1.176 and 6.12.105 x86-64
-  kernels plus Debian 6.12.105 AArch64. They exercise architecture-specific
+- AArch64 qualification includes qemu-user RSP inspection and a native Debian
+  VM running launch, attach, core, and gdbserver scenarios.
+- QEMU TCG jobs use checksum-pinned Debian 6.1.176 and 6.12.105 x86-64 kernels
+  plus Debian 6.12.105 AArch64. They exercise architecture-specific
   current-task resolution, both module layouts, tasks, stacks, panic context,
   and allowlisted monitor commands.
-- Rust 1.88, stable Rust, schemas, both SDKs, and bounded libFuzzer campaigns
-  for the MI parser, MI framer, and state reducer are required checks.
-- The lifecycle soak exercises 10,000 session create, launch, stop, and close
-  cycles and fails on session, startup, parser, timeout, or consistency errors.
+- The required toolchain is Rust 1.88.0. Schema hashes, both SDKs, and bounded
+  libFuzzer campaigns for the MI parser, MI framer, and state reducer are also
+  required checks.
+- A separate tag-only lifecycle soak exercises 10,000 session create, launch,
+  stop, and close cycles. It is diagnostic evidence and does not gate release
+  bundle creation.
+
+The release bundle depends on the required workspace, compatibility,
+AArch64, and kernel jobs. Whether a particular commit or tag passed those
+lanes is recorded by GitHub Actions and the release attestation; results from
+one source revision are not evidence for another.
 
 Missing host facilities remain explicitly unavailable or conditional; they
 are never converted to success merely because another matrix entry passed.

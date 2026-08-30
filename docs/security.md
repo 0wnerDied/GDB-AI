@@ -19,6 +19,8 @@ require `acknowledge_target_effects=true` and the `lab_mutation` profile.
 The legacy `volatile=true` field is accepted only as the same acknowledgement,
 not as the source of the classification.
 
-HTTP is loopback-only without a token. Unix sockets are mode `0600`. Memory,
-register, input, raw, and policy mutations are audited with sensitive payloads
-redacted. Never place secrets in configuration committed to this repository.
+HTTP always binds only to loopback; an optional bearer token authenticates
+clients but does not permit a non-loopback listener. Unix sockets are mode
+`0600`. Memory, register, input, raw, and policy mutations are audited with
+sensitive payloads redacted. Never place secrets in configuration committed
+to this repository.

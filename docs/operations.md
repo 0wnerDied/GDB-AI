@@ -1,8 +1,9 @@
 # Operations
 
 Run `gdb-ai doctor` before serving. Use stdio for one local MCP client, a Unix
-socket for multiple local clients, or loopback HTTP behind a same-host TLS
-reverse proxy. HTTP never binds directly to a non-loopback address.
+socket for multiple local clients, or loopback HTTP for local clients. Remote
+access requires a trusted same-host TLS reverse proxy; GDB/AI never binds HTTP
+directly to a non-loopback address.
 
 Without an explicit config, persistent state lives under
 `$XDG_STATE_HOME/gdb-ai` or `$HOME/.local/state/gdb-ai`. A service account

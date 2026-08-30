@@ -35,8 +35,9 @@ Canonical operations expose `operation.get` through `gdb_session` action
 `operation_status`. Actor-scoped target cancellation uses `operation.cancel`;
 waiter detachment and target control are distinct operations.
 
-Streamable HTTP supports two isolated adapters. MCP `2025-11-25` stores the
-negotiated version in a transport session and requires it in
+Streamable HTTP supports two version-specific request paths over the same
+endpoint and canonical dispatcher. MCP `2025-11-25` stores the negotiated
+version in a transport session and requires it in
 `Mcp-Protocol-Version` on every later POST or DELETE. Stateless MCP
 `2026-07-28` needs neither initialization nor `Mcp-Session-Id`; each request
 instead carries `io.modelcontextprotocol/protocolVersion` and

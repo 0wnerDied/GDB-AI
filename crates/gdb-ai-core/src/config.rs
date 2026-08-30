@@ -20,8 +20,8 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        // 2026-08-29: Falling back to shared /tmp/gdb-ai mixed state across
-        // users and let system cleanup remove durable session evidence.
+        // 2026-08-29: Avoid a shared temporary directory, which mixed state
+        // across users and could lose durable evidence during system cleanup.
         let data = default_state_directory(
             std::env::var_os("XDG_STATE_HOME").map(PathBuf::from),
             std::env::var_os("HOME").map(PathBuf::from),
