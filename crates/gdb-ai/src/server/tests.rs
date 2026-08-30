@@ -105,7 +105,12 @@ fn tool_results_keep_only_agent_coordination_state() {
         idempotency_key: None,
         parameters: json!({}),
     };
-    let response = ApiResponse::success(&request, Some(state), json!({"status": "ready"}));
+    let nested_state = state.clone();
+    let response = ApiResponse::success(
+        &request,
+        Some(state),
+        json!({"status": "ready", "state": nested_state}),
+    );
     let canonical_bytes = serde_json::to_vec(&response).unwrap().len();
     let result = tool_result(response);
     let compact_bytes = serde_json::to_vec(&result["structuredContent"])
@@ -114,6 +119,7 @@ fn tool_results_keep_only_agent_coordination_state() {
     let structured = &result["structuredContent"];
     assert_eq!(structured["state"]["lifecycle"], "CREATING");
     assert_eq!(structured["result"]["status"], "ready");
+    assert!(structured["result"].get("state").is_none());
     assert!(structured["state"].get("breakpoints").is_none());
     assert!(structured["state"].get("limitations").is_none());
     assert!(structured.get("api_version").is_none());

@@ -526,7 +526,7 @@ fn compact_tool_response(response: ApiResponse) -> Value {
         session_id,
         revision,
         state,
-        result,
+        mut result,
         warnings,
         truncated,
         continuation,
@@ -577,6 +577,13 @@ fn compact_tool_response(response: ApiResponse) -> Value {
             summary.insert("snapshot".into(), json!(snapshot));
         }
         compact.insert("state".into(), Value::Object(std::mem::take(summary)));
+    }
+    if let Some(Value::Object(result)) = result.as_mut()
+        && result.get("state").is_some_and(|state| {
+            state.get("session_id").is_some() && state.get("revision").is_some()
+        })
+    {
+        result.remove("state");
     }
     if let Some(result) = result {
         compact.insert("result".into(), result);
