@@ -1916,13 +1916,7 @@ impl SessionWorker {
             // Persist the bounded stop context before advertising readiness.
             let stop_id = self.reducer.state().stop_id.clone().unwrap();
             let snapshot_id = format!("snap_{stop_id}");
-            let frame = self
-                .reducer
-                .state()
-                .inferiors
-                .values()
-                .flat_map(|inferior| inferior.threads.values())
-                .find_map(|thread| thread.frame.clone());
+            let frame = self.reducer.state().stopped_frame().cloned();
             let snapshot = serde_json::json!({
                 "snapshot_id": snapshot_id,
                 "stop_id": stop_id,

@@ -534,6 +534,21 @@ impl SessionState {
             ))
         }
     }
+
+    pub fn stopped_frame(&self) -> Option<&FrameSummary> {
+        // 2026-08-30: Minimal snapshots previously selected the first frame in
+        // the registry, which could belong to another inferior or older stop.
+        let inferior_id = self.stopped_inferior_id.as_ref()?;
+        let thread_id = self.stopped_thread_id.as_ref()?;
+        self.inferiors
+            .values()
+            .find(|inferior| &inferior.id == inferior_id)?
+            .threads
+            .values()
+            .find(|thread| &thread.id == thread_id)?
+            .frame
+            .as_ref()
+    }
 }
 
 impl From<&SessionState> for WaitBaseline {

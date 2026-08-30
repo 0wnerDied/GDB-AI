@@ -775,6 +775,50 @@ mod tests {
     }
 
     #[test]
+    fn stopped_frame_belongs_to_the_current_stop() {
+        let mut reducer =
+            StateReducer::new(SessionState::creating(SessionId("sess_frames".into())));
+        apply(&mut reducer, 1, DomainEvent::BackendStarted);
+        for (seq, backend_id) in [(2, "i1"), (3, "i2")] {
+            apply(
+                &mut reducer,
+                seq,
+                DomainEvent::InferiorAdded {
+                    backend_id: backend_id.into(),
+                    pid: Some(seq),
+                },
+            );
+        }
+        for (seq, backend_id, backend_thread, function) in [
+            (4, "i1", "1", "older_frame"),
+            (5, "i2", "2", "current_frame"),
+        ] {
+            apply(
+                &mut reducer,
+                seq,
+                DomainEvent::TargetStopped {
+                    backend_inferior: Some(backend_id.into()),
+                    backend_thread: Some(backend_thread.into()),
+                    reason: "breakpoint-hit".into(),
+                    reason_detail: None,
+                    frame: Some(FrameSummary {
+                        level: 0,
+                        address: None,
+                        function: Some(function.into()),
+                        source: None,
+                        line: None,
+                    }),
+                },
+            );
+        }
+
+        assert_eq!(
+            reducer.state().stopped_frame().unwrap().function.as_deref(),
+            Some("current_frame")
+        );
+    }
+
+    #[test]
     fn distinguishes_remote_exit_from_connection_loss() {
         let reduce = |from_stop_record| {
             let mut reducer =
