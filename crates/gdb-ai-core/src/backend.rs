@@ -210,6 +210,10 @@ impl OutputSpool {
     }
 
     fn capture(&self, bytes: &[u8]) {
+        let mut sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !self.state.active.load(Ordering::Acquire) {
             // 2026-08-30: PTY bytes can arrive after close timed out and the
             // spool was finalized. Any such drop invalidates its completeness.
@@ -222,13 +226,13 @@ impl OutputSpool {
         let captured = self.state.captured.load(Ordering::Relaxed);
         let length = (self.max_bytes.saturating_sub(captured) as usize).min(bytes.len());
         let sent = length > 0
-            && self
-                .sender
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+            && sender
                 .as_ref()
                 .is_some_and(|sender| sender.try_send(bytes[..length].to_vec()).is_ok());
         if sent {
+            // 2026-08-30: Finalization could take the sender after enqueue but
+            // before this counter advanced, returning an incomplete byte count.
+            // Publish both under the sender lock consumed by finish().
             self.state
                 .captured
                 .fetch_add(length as u64, Ordering::Relaxed);
@@ -242,10 +246,7 @@ impl OutputSpool {
                 .dropped
                 .fetch_add(dropped as u64, Ordering::Relaxed);
             self.state.active.store(false, Ordering::Release);
-            self.sender
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
+            sender.take();
         }
     }
 
