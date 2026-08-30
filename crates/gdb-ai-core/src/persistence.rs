@@ -30,6 +30,16 @@ pub struct StorageLock {
     _file: File,
 }
 
+impl Drop for StorageLock {
+    fn drop(&mut self) {
+        // 2026-08-30: Relying on the last close left the lock transiently held
+        // when another runtime thread forked and inherited this description
+        // before exec closed it. Explicit unlock gives ownership a clear end.
+        // SAFETY: flock only reads this live descriptor during the call.
+        let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ArtifactRecord {
     pub size: usize,
@@ -1325,8 +1335,10 @@ mod tests {
         let path = directory.path().join("storage.lock");
         let first = StorageLock::acquire(&path).unwrap();
         assert!(StorageLock::acquire(&path).is_err());
+        let inherited = first._file.try_clone().unwrap();
         drop(first);
-        StorageLock::acquire(path).unwrap();
+        let _reacquired = StorageLock::acquire(path).unwrap();
+        drop(inherited);
     }
 
     #[test]
