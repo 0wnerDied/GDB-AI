@@ -20,7 +20,7 @@ use crate::{
     session::SessionHandle,
 };
 
-fn memory_contents(record: &MiRecord) -> Result<Vec<u8>> {
+fn memory_contents(record: &MiRecord, maximum: usize) -> Result<Vec<u8>> {
     let memory = MiResult::find(record.results(), "memory").ok_or_else(|| {
         Error::new(
             ErrorCode::GdbError,
@@ -41,7 +41,16 @@ fn memory_contents(record: &MiRecord) -> Result<Vec<u8>> {
         }
         let contents = MiResult::find_str(item, "contents")
             .ok_or_else(|| Error::new(ErrorCode::GdbError, "memory block has no contents"))?;
-        bytes.extend(hex_decode(contents)?);
+        let contents = hex_decode(contents)?;
+        // 2026-08-30: A malformed or hostile remote backend could return more
+        // bytes than requested and bypass the API memory bound during decode.
+        if contents.len() > maximum.saturating_sub(bytes.len()) {
+            return Err(Error::new(
+                ErrorCode::GdbError,
+                "GDB memory response exceeds the requested length",
+            ));
+        }
+        bytes.extend(contents);
     }
     Ok(bytes)
 }
@@ -120,7 +129,7 @@ async fn read_memory_bytes_in_observation(
         };
         require_same_execution_context(handle, expected)?;
         evidence_seq = reply.evidence_seq;
-        let part = memory_contents(&reply.record)?;
+        let part = memory_contents(&reply.record, chunk)?;
         let part_len = part.len();
         bytes.extend(part);
         if part_len < chunk {
@@ -544,7 +553,24 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(memory_contents(&record).unwrap(), [0xaa, 0xbb, 0xcc, 0xdd]);
+        assert_eq!(
+            memory_contents(&record, 4).unwrap(),
+            [0xaa, 0xbb, 0xcc, 0xdd]
+        );
+    }
+
+    #[test]
+    fn memory_blocks_cannot_exceed_the_requested_length() {
+        let record = parse_record(
+            br#"1^done,memory=[{begin="0x1000",offset="0x0",end="0x1003",contents="aabbcc"}]"#,
+            MiLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            memory_contents(&record, 2).unwrap_err().code,
+            ErrorCode::GdbError
+        );
     }
 
     #[test]
