@@ -356,28 +356,31 @@ fn available_tools(
 }
 
 fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
-    let actions = tool
+    // 2026-08-30: Expanding equivalent canonical parameter contracts once
+    // per MCP action repeated schema. Group them before adding the action.
+    let mut groups: Vec<(Value, Vec<&str>)> = Vec::new();
+    for action in tool
         .actions
         .iter()
         .filter(|action| include_advanced || !action.advanced)
-        .collect::<Vec<_>>();
-    // 2026-08-30: Expanding the same canonical method once per MCP action
-    // repeated 32 KiB of schema. Group aliases while preserving validation.
-    let branches = actions
-        .iter()
-        .enumerate()
-        .filter(|(index, action)| {
-            !actions[..*index]
-                .iter()
-                .any(|seen| seen.method == action.method)
-        })
-        .map(|(_, action)| {
-            let action_names = actions
-                .iter()
-                .filter(|candidate| candidate.method == action.method)
-                .map(|candidate| candidate.name)
-                .collect::<Vec<_>>();
-            projected_method_schema(tool.discriminator, action.method, &action_names)
+    {
+        let schema = projected_method_schema(action.method);
+        if let Some((_, names)) = groups
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == schema)
+        {
+            names.push(action.name);
+        } else {
+            groups.push((schema, vec![action.name]));
+        }
+    }
+    let branches = groups
+        .into_iter()
+        .map(|(mut schema, action_names)| {
+            if let Some(discriminator) = tool.discriminator {
+                add_discriminator(&mut schema, discriminator, &action_names);
+            }
+            schema
         })
         .collect::<Vec<_>>();
     if branches.len() == 1 {
@@ -389,11 +392,7 @@ fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
 
 // 2026-08-28: Handwritten MCP fields drifted from canonical validation.
 // Project transport metadata around the same per-method parameter schema.
-fn projected_method_schema(
-    discriminator: Option<&str>,
-    method: CanonicalMethod,
-    action_names: &[&str],
-) -> Value {
+fn projected_method_schema(method: CanonicalMethod) -> Value {
     let mut schema = method.parameter_schema();
     let mut required = schema["required"]
         .as_array()
@@ -422,16 +421,22 @@ fn projected_method_schema(
     if method.requires_session() {
         required.insert("session_id".into());
     }
-    if let Some(discriminator) = discriminator {
-        let discriminator_schema = match action_names {
-            [action] => json!({"const": action}),
-            actions => json!({"type": "string", "enum": actions}),
-        };
-        properties.insert(discriminator.into(), discriminator_schema);
-        required.insert(discriminator.into());
-    }
     schema["required"] = Value::Array(required.into_iter().map(Value::String).collect());
     schema
+}
+
+fn add_discriminator(schema: &mut Value, discriminator: &str, action_names: &[&str]) {
+    let discriminator_schema = match action_names {
+        [action] => json!({"const": action}),
+        actions => json!({"type": "string", "enum": actions}),
+    };
+    schema["properties"]
+        .as_object_mut()
+        .unwrap()
+        .insert(discriminator.into(), discriminator_schema);
+    let required = schema["required"].as_array_mut().unwrap();
+    required.push(Value::String(discriminator.into()));
+    required.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
 }
 
 #[cfg(test)]
@@ -500,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_actions_that_share_a_canonical_method() {
+    fn groups_actions_that_share_a_parameter_contract() {
         let tools = tools(false, false);
         let run = tools.iter().find(|tool| tool["name"] == "gdb_run").unwrap();
         let control = run["inputSchema"]["oneOf"]
@@ -516,6 +521,6 @@ mod tests {
                 .len(),
             8
         );
-        assert!(serde_json::to_vec(&tools).unwrap().len() < 30_000);
+        assert!(serde_json::to_vec(&tools).unwrap().len() < 22_000);
     }
 }
