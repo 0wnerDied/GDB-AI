@@ -2098,6 +2098,10 @@ fn command_timeout(token: u64) -> Error {
         // that target state remained unchanged.
         format!("MI token {token} timed out; command completion is unknown"),
     )
+    .with_details(serde_json::json!({
+        "outcome_unknown": true,
+        "token": token,
+    }))
     .retryable()
 }
 
@@ -2248,6 +2252,7 @@ mod tests {
             &Err(Error::new(ErrorCode::Timeout, "unknown outcome")),
             true
         ));
+        assert_eq!(command_timeout(42).details.unwrap()["token"], 42);
     }
 
     #[test]

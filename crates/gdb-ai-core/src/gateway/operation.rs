@@ -213,17 +213,7 @@ impl Gateway {
                     None,
                 ),
             };
-            let status = if response
-                .state
-                .as_ref()
-                .is_some_and(|state| !state.outcome_unknown_tokens.is_empty())
-            {
-                RequestOperationStatus::OutcomeUnknown
-            } else if response.error.is_some() {
-                RequestOperationStatus::Failed
-            } else {
-                RequestOperationStatus::Succeeded
-            };
+            let status = operation_status(&response);
             let _transition = entry.transition.lock().await;
             entry.state.send_modify(|record| {
                 // 2026-08-30: A cancellation could lose the race with normal
@@ -375,6 +365,31 @@ fn completed_status(
     }
 }
 
+fn operation_status(response: &ApiResponse) -> RequestOperationStatus {
+    // 2026-08-30: Unknown tokens belong to the session, not necessarily this
+    // operation. Require this timeout's token to remain unresolved so later
+    // reads and unrelated timeouts retain their own completion status.
+    let unknown_token = response
+        .error
+        .as_ref()
+        .filter(|error| error.code == ErrorCode::Timeout)
+        .and_then(|error| error.details.as_ref())
+        .filter(|details| details["outcome_unknown"].as_bool() == Some(true))
+        .and_then(|details| details["token"].as_u64());
+    if unknown_token.is_some_and(|token| {
+        response
+            .state
+            .as_ref()
+            .is_some_and(|state| state.outcome_unknown_tokens.contains(&token))
+    }) {
+        RequestOperationStatus::OutcomeUnknown
+    } else if response.error.is_some() {
+        RequestOperationStatus::Failed
+    } else {
+        RequestOperationStatus::Succeeded
+    }
+}
+
 fn cancellation_for_request(request: &ApiRequest) -> RequestOperationCancellation {
     let resumes = request.method == CanonicalMethod::ExecutionControl
         && request.parameters["action"].as_str() != Some("interrupt");
@@ -511,6 +526,57 @@ mod tests {
                 true,
                 false,
             ),
+            RequestOperationStatus::OutcomeUnknown
+        );
+    }
+
+    #[test]
+    fn operation_status_ignores_unknown_tokens_owned_by_other_operations() {
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "status".into(),
+            session_id: Some(SessionId::new().0),
+            method: CanonicalMethod::SessionGet,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({}),
+        };
+        let mut state = crate::domain::SessionState::creating(SessionId::new());
+        state.outcome_unknown_tokens.insert(7);
+
+        assert_eq!(
+            operation_status(&ApiResponse::success(
+                &request,
+                Some(state.clone()),
+                json!({})
+            )),
+            RequestOperationStatus::Succeeded
+        );
+        assert_eq!(
+            operation_status(&ApiResponse::failure(
+                &request,
+                Error::new(ErrorCode::InvalidState, "not ready"),
+                Some(state.clone()),
+            )),
+            RequestOperationStatus::Failed
+        );
+        assert_eq!(
+            operation_status(&ApiResponse::failure(
+                &request,
+                Error::new(ErrorCode::Timeout, "wait timed out"),
+                Some(state.clone()),
+            )),
+            RequestOperationStatus::Failed
+        );
+        assert_eq!(
+            operation_status(&ApiResponse::failure(
+                &request,
+                Error::new(ErrorCode::Timeout, "command timed out").with_details(json!({
+                    "outcome_unknown": true,
+                    "token": 7,
+                })),
+                Some(state),
+            )),
             RequestOperationStatus::OutcomeUnknown
         );
     }
