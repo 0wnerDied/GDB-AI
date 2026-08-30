@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use gdb_ai_mi::{MiFramer, MiLimits, MiRecord, encode_command, parse_record, quote_c_string};
+use gdb_ai_mi::{MiFramer, MiLimits, MiRecord, parse_record, quote_c_string};
 use nix::{
     pty::openpty,
     sys::resource::{Resource, setrlimit},
@@ -38,15 +38,6 @@ use crate::{
 pub enum MiArgument {
     Bare(String),
     String(Vec<u8>),
-}
-
-impl MiArgument {
-    fn encode(&self) -> String {
-        match self {
-            Self::Bare(value) => value.clone(),
-            Self::String(value) => quote_c_string(value),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -99,15 +90,19 @@ impl MiCommand {
     }
 
     pub fn encoded(&self, token: u64) -> Vec<u8> {
-        encode_command(
-            token,
-            &self.name,
-            &self
-                .arguments
-                .iter()
-                .map(MiArgument::encode)
-                .collect::<Vec<_>>(),
-        )
+        // 2026-08-30: Building a temporary Vec<String> cloned every bare MI
+        // argument, including large memory-write payloads. Append arguments
+        // directly to the one command allocation.
+        let mut line = format!("{token}{}", self.name);
+        for argument in &self.arguments {
+            line.push(' ');
+            match argument {
+                MiArgument::Bare(value) => line.push_str(value),
+                MiArgument::String(value) => line.push_str(&quote_c_string(value)),
+            }
+        }
+        line.push('\n');
+        line.into_bytes()
     }
 }
 
