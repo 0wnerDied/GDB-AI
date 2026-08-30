@@ -285,6 +285,14 @@ impl SessionHandle {
         self.state.borrow().clone()
     }
 
+    // 2026-08-30: Reading one coordination scalar used to clone growing
+    // breakpoint, thread, module, and signal registries. Keep the watch borrow
+    // inside a synchronous closure so callers cannot hold it across an await.
+    pub(crate) fn with_state<T>(&self, inspect: impl FnOnce(&SessionState) -> T) -> T {
+        let state = self.state.borrow();
+        inspect(&state)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<PublishedEvent> {
         self.events.subscribe()
     }

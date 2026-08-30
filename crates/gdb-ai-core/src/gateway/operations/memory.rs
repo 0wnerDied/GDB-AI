@@ -117,7 +117,7 @@ async fn read_memory_bytes_in_observation(
 
     validate_memory_range(start, length)?;
     let mut bytes = Vec::with_capacity(length);
-    let mut evidence_seq = handle.state().event_seq;
+    let mut evidence_seq = handle.with_state(|state| state.event_seq);
     while bytes.len() < length {
         // 2026-08-28: Chunked reads could resume after an interrupt at a new
         // stop and concatenate bytes from different execution epochs.

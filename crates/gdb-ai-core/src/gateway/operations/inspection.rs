@@ -505,7 +505,7 @@ impl Gateway {
                     }
                     Ok(json!({
                         "stop_id": baseline.stop_id,
-                        "revision": entry.handle.state().revision,
+                        "revision": entry.handle.with_state(|state| state.revision),
                         "results": results
                     }))
                 }),

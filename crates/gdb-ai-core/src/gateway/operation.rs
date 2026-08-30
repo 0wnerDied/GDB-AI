@@ -161,10 +161,11 @@ impl Gateway {
         waiter_timeout: Option<Duration>,
     ) -> Result<OperationTicket> {
         self.validate_request(&request)?;
-        let state = self
-            .entry_for_request(&request)
-            .await
-            .map(|entry| entry.handle.state());
+        let coordination = self.entry_for_request(&request).await.map(|entry| {
+            entry
+                .handle
+                .with_state(|state| (state.revision, state.execution_epoch))
+        });
         let operation_id = OperationId::new();
         let waiter_deadline_unix_ms = waiter_timeout.map(|timeout| {
             now_unix_ms().saturating_add(timeout.as_millis().min(u64::MAX as u128) as u64)
@@ -176,8 +177,8 @@ impl Gateway {
             method: request.method,
             effect: effect_for_method(request.method),
             status: RequestOperationStatus::Accepted,
-            admitted_revision: state.as_ref().map(|state| state.revision),
-            admitted_execution_epoch: state.as_ref().map(|state| state.execution_epoch),
+            admitted_revision: coordination.map(|(revision, _)| revision),
+            admitted_execution_epoch: coordination.map(|(_, epoch)| epoch),
             waiter_deadline_unix_ms,
             cancellation,
             waiter_detached: false,

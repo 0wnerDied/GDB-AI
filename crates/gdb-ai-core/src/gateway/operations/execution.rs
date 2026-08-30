@@ -163,7 +163,8 @@ impl Gateway {
             Err(error) => {
                 operation.status = OperationStatus::Failed;
                 operation.error = Some(error.to_string());
-                operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                operation.completed_event_seq =
+                    Some(entry.handle.with_state(|state| state.event_seq));
                 self.store.upsert_operation(&operation)?;
                 return Err(error);
             }
@@ -200,14 +201,15 @@ impl Gateway {
                 Err(error) => {
                     operation.status = OperationStatus::Failed;
                     operation.error = Some(error.to_string());
-                    operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                    operation.completed_event_seq =
+                        Some(entry.handle.with_state(|state| state.event_seq));
                     self.store.upsert_operation(&operation)?;
                     Err(error)
                 }
             }
         } else {
             operation.status = OperationStatus::Completed;
-            operation.completed_event_seq = Some(entry.handle.state().event_seq);
+            operation.completed_event_seq = Some(entry.handle.with_state(|state| state.event_seq));
             self.store.upsert_operation(&operation)?;
             Ok(json!({
                 "operation_id": operation.operation_id,

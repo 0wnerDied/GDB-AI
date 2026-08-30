@@ -353,7 +353,8 @@ impl Gateway {
                 // 2026-08-28: A failed worker closes its request channel, so close
                 // must still release registry and lease state after GDB death.
                 if !forced
-                    && entry.handle.state().lifecycle != crate::domain::SessionLifecycle::Failed
+                    && entry.handle.with_state(|state| state.lifecycle)
+                        != crate::domain::SessionLifecycle::Failed
                 {
                     return Err(error);
                 }

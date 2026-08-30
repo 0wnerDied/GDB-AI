@@ -223,7 +223,8 @@ impl Drop for ProbeBreakpoint {
                         OperationStatus::Failed
                     };
                     operation.error = cleanup.as_ref().err().map(ToString::to_string);
-                    operation.completed_event_seq = Some(handle.state().event_seq);
+                    operation.completed_event_seq =
+                        Some(handle.with_state(|state| state.event_seq));
                     let _ = store.upsert_operation(&operation);
                 }
             }
@@ -423,7 +424,8 @@ impl Gateway {
                         Err(error) => {
                             operation.status = OperationStatus::Failed;
                             operation.error = Some(error.to_string());
-                            operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                            operation.completed_event_seq =
+                                Some(entry.handle.with_state(|state| state.event_seq));
                             self.store.upsert_operation(&operation)?;
                             return Err(error);
                         }
@@ -433,7 +435,8 @@ impl Gateway {
                 }
                 operation.status = OperationStatus::Completed;
                 operation.error = cleanup_error.as_ref().map(ToString::to_string);
-                operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                operation.completed_event_seq =
+                    Some(entry.handle.with_state(|state| state.event_seq));
                 self.store.upsert_operation(&operation)?;
                 result["operation"] = serde_json::to_value(operation)?;
                 result["breakpoint"] = Value::String(backend_number);
@@ -456,7 +459,8 @@ impl Gateway {
                     }
                     None => error.to_string(),
                 });
-                operation.completed_event_seq = Some(entry.handle.state().event_seq);
+                operation.completed_event_seq =
+                    Some(entry.handle.with_state(|state| state.event_seq));
                 self.store.upsert_operation(&operation)?;
                 Err(error)
             }

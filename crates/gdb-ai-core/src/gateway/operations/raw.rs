@@ -161,7 +161,8 @@ impl Gateway {
     ) -> Result<Value> {
         self.metrics.reconciliation();
         let can_restore = restore_clean
-            && entry.handle.state().consistency != crate::domain::Consistency::Tainted;
+            && entry.handle.with_state(|state| state.consistency)
+                != crate::domain::Consistency::Tainted;
         if can_restore {
             entry
                 .handle

@@ -318,7 +318,9 @@ impl Gateway {
                     &request.method,
                     effect,
                     false,
-                    entry.as_ref().map(|entry| entry.handle.state().revision),
+                    entry
+                        .as_ref()
+                        .map(|entry| entry.handle.with_state(|state| state.revision)),
                     &serde_json::to_value(request)?,
                     "denied",
                 )?;
@@ -355,7 +357,7 @@ impl Gateway {
                         &request.method,
                         effect,
                         false,
-                        Some(entry.handle.state().revision),
+                        Some(entry.handle.with_state(|state| state.revision)),
                         &serde_json::to_value(request)?,
                         "denied",
                     )?;
@@ -387,7 +389,9 @@ impl Gateway {
                 &request.method,
                 effect,
                 false,
-                entry.as_ref().map(|entry| entry.handle.state().revision),
+                entry
+                    .as_ref()
+                    .map(|entry| entry.handle.with_state(|state| state.revision)),
                 &serde_json::to_value(request)?,
                 "denied",
             )?;
@@ -405,7 +409,9 @@ impl Gateway {
                 &request.method,
                 effect,
                 false,
-                entry.as_ref().map(|entry| entry.handle.state().revision),
+                entry
+                    .as_ref()
+                    .map(|entry| entry.handle.with_state(|state| state.revision)),
                 &serde_json::to_value(request)?,
                 "denied",
             )?;
@@ -552,7 +558,9 @@ impl Gateway {
                 &request.method,
                 effect,
                 true,
-                entry.as_ref().map(|entry| entry.handle.state().revision),
+                entry
+                    .as_ref()
+                    .map(|entry| entry.handle.with_state(|state| state.revision)),
                 request_value.as_ref().unwrap(),
                 "accepted",
             )?;
@@ -598,7 +606,7 @@ impl Gateway {
                 &request.method,
                 effect,
                 result.is_ok(),
-                Some(entry.handle.state().revision),
+                Some(entry.handle.with_state(|state| state.revision)),
                 request_value.as_ref().unwrap(),
                 outcome,
             ) {
