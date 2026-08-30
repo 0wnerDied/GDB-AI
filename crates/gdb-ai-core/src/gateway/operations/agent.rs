@@ -332,13 +332,15 @@ impl Gateway {
             completed_event_seq: None,
             error: None,
         };
-        self.store.upsert_operation(&operation)?;
+        // 2026-08-30: Persisting the probe operation before constructing its
+        // cleanup guard leaked the already-inserted breakpoint on SQLite errors.
         let mut breakpoint = ProbeBreakpoint {
             handle: entry.handle.clone(),
             store: self.store.clone(),
             operation_id: operation.operation_id.clone(),
             backend_number: Some(backend_number.clone()),
         };
+        self.store.upsert_operation(&operation)?;
         let started = tokio::time::Instant::now();
         let mut captures = Vec::new();
         let mut calls = 1usize;
