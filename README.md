@@ -176,13 +176,15 @@ target/release/gdb-ai serve --http 127.0.0.1:8080 \
 ```
 
 HTTP endpoints are `/mcp`, `/healthz`, and `/metrics`. The same connection
-accepts MCP tools and the canonical `gdb.ai/call` JSON-RPC method. Supported
-Streamable HTTP uses MCP `2025-11-25`; every request after initialization must
-carry that negotiated `Mcp-Protocol-Version`. POST clients must advertise both
-`application/json` and `text/event-stream` in `Accept`; GDB/AI returns JSON and
-declines the optional GET event stream with HTTP 405. Stdio and Unix streams
-retain the tested message-level compatibility modes without claiming legacy
-HTTP+SSE.
+accepts MCP tools and the canonical `gdb.ai/call` JSON-RPC method. GDB/AI
+supports the stateful MCP `2025-11-25` transport and stateless MCP
+`2026-07-28`. Stateless clients omit initialization and `Mcp-Session-Id`, and
+send protocol version and capabilities in each request's `_meta`. Stateful
+clients carry their negotiated `Mcp-Protocol-Version` after initialization.
+POST clients advertise both `application/json` and `text/event-stream` in
+`Accept`; GDB/AI returns JSON and declines the optional GET event stream with
+HTTP 405. Stdio and Unix streams retain the tested message-level compatibility
+modes without claiming legacy HTTP+SSE.
 
 ## Tools
 

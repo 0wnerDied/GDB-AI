@@ -18,7 +18,9 @@ Schema files and hashes live in [`../schemas`](../schemas). MCP is a compact
 projection over the same methods; `gdb.ai/call` exposes the canonical envelope
 without translating it into a tool action. Rust method contracts validate
 allowed, required, and typed parameters and generate both the canonical JSON
-Schema branches and MCP tool input schemas.
+Schema branches and MCP tool input schemas. MCP itself remains UTF-8 JSON-RPC;
+large binary evidence uses bounded artifact resources instead of embedding a
+second wire format inside tool calls.
 
 MCP discovery defaults to nine bounded tools for ordinary Agent debugging.
 Starting the server with `--advanced-tools` exposes the existing advanced
@@ -33,13 +35,17 @@ Canonical operations expose `operation.get` through `gdb_session` action
 `operation_status`. Actor-scoped target cancellation uses `operation.cancel`;
 waiter detachment and target control are distinct operations.
 
-Streamable HTTP supports MCP `2025-11-25`. The negotiated version is stored in
-the transport session and is required in `Mcp-Protocol-Version` on every later
-POST or DELETE. POST requests advertise `application/json` and
-`text/event-stream`; responses use JSON, while GET returns HTTP 405 because the
-server does not open an optional SSE stream. Older message versions remain
-limited to tested stdio/Unix compatibility; GDB/AI does not advertise the
-legacy HTTP+SSE transport.
+Streamable HTTP supports two isolated adapters. MCP `2025-11-25` stores the
+negotiated version in a transport session and requires it in
+`Mcp-Protocol-Version` on every later POST or DELETE. Stateless MCP
+`2026-07-28` needs neither initialization nor `Mcp-Session-Id`; each request
+instead carries `io.modelcontextprotocol/protocolVersion` and
+`io.modelcontextprotocol/clientCapabilities` under `_meta`. Stateless results
+include `resultType`, and discovery results carry private cache hints. POST
+requests advertise `application/json` and `text/event-stream`; responses use
+JSON, while GET returns HTTP 405 because the server does not open an optional
+SSE stream. Older message versions remain limited to tested stdio/Unix
+compatibility; GDB/AI does not advertise the legacy HTTP+SSE transport.
 
 Large results return `gdbai://artifact/sha256:...`. Artifact reads re-check
 session ownership; the URI itself is not authorization. `artifact.get` uses
@@ -58,6 +64,10 @@ The base PTY and transcript resource URIs return current-bound manifests;
 `?offset=<n>&length=<m>` returns that exact bounded range or fails if the bytes
 are unavailable. A resource page therefore never inherits an ambiguous base
 URI.
+Canonical I/O and transcript reads return exactly one lossless representation:
+`text` for valid UTF-8 or `data_base64` for binary bytes. This avoids charging
+an Agent context for the same evidence twice. MCP resource adapters encode a
+text range as a base64 `blob` only where the resource schema requires it.
 The `output.evidence` setting selects an `ephemeral_ring`, a retained
 `bounded_spool`, or an `artifact` finalized when the session closes. I/O reads
 and close responses report captured, spooled, dropped, completeness, digest,
