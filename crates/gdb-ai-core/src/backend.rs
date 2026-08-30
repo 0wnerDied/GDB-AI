@@ -611,7 +611,7 @@ impl BackendInputs {
 pub trait DebugBackend: Send {
     fn descriptor(&self) -> &BackendDescriptor;
     fn pty_path(&self) -> &str;
-    async fn send(&mut self, token: u64, command: &MiCommand) -> Result<Vec<u8>>;
+    async fn send(&mut self, raw: &[u8]) -> Result<()>;
     async fn next_input(&mut self) -> Option<BackendInput>;
     async fn write_inferior(&mut self, bytes: &[u8]) -> Result<()>;
     async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()>;
@@ -814,9 +814,8 @@ impl GdbBackend {
         &self.descriptor.pty
     }
 
-    pub async fn send(&mut self, token: u64, command: &MiCommand) -> Result<Vec<u8>> {
-        let raw = command.encoded(token);
-        self.stdin.write_all(&raw).await.map_err(|error| {
+    pub async fn send(&mut self, raw: &[u8]) -> Result<()> {
+        self.stdin.write_all(raw).await.map_err(|error| {
             Error::new(
                 ErrorCode::GdbExited,
                 format!("cannot write GDB stdin: {error}"),
@@ -828,7 +827,7 @@ impl GdbBackend {
                 format!("cannot flush GDB stdin: {error}"),
             )
         })?;
-        Ok(raw)
+        Ok(())
     }
 
     pub async fn next_input(&mut self) -> Option<BackendInput> {
@@ -940,8 +939,8 @@ impl DebugBackend for GdbBackend {
         self.pty_path()
     }
 
-    async fn send(&mut self, token: u64, command: &MiCommand) -> Result<Vec<u8>> {
-        self.send(token, command).await
+    async fn send(&mut self, raw: &[u8]) -> Result<()> {
+        self.send(raw).await
     }
 
     async fn next_input(&mut self) -> Option<BackendInput> {

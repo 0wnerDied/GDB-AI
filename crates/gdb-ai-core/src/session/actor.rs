@@ -1699,7 +1699,9 @@ impl SessionWorker {
         let raw = command.encoded(token);
         let appended = self.journal.append_mi_input(token, &raw);
         self.journal_result(appended)?;
-        self.backend.send(token, command).await?;
+        // 2026-08-30: The backend used to encode the same command again after
+        // the scheduler journaled it. Send these exact recorded bytes once.
+        self.backend.send(&raw).await?;
         Ok(token)
     }
 
