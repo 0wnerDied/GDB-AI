@@ -4,32 +4,45 @@ use serde_json::{Map, Value};
 use crate::{Error, ErrorCode, Result};
 
 pub(super) fn hex_decode(value: &str) -> Result<Vec<u8>> {
-    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !value.len().is_multiple_of(2) {
         return Err(Error::new(
             ErrorCode::GdbError,
             "GDB returned malformed hexadecimal bytes",
         ));
     }
+    // 2026-08-30: Per-byte UTF-8 and radix parsing dominated large memory
+    // reads. Decode both nibbles directly in one bounded pass.
     value
         .as_bytes()
         .as_chunks::<2>()
         .0
         .iter()
-        .map(|pair| {
-            let text = std::str::from_utf8(pair).unwrap();
-            u8::from_str_radix(text, 16)
-                .map_err(|_| Error::new(ErrorCode::GdbError, "invalid hexadecimal byte"))
-        })
+        .map(|pair| Ok((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
         .collect()
 }
 
 pub(super) fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(output, "{byte:02x}");
+    // 2026-08-30: Formatting each byte was the dominant cost of large memory
+    // writes. The fixed ASCII table produces the same lowercase MI payload.
+    for &byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+fn hex_nibble(byte: u8) -> Result<u8> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(Error::new(
+            ErrorCode::GdbError,
+            "GDB returned malformed hexadecimal bytes",
+        )),
+    }
 }
 
 pub(super) fn parse_gdb_u64(value: &str) -> Result<u64> {
@@ -133,6 +146,15 @@ pub(super) fn first_word(command: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hexadecimal_codec_preserves_bytes_and_rejects_malformed_input() {
+        let bytes = [0x00, 0xab, 0xcd, 0xff];
+        assert_eq!(hex_encode(&bytes), "00abcdff");
+        assert_eq!(hex_decode("00aBcDfF").unwrap(), bytes);
+        assert!(hex_decode("0").is_err());
+        assert!(hex_decode("0z").is_err());
+    }
 
     #[test]
     fn byte_content_uses_one_lossless_representation() {
