@@ -58,6 +58,14 @@ impl ActiveOperation {
     pub(super) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
+
+    fn require_active(&self) -> Result<()> {
+        if self.is_cancelled() {
+            Err(Error::new(ErrorCode::Cancelled, "operation was cancelled"))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 pub(crate) async fn scope_operation<T>(
@@ -313,14 +321,8 @@ impl SessionHandle {
         deadline: tokio::time::Instant,
     ) -> Result<CommandReply> {
         let operation = active_operation();
-        if operation
-            .as_ref()
-            .is_some_and(ActiveOperation::is_cancelled)
-        {
-            return Err(Error::new(
-                ErrorCode::Cancelled,
-                "operation was cancelled before its MI command started",
-            ));
+        if let Some(operation) = &operation {
+            operation.require_active()?;
         }
         let (sender, receiver) = oneshot::channel();
         self.enqueue_until(
@@ -362,12 +364,17 @@ impl SessionHandle {
         after: Vec<MiCommand>,
         deadline: tokio::time::Instant,
     ) -> Result<CommandReply> {
+        let operation = active_operation();
+        if let Some(operation) = &operation {
+            operation.require_active()?;
+        }
         let (sender, receiver) = oneshot::channel();
         self.enqueue_until(
             WorkerRequest::Transaction {
                 before,
                 command,
                 after,
+                operation,
                 deadline,
                 response: sender,
             },

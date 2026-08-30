@@ -533,6 +533,68 @@ async fn queue_wait_counts_toward_command_deadline() {
 }
 
 #[tokio::test]
+async fn transaction_resume_is_owned_by_its_operation() {
+    if !crate::test_support::require_commands(&["gdb", "cc"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let executable = directory.path().join("transaction-resume");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/attach.c");
+    assert!(
+        std::process::Command::new("cc")
+            .args(["-g", "-O0"])
+            .arg(source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let Some(session) = control_test_session().await else {
+        return;
+    };
+    session
+        .command(
+            MiCommand::new("-target-select")
+                .unwrap()
+                .bare("native")
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    session
+        .command(
+            MiCommand::new("-file-exec-and-symbols")
+                .unwrap()
+                .bare(executable.to_string_lossy())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let operation_id = OperationId::new();
+    let operation = ActiveOperation::new(operation_id.clone(), Arc::new(AtomicBool::new(false)));
+    let running = session.clone();
+    scope_operation(operation, async move {
+        running
+            .transaction(Vec::new(), MiCommand::new("-exec-run").unwrap(), Vec::new())
+            .await
+    })
+    .await
+    .unwrap();
+
+    session
+        .cancel_operation(operation_id, OperationCancelMode::InterruptTarget)
+        .await
+        .unwrap();
+    session
+        .wait(WaitUntil::Stopped, Duration::from_secs(2))
+        .await
+        .unwrap();
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn stable_observation_serializes_ordinary_commands() {
     let Some(session) = control_test_session().await else {
         return;

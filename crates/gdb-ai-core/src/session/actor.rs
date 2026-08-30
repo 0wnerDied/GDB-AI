@@ -48,6 +48,7 @@ pub(super) enum WorkerRequest {
         before: Vec<MiCommand>,
         command: MiCommand,
         after: Vec<MiCommand>,
+        operation: Option<ActiveOperation>,
         deadline: tokio::time::Instant,
         response: oneshot::Sender<Result<CommandReply>>,
     },
@@ -663,6 +664,7 @@ impl SessionWorker {
                 before,
                 command,
                 after,
+                operation,
                 deadline,
                 response,
             } => {
@@ -676,13 +678,25 @@ impl SessionWorker {
                 }
                 let mut setup = Ok(());
                 for command in before {
+                    if let Some(operation) = &operation
+                        && let Err(error) = operation.require_active()
+                    {
+                        setup = Err(error);
+                        break;
+                    }
                     if let Err(error) = self.execute_until(command, deadline).await {
                         setup = Err(error);
                         break;
                     }
                 }
                 let result = match setup {
-                    Ok(()) => self.execute_until(command, deadline).await,
+                    // 2026-08-30: Launch and restart advertised actor-scoped
+                    // cancellation, but their transaction dropped operation
+                    // identity before the resume reached the SessionActor.
+                    Ok(()) => {
+                        self.execute_operation_until(command, operation, deadline)
+                            .await
+                    }
                     Err(error) => Err(error),
                 };
                 // 2026-08-28: A timed-out transaction previously sent its
@@ -1597,14 +1611,8 @@ impl SessionWorker {
         operation: Option<ActiveOperation>,
         deadline: tokio::time::Instant,
     ) -> Result<CommandReply> {
-        if operation
-            .as_ref()
-            .is_some_and(ActiveOperation::is_cancelled)
-        {
-            return Err(Error::new(
-                ErrorCode::Cancelled,
-                "operation was cancelled before its MI command started",
-            ));
+        if let Some(operation) = &operation {
+            operation.require_active()?;
         }
         let resumes_target = command_resumes_target(&command);
         let operation_id = operation.as_ref().map(|operation| operation.id().clone());
