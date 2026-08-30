@@ -29,6 +29,7 @@ pub(super) use stream::{serve_stdio, serve_unix};
 use resources::{list_resources, read_resource, resource_templates};
 
 pub(super) const MCP_VERSION: &str = "2025-11-25";
+pub(super) const STATELESS_MCP_VERSION: &str = "2026-07-28";
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 128;
 const MAX_HTTP_PENDING_DURATION: Duration = Duration::from_secs(5 * 60);
@@ -127,6 +128,72 @@ fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<
         "serverInfo": {"name": "gdb-ai", "version": env!("CARGO_PKG_VERSION")},
         "instructions": AGENT_INSTRUCTIONS
     }))
+}
+
+// 2026-08-30: MCP 2026 removed connection handshakes and carries protocol
+// capabilities on every request. Keep that transport state out of Gateway.
+fn stateless_request(params: &Value) -> Result<bool, RpcFault> {
+    const VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+    const CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
+    let Some(version) = params
+        .get("_meta")
+        .and_then(|metadata| metadata.get(VERSION_KEY))
+    else {
+        return Ok(false);
+    };
+    let requested = version
+        .as_str()
+        .ok_or_else(|| RpcFault::invalid(format!("_meta.{VERSION_KEY} must be a string")))?;
+    if requested != STATELESS_MCP_VERSION {
+        return Err(RpcFault {
+            code: -32022,
+            message: format!("unsupported MCP protocol version {requested}"),
+            data: Some(json!({
+                "requested": requested,
+                "supported": [STATELESS_MCP_VERSION]
+            })),
+        });
+    }
+    if !params
+        .get("_meta")
+        .and_then(|metadata| metadata.get(CAPABILITIES_KEY))
+        .is_some_and(Value::is_object)
+    {
+        return Err(RpcFault::invalid(format!(
+            "_meta.{CAPABILITIES_KEY} must be an object"
+        )));
+    }
+    Ok(true)
+}
+
+// 2026-08-30: MCP 2026 requires result discrimination and cache metadata.
+// Decorate only the wire result so canonical responses remain version-neutral.
+fn stateless_result(method: &str, mut result: Value) -> Value {
+    let Some(object) = result.as_object_mut() else {
+        return result;
+    };
+    object.insert("resultType".into(), Value::String("complete".into()));
+    let ttl: Option<u64> = match method {
+        "server/discover" | "tools/list" | "resources/templates/list" => Some(86_400_000),
+        "resources/list" | "resources/read" => Some(0),
+        _ => None,
+    };
+    if let Some(ttl) = ttl {
+        object.insert("ttlMs".into(), Value::from(ttl));
+        object.insert("cacheScope".into(), Value::String("private".into()));
+    }
+    if method == "server/discover" {
+        object.insert(
+            "_meta".into(),
+            json!({
+                "io.modelcontextprotocol/serverInfo": {
+                    "name": "gdb-ai",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }),
+        );
+    }
+    result
 }
 
 fn apply_cancel_mode(
@@ -252,6 +319,14 @@ async fn dispatch_rpc(
     }
     match method {
         "ping" => Ok(json!({})),
+        "server/discover" => Ok(json!({
+            "supportedVersions": [STATELESS_MCP_VERSION, MCP_VERSION],
+            "capabilities": {
+                "tools": {"listChanged": false},
+                "resources": {"listChanged": false}
+            },
+            "instructions": AGENT_INSTRUCTIONS
+        })),
         "tools/list" => Ok(json!({"tools": tools(advanced_tools, caller.admin)})),
         "resources/list" => list_resources(gateway, caller, sequence).await,
         "resources/templates/list" => Ok(resource_templates()),

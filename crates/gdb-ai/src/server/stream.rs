@@ -25,7 +25,8 @@ use super::{
     MAX_MESSAGE_BYTES, MAX_PENDING_REQUESTS, Phase, RequestCancellation, RpcOutput,
     admit_canonical_operation, apply_cancel_mode, canonical_rpc_request, dispatch_rpc, initialize,
     progress_notification, progress_token, read_line_bounded, request_cancellation, request_key,
-    rpc_error, rpc_fault, rpc_result, valid_request_id, write_rpc,
+    rpc_error, rpc_fault, rpc_result, stateless_request, stateless_result, valid_request_id,
+    write_rpc,
 };
 use crate::AnyError;
 
@@ -33,6 +34,7 @@ struct StreamPending {
     generation: u64,
     waiter: JoinHandle<()>,
     cancellation: RequestCancellation,
+    stateless: bool,
 }
 
 pub(crate) async fn serve_stdio(
@@ -136,7 +138,18 @@ where
                     write_rpc(&mut output, response).await?;
                     continue;
                 }
-                if method != "ping" && phase != Phase::Ready {
+                let stateless = match stateless_request(&params) {
+                    Ok(stateless) => stateless,
+                    Err(error) => {
+                        write_rpc(&mut output, rpc_fault(id, error)).await?;
+                        continue;
+                    }
+                };
+                if method == "server/discover" && !stateless {
+                    write_rpc(&mut output, rpc_error(id, -32602, "server/discover requires 2026-07-28 request metadata")).await?;
+                    continue;
+                }
+                if !stateless && method != "ping" && phase != Phase::Ready {
                     write_rpc(&mut output, rpc_error(id, -32002, "server is not initialized")).await?;
                     continue;
                 }
@@ -222,6 +235,7 @@ where
                 cancellation.operation_id = operation_id;
                 let responses = responses.clone();
                 let task_key = key.clone();
+                let response_method = method.to_owned();
                 // Requests may wait for a target stop; separate tasks let
                 // cancellation and inferior I/O reach the gateway meanwhile.
                 // 2026-08-28: Cancelling the response task used to cancel the
@@ -231,7 +245,14 @@ where
                     let response = match operation.await {
                         Ok(result) => result.map_or_else(
                             |error| rpc_fault(id.clone(), error),
-                            |result| rpc_result(id.clone(), result),
+                            |result| {
+                                let result = if stateless {
+                                    stateless_result(&response_method, result)
+                                } else {
+                                    result
+                                };
+                                rpc_result(id.clone(), result)
+                            },
                         ),
                         Err(error) => rpc_error(id, -32603, error.to_string()),
                     };
@@ -253,6 +274,7 @@ where
                         generation,
                         waiter: handle,
                         cancellation,
+                        stateless,
                     },
                 );
             }
@@ -359,16 +381,22 @@ fn handle_notification(
             *phase = Phase::Ready;
         }
         "notifications/cancelled" => {
-            if let Some(id) = params.get("requestId")
-                && let Some(request) = pending.remove(&request_key(id))
-            {
-                request.waiter.abort();
-                apply_cancel_mode(
-                    gateway.clone(),
-                    caller.clone(),
-                    sequence.clone(),
-                    request.cancellation,
-                );
+            if let Some(id) = params.get("requestId") {
+                let key = request_key(id);
+                // 2026-08-30: Stateless stdio cancellation only terminates
+                // subscription streams; it must not interrupt tool calls.
+                if pending.get(&key).is_some_and(|request| request.stateless) {
+                    return;
+                }
+                if let Some(request) = pending.remove(&key) {
+                    request.waiter.abort();
+                    apply_cancel_mode(
+                        gateway.clone(),
+                        caller.clone(),
+                        sequence.clone(),
+                        request.cancellation,
+                    );
+                }
             }
         }
         _ => {}
@@ -579,6 +607,7 @@ mod tests {
                     mode: super::super::CancelMode::DetachWaiter,
                     operation_id: None,
                 },
+                stateless: false,
             },
         )]);
 
@@ -655,6 +684,73 @@ mod tests {
         assert_eq!(completed["params"]["progress"], 1);
         let tools = read_json_line(&mut client_input).await.unwrap();
         assert!(tools["result"]["tools"].as_array().is_some());
+        client_output.shutdown().await.unwrap();
+        drop(client_output);
+        serving.await.unwrap().unwrap();
+        gateway.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stream_accepts_stateless_mcp_without_initialization() {
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let gateway = Arc::new(Gateway::new(config).unwrap());
+        let (client, server) = tokio::io::duplex(128 * 1024);
+        let (client_input, mut client_output) = tokio::io::split(client);
+        let (server_input, server_output) = tokio::io::split(server);
+        let serving = tokio::spawn(serve_stream(
+            gateway.clone(),
+            Caller::local("stateless-stream-test"),
+            false,
+            server_input,
+            server_output,
+        ));
+        let mut client_input = BufReader::new(client_input);
+        let metadata = json!({
+            "io.modelcontextprotocol/protocolVersion": super::super::STATELESS_MCP_VERSION,
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        write_rpc(
+            &mut client_output,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": {"_meta": metadata}
+            }),
+        )
+        .await
+        .unwrap();
+        let discovered = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(discovered["result"]["resultType"], "complete");
+        assert_eq!(
+            discovered["result"]["supportedVersions"][0],
+            super::super::STATELESS_MCP_VERSION
+        );
+        write_rpc(
+            &mut client_output,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {"_meta": metadata}
+            }),
+        )
+        .await
+        .unwrap();
+        let listed = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(listed["result"]["resultType"], "complete");
+        assert_eq!(listed["result"]["ttlMs"], 86_400_000_u64);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 9);
         client_output.shutdown().await.unwrap();
         drop(client_output);
         serving.await.unwrap().unwrap();
