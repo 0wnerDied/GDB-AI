@@ -513,6 +513,7 @@ async fn queue_wait_counts_toward_command_deadline() {
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
+    let started = std::time::Instant::now();
     let expired = session
         .command_with_timeout(
             MiCommand::new("-gdb-version").unwrap(),
@@ -521,6 +522,7 @@ async fn queue_wait_counts_toward_command_deadline() {
         .await
         .unwrap_err();
     assert_eq!(expired.code, ErrorCode::Timeout);
+    assert!(started.elapsed() < Duration::from_millis(150));
     assert!(session.state().outcome_unknown_tokens.is_empty());
     slow.await.unwrap().unwrap();
     session

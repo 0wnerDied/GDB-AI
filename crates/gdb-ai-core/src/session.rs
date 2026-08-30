@@ -303,7 +303,7 @@ impl SessionHandle {
         if self.observation_active() {
             return self.send_command(command, deadline).await;
         }
-        let _sequence = self.command_sequence.lock().await;
+        let _sequence = self.command_sequence_until(deadline).await?;
         self.send_command(command, deadline).await
     }
 
@@ -323,15 +323,16 @@ impl SessionHandle {
             ));
         }
         let (sender, receiver) = oneshot::channel();
-        self.requests
-            .send(WorkerRequest::Command {
+        self.enqueue_until(
+            WorkerRequest::Command {
                 command,
                 operation,
                 deadline,
                 response: sender,
-            })
-            .await
-            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+            },
+            deadline,
+        )
+        .await?;
         receiver
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
@@ -349,7 +350,7 @@ impl SessionHandle {
                 .send_transaction(before, command, after, deadline)
                 .await;
         }
-        let _sequence = self.command_sequence.lock().await;
+        let _sequence = self.command_sequence_until(deadline).await?;
         self.send_transaction(before, command, after, deadline)
             .await
     }
@@ -362,16 +363,17 @@ impl SessionHandle {
         deadline: tokio::time::Instant,
     ) -> Result<CommandReply> {
         let (sender, receiver) = oneshot::channel();
-        self.requests
-            .send(WorkerRequest::Transaction {
+        self.enqueue_until(
+            WorkerRequest::Transaction {
                 before,
                 command,
                 after,
                 deadline,
                 response: sender,
-            })
-            .await
-            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+            },
+            deadline,
+        )
+        .await?;
         receiver
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
@@ -382,7 +384,7 @@ impl SessionHandle {
         if self.observation_active() {
             return self.send_safe_evaluate(command, deadline).await;
         }
-        let _sequence = self.command_sequence.lock().await;
+        let _sequence = self.command_sequence_until(deadline).await?;
         self.send_safe_evaluate(command, deadline).await
     }
 
@@ -392,17 +394,41 @@ impl SessionHandle {
         deadline: tokio::time::Instant,
     ) -> Result<CommandReply> {
         let (sender, receiver) = oneshot::channel();
-        self.requests
-            .send(WorkerRequest::SafeEvaluate {
+        self.enqueue_until(
+            WorkerRequest::SafeEvaluate {
                 command,
                 deadline,
                 response: sender,
-            })
-            .await
-            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+            },
+            deadline,
+        )
+        .await?;
         receiver
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+    }
+
+    async fn command_sequence_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        // 2026-08-30: Expired commands were rejected inside the actor, but a
+        // caller could first wait behind a long composite operation past its
+        // own deadline. Bound admission to the shared command sequence.
+        tokio::time::timeout_at(deadline, self.command_sequence.lock())
+            .await
+            .map_err(|_| command_queue_timeout())
+    }
+
+    async fn enqueue_until(
+        &self,
+        request: WorkerRequest,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        tokio::time::timeout_at(deadline, self.requests.send(request))
+            .await
+            .map_err(|_| command_queue_timeout())?
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))
     }
 
     pub async fn stable_observation<'a, T>(
@@ -837,15 +863,19 @@ impl SessionHandle {
     }
 
     pub async fn interrupt(&self, command: MiCommand) -> Result<CommandReply> {
+        let deadline = command_deadline(self.command_timeout);
         let (sender, receiver) = oneshot::channel();
-        self.controls
-            .send(ControlRequest::Interrupt {
+        tokio::time::timeout_at(
+            deadline,
+            self.controls.send(ControlRequest::Interrupt {
                 command,
-                deadline: command_deadline(self.command_timeout),
+                deadline,
                 response: sender,
-            })
-            .await
-            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+            }),
+        )
+        .await
+        .map_err(|_| command_queue_timeout())?
+        .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
         receiver
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
@@ -929,6 +959,14 @@ fn terminal(status: InferiorStatus) -> bool {
 
 fn command_deadline(timeout: Duration) -> tokio::time::Instant {
     tokio::time::Instant::now() + timeout.max(Duration::from_millis(1))
+}
+
+fn command_queue_timeout() -> Error {
+    Error::new(
+        ErrorCode::Timeout,
+        "MI command deadline expired while queued",
+    )
+    .retryable()
 }
 
 #[cfg(test)]
