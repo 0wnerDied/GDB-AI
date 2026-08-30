@@ -448,10 +448,11 @@ fn map_tool(
     raw_admin: bool,
     sequence: u64,
 ) -> Result<ApiRequest, RpcFault> {
-    let mut parameters = arguments
-        .as_object()
-        .cloned()
-        .ok_or_else(|| RpcFault::invalid("tool arguments must be an object"))?;
+    // 2026-08-30: `arguments` is already owned after envelope extraction;
+    // moving its map avoids one more deep copy of large Agent payloads.
+    let Value::Object(mut parameters) = arguments else {
+        return Err(RpcFault::invalid("tool arguments must be an object"));
+    };
     let session_id = take_string(&mut parameters, "session_id")?;
     let expected_revision = take_u64(&mut parameters, "expected_revision")?;
     let idempotency_key = take_string(&mut parameters, "idempotency_key")?;
