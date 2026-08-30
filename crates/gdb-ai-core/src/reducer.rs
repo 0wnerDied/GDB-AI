@@ -113,7 +113,13 @@ impl StateReducer {
                 true
             }
             DomainEvent::InferiorRemoved { backend_id } => {
-                self.state.inferiors.remove(backend_id).is_some()
+                let Some(removed) = self.state.inferiors.remove(backend_id) else {
+                    return false;
+                };
+                if self.state.stopped_inferior_id.as_ref() == Some(&removed.id) {
+                    self.clear_stop_context();
+                }
+                true
             }
             DomainEvent::InferiorExited {
                 backend_id,
@@ -132,6 +138,16 @@ impl StateReducer {
                         .inferiors
                         .get(backend_id)
                         .is_none_or(|inferior| inferior.status != InferiorStatus::Exited);
+                // 2026-08-30: An unrelated inferior exit used to invalidate
+                // the current stopped inferior, while direct removal left a
+                // dangling stop. Scope stop invalidation to its owning group.
+                let invalidates_stop =
+                    self.state
+                        .inferiors
+                        .get(backend_id)
+                        .is_some_and(|inferior| {
+                            self.state.stopped_inferior_id.as_ref() == Some(&inferior.id)
+                        });
                 let seq = self.state.event_seq;
                 let inferior = self.ensure_inferior(backend_id, seq);
                 inferior.status = if disconnected {
@@ -140,14 +156,9 @@ impl StateReducer {
                     InferiorStatus::Exited
                 };
                 inferior.exit_code.clone_from(exit_code);
-                // 2026-08-28: Inferior exit left the last stop and snapshot
-                // looking current even though no stop-scoped object survived.
-                self.state.stop_id = None;
-                self.state.stop_reason = None;
-                self.state.stop_reason_detail = None;
-                self.state.stopped_inferior_id = None;
-                self.state.stopped_thread_id = None;
-                self.state.snapshot = None;
+                if invalidates_stop {
+                    self.clear_stop_context();
+                }
                 true
             }
             DomainEvent::TargetRunning { backend_inferiors } => {
@@ -189,12 +200,7 @@ impl StateReducer {
                 if running_edge {
                     self.state.execution_epoch += 1;
                 }
-                self.state.stop_id = None;
-                self.state.stop_reason = None;
-                self.state.stop_reason_detail = None;
-                self.state.stopped_inferior_id = None;
-                self.state.stopped_thread_id = None;
-                self.state.snapshot = None;
+                self.clear_stop_context();
                 running_edge
                     || status_changed
                     || had_stop
@@ -530,24 +536,14 @@ impl StateReducer {
                 }
                 // 2026-08-28: A disconnected target retained a current stop
                 // and snapshot even though no stop-scoped handle was usable.
-                self.state.stop_id = None;
-                self.state.stop_reason = None;
-                self.state.stop_reason_detail = None;
-                self.state.stopped_inferior_id = None;
-                self.state.stopped_thread_id = None;
-                self.state.snapshot = None;
+                self.clear_stop_context();
                 true
             }
             DomainEvent::TargetDetached => {
                 for inferior in self.state.inferiors.values_mut() {
                     inferior.status = InferiorStatus::Detached;
                 }
-                self.state.stop_id = None;
-                self.state.stop_reason = None;
-                self.state.stop_reason_detail = None;
-                self.state.stopped_inferior_id = None;
-                self.state.stopped_thread_id = None;
-                self.state.snapshot = None;
+                self.clear_stop_context();
                 true
             }
             DomainEvent::CoreOpened { backend_id } => {
@@ -580,6 +576,15 @@ impl StateReducer {
             }
             DomainEvent::Output { .. } | DomainEvent::OutputAdvanced { .. } => false,
         }
+    }
+
+    fn clear_stop_context(&mut self) {
+        self.state.stop_id = None;
+        self.state.stop_reason = None;
+        self.state.stop_reason_detail = None;
+        self.state.stopped_inferior_id = None;
+        self.state.stopped_thread_id = None;
+        self.state.snapshot = None;
     }
 
     fn ensure_inferior(&mut self, backend_id: &str, generation: u64) -> &mut InferiorState {
@@ -751,6 +756,59 @@ mod tests {
 
         assert_eq!(reduce(true), InferiorStatus::Exited);
         assert_eq!(reduce(false), InferiorStatus::Disconnected);
+    }
+
+    #[test]
+    fn inferior_lifecycle_only_invalidates_its_own_stop() {
+        let mut reducer = StateReducer::new(SessionState::creating(SessionId(
+            "sess_multi_inferior".into(),
+        )));
+        apply(&mut reducer, 1, DomainEvent::BackendStarted);
+        for (seq, backend_id) in [(2, "i1"), (3, "i2")] {
+            apply(
+                &mut reducer,
+                seq,
+                DomainEvent::InferiorAdded {
+                    backend_id: backend_id.into(),
+                    pid: Some(40 + seq),
+                },
+            );
+        }
+        apply(
+            &mut reducer,
+            4,
+            DomainEvent::TargetStopped {
+                backend_inferior: Some("i1".into()),
+                backend_thread: Some("1".into()),
+                reason: "breakpoint-hit".into(),
+                reason_detail: None,
+                frame: None,
+            },
+        );
+        let stop = reducer.state().stop_id.clone();
+
+        apply(
+            &mut reducer,
+            5,
+            DomainEvent::InferiorExited {
+                backend_id: "i2".into(),
+                exit_code: Some("0".into()),
+                from_stop_record: false,
+            },
+        );
+        assert_eq!(reducer.state().stop_id, stop);
+        assert!(reducer.state().snapshot.is_some());
+
+        apply(
+            &mut reducer,
+            6,
+            DomainEvent::InferiorRemoved {
+                backend_id: "i1".into(),
+            },
+        );
+        assert!(reducer.state().stop_id.is_none());
+        assert!(reducer.state().snapshot.is_none());
+        assert!(reducer.state().stopped_inferior_id.is_none());
     }
 
     #[test]
