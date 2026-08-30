@@ -38,11 +38,16 @@ impl ByteRing {
             self.start_offset = self.end_offset - self.capacity as u64;
             return offset;
         }
+        // 2026-08-30: Extending a full ring before eviction grew its backing
+        // allocation beyond the configured bound. Make room before appending.
+        let evicted = self
+            .bytes
+            .len()
+            .saturating_add(input.len())
+            .saturating_sub(self.capacity);
+        self.bytes.drain(..evicted);
+        self.start_offset = self.start_offset.saturating_add(evicted as u64);
         self.bytes.extend(input);
-        while self.bytes.len() > self.capacity {
-            self.bytes.pop_front();
-            self.start_offset += 1;
-        }
         offset
     }
 
@@ -88,5 +93,20 @@ mod tests {
         assert_eq!(read.available_from, 2);
         assert_eq!(read.bytes, b"cdef");
         assert_eq!(read.next_offset, 6);
+    }
+
+    #[test]
+    fn appending_to_a_full_ring_reuses_its_allocation() {
+        let mut ring = ByteRing::new(1024);
+        ring.append(&vec![b'a'; 1024]);
+        let capacity = ring.bytes.capacity();
+
+        ring.append(&vec![b'b'; 512]);
+
+        assert_eq!(ring.bytes.capacity(), capacity);
+        assert_eq!(
+            ring.read(512, 1024).bytes,
+            [vec![b'a'; 512], vec![b'b'; 512]].concat()
+        );
     }
 }
