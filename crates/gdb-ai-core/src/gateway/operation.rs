@@ -183,7 +183,18 @@ impl Gateway {
         };
 
         let gateway = self.clone();
-        let failure_request = request.clone();
+        // 2026-08-30: Operation task failure only needs response identity.
+        // Do not clone a caller-controlled parameters tree of up to 1 MiB on
+        // every successful request for this exceptional path.
+        let failure_request = ApiRequest {
+            api_version: request.api_version.clone(),
+            request_id: request.request_id.clone(),
+            session_id: request.session_id.clone(),
+            method: request.method,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: Value::Null,
+        };
         let active_operation =
             crate::session::ActiveOperation::new(operation_id, entry.cancelled.clone());
         tokio::spawn(async move {
