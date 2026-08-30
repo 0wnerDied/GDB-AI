@@ -176,6 +176,52 @@ async fn starts_secure_gdb_and_closes_cleanly() {
 }
 
 #[tokio::test]
+async fn state_persistence_failure_fails_session() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let sqlite = directory.path().join("state.sqlite");
+    let config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: sqlite.clone(),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    let store = Arc::new(Store::open(&sqlite).unwrap());
+    let session = SessionHandle::start(
+        Arc::new(config),
+        Profile::RawAdmin,
+        store,
+        Arc::new(Metrics::default()),
+    )
+    .await
+    .unwrap();
+    rusqlite::Connection::open(sqlite)
+        .unwrap()
+        .execute("DROP TABLE sessions", [])
+        .unwrap();
+
+    assert!(
+        session
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "force_persistence_failure".into(),
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        session.state().lifecycle,
+        crate::domain::SessionLifecycle::Failed
+    );
+    assert_eq!(session.state().backend, crate::domain::BackendHealth::Dead);
+}
+
+#[tokio::test]
 async fn timeout_fences_late_result() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;

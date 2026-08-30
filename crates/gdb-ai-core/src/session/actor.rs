@@ -1755,6 +1755,18 @@ impl SessionWorker {
     }
 
     fn apply_event(&mut self, event: DomainEvent) -> Result<()> {
+        let result = self.apply_event_inner(event);
+        if result.is_err() {
+            // 2026-08-30: Reducer or state persistence failures returned to
+            // one caller while the worker stayed live and watch clients kept
+            // an older healthy state. Authoritative event failure is fatal.
+            self.fatal = true;
+            self.mark_failed();
+        }
+        result
+    }
+
+    fn apply_event_inner(&mut self, event: DomainEvent) -> Result<()> {
         let stopped = matches!(&event, DomainEvent::TargetStopped { .. });
         if matches!(
             &event,
