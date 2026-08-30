@@ -359,6 +359,7 @@ name = "gdb-ai"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "base64",
  "clap",
  "gdb-ai-core",
  "gdb-ai-mi",

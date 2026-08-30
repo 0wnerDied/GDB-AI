@@ -19,6 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_core::{
     config::Config,
     domain::SessionId,
@@ -27,15 +28,16 @@ use gdb_ai_core::{
 use serde_json::{Value, json};
 use tokio::{
     net::TcpListener,
-    sync::{RwLock, oneshot},
+    sync::{OwnedSemaphorePermit, RwLock, Semaphore, oneshot},
     task::JoinHandle,
 };
 
 use super::{
     MAX_HTTP_PENDING_DURATION, MAX_MESSAGE_BYTES, MAX_PENDING_REQUESTS, MCP_VERSION, Phase,
-    RequestCancellation, RpcFault, admit_canonical_operation, apply_cancel_mode,
-    canonical_rpc_request, dispatch_rpc, initialize, request_cancellation, request_key, rpc_error,
-    rpc_fault, rpc_result, valid_request_id,
+    RequestCancellation, RpcFault, STATELESS_MCP_VERSION, admit_canonical_operation,
+    apply_cancel_mode, canonical_rpc_request, dispatch_rpc, initialize, request_cancellation,
+    request_key, rpc_error, rpc_fault, rpc_result, stateless_request, stateless_result,
+    valid_request_id,
 };
 use crate::AnyError;
 
@@ -53,20 +55,27 @@ struct TrackedOperation {
 }
 
 struct HttpCompletion {
+    reservation: Option<HttpReservation>,
+    response_id: Value,
+    deadline: Instant,
+    tracked: Option<TrackedOperation>,
+    stateless_method: Option<String>,
+    _permit: Option<OwnedSemaphorePermit>,
+    response: oneshot::Sender<Value>,
+}
+
+struct HttpReservation {
     sessions: Arc<RwLock<HashMap<String, HttpClient>>>,
     session_id: String,
     key: String,
     generation: u64,
-    response_id: Value,
-    deadline: Instant,
-    tracked: Option<TrackedOperation>,
-    response: oneshot::Sender<Value>,
 }
 
 #[derive(Clone)]
 struct HttpState {
     gateway: Arc<Gateway>,
     sessions: Arc<RwLock<HashMap<String, HttpClient>>>,
+    stateless_pending: Arc<Semaphore>,
     sequence: Arc<AtomicU64>,
     raw_admin: bool,
     advanced_tools: bool,
@@ -126,6 +135,7 @@ pub(crate) async fn serve_http(
     let state = HttpState {
         gateway: gateway.clone(),
         sessions: Arc::new(RwLock::new(HashMap::new())),
+        stateless_pending: Arc::new(Semaphore::new(MAX_PENDING_REQUESTS)),
         sequence: Arc::new(AtomicU64::new(1)),
         raw_admin,
         advanced_tools,
@@ -192,6 +202,9 @@ async fn http_mcp(
         );
     };
     let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
+    if uses_stateless_http(&headers, &params) {
+        return http_mcp_stateless(state, headers, id, method, params).await;
+    }
     if method == "initialize" {
         let Some(id) = id else {
             return StatusCode::ACCEPTED.into_response();
@@ -400,10 +413,12 @@ async fn http_mcp(
     let (response_sender, mut response_receiver) = oneshot::channel();
     tokio::spawn(complete_http_operation(
         HttpCompletion {
-            sessions: state.sessions.clone(),
-            session_id: session_id.to_owned(),
-            key,
-            generation: pending_generation,
+            reservation: Some(HttpReservation {
+                sessions: state.sessions.clone(),
+                session_id: session_id.to_owned(),
+                key,
+                generation: pending_generation,
+            }),
             response_id,
             deadline,
             tracked: operation_id.map(|operation_id| TrackedOperation {
@@ -411,6 +426,8 @@ async fn http_mcp(
                 caller,
                 operation_id,
             }),
+            stateless_method: None,
+            _permit: None,
             response: response_sender,
         },
         operation,
@@ -430,6 +447,124 @@ async fn http_mcp(
         },
     };
     json_http_response(response, Some(session_id))
+}
+
+async fn http_mcp_stateless(
+    state: HttpState,
+    headers: HeaderMap,
+    id: Option<Value>,
+    method: &str,
+    params: Value,
+) -> Response {
+    let validation = stateless_request(&params).and_then(|stateless| {
+        if stateless {
+            validate_stateless_headers(&headers, method, &params)
+        } else {
+            Err(RpcFault::invalid("2026-07-28 request metadata is required"))
+        }
+    });
+    if let Err(error) = validation {
+        let mut response = json_http_response_for(
+            rpc_fault(id.unwrap_or(Value::Null), error),
+            None,
+            STATELESS_MCP_VERSION,
+        );
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return response;
+    }
+    let Some(id) = id else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    if !valid_request_id(&id) {
+        return json_http_response_for(
+            rpc_error(Value::Null, -32600, "id must be a string or integer"),
+            None,
+            STATELESS_MCP_VERSION,
+        );
+    }
+    let permit = match state.stateless_pending.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
+    };
+    // 2026-08-30: Releasing admission when a client drops its socket let it
+    // accumulate detached work. Completion owns the permit until termination.
+    let caller = Caller {
+        identity: "mcp-http".into(),
+        admin: state.raw_admin,
+    };
+    if let Err(error) = request_cancellation(method, &params) {
+        return json_http_response_for(rpc_fault(id, error), None, STATELESS_MCP_VERSION);
+    }
+    let canonical = match canonical_rpc_request(
+        method,
+        params.clone(),
+        state.advanced_tools,
+        caller.admin,
+        &state.sequence,
+    ) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            return json_http_response_for(rpc_fault(id, error), None, STATELESS_MCP_VERSION);
+        }
+    };
+    let deadline = Instant::now() + MAX_HTTP_PENDING_DURATION;
+    let (operation_id, operation) = if let Some((request, presentation)) = canonical {
+        match admit_canonical_operation(
+            state.gateway.clone(),
+            caller.clone(),
+            request,
+            presentation,
+            Some(deadline.saturating_duration_since(Instant::now())),
+        )
+        .await
+        {
+            Ok((operation_id, waiter)) => (Some(operation_id), waiter),
+            Err(error) => {
+                return json_http_response_for(rpc_fault(id, error), None, STATELESS_MCP_VERSION);
+            }
+        }
+    } else {
+        let gateway = state.gateway.clone();
+        let sequence = state.sequence.clone();
+        let advanced_tools = state.advanced_tools;
+        let method = method.to_owned();
+        let dispatch_caller = caller.clone();
+        (
+            None,
+            tokio::spawn(async move {
+                dispatch_rpc(
+                    &gateway,
+                    &dispatch_caller,
+                    advanced_tools,
+                    &sequence,
+                    &method,
+                    params,
+                )
+                .await
+            }),
+        )
+    };
+    let (response_sender, response_receiver) = oneshot::channel();
+    tokio::spawn(complete_http_operation(
+        HttpCompletion {
+            reservation: None,
+            response_id: id.clone(),
+            deadline,
+            tracked: operation_id.map(|operation_id| TrackedOperation {
+                gateway: state.gateway,
+                caller,
+                operation_id,
+            }),
+            stateless_method: Some(method.to_owned()),
+            _permit: Some(permit),
+            response: response_sender,
+        },
+        operation,
+    ));
+    let response = response_receiver
+        .await
+        .unwrap_or_else(|_| rpc_error(id, -32603, "request completion channel closed"));
+    json_http_response_for(response, None, STATELESS_MCP_VERSION)
 }
 
 async fn http_get(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -456,7 +591,14 @@ async fn complete_http_operation(
     let value = match completed {
         Ok(Ok(result)) => result.map_or_else(
             |error| rpc_fault(completion.response_id.clone(), error),
-            |result| rpc_result(completion.response_id.clone(), result),
+            |result| {
+                let result = if let Some(method) = completion.stateless_method.as_deref() {
+                    stateless_result(method, result)
+                } else {
+                    result
+                };
+                rpc_result(completion.response_id.clone(), result)
+            },
         ),
         Ok(Err(error)) => rpc_error(completion.response_id.clone(), -32603, error.to_string()),
         Err(_) => {
@@ -495,13 +637,14 @@ async fn complete_http_operation(
     };
     // 2026-08-29: A dropped HTTP handler used to skip pending cleanup while
     // its detached target operation completed. Completion now owns cleanup.
-    if let Some(client) = completion
-        .sessions
-        .write()
-        .await
-        .get_mut(&completion.session_id)
+    if let Some(reservation) = completion.reservation
+        && let Some(client) = reservation
+            .sessions
+            .write()
+            .await
+            .get_mut(&reservation.session_id)
     {
-        remove_http_pending(client, &completion.key, completion.generation);
+        remove_http_pending(client, &reservation.key, reservation.generation);
         client.last_active = Instant::now();
     }
     let _ = completion.response.send(value);
@@ -704,6 +847,91 @@ fn http_protocol_version_matches(headers: &HeaderMap, expected: &str) -> bool {
     supplied.next().is_none() && version.as_bytes() == expected.as_bytes()
 }
 
+fn uses_stateless_http(headers: &HeaderMap, params: &Value) -> bool {
+    // 2026-08-30: Select the transport era from this request alone; modern
+    // clients do not create a protocol session that can retain negotiation.
+    params
+        .get("_meta")
+        .and_then(|metadata| metadata.get("io.modelcontextprotocol/protocolVersion"))
+        .is_some()
+        || headers
+            .get_all("mcp-protocol-version")
+            .iter()
+            .any(|version| version.as_bytes() != MCP_VERSION.as_bytes())
+}
+
+fn validate_stateless_headers(
+    headers: &HeaderMap,
+    method: &str,
+    params: &Value,
+) -> Result<(), RpcFault> {
+    if !http_protocol_version_matches(headers, STATELESS_MCP_VERSION) {
+        return Err(header_mismatch(
+            "MCP-Protocol-Version must match 2026-07-28 request metadata",
+        ));
+    }
+    let mirrored_method = single_header(headers, "mcp-method")?
+        .ok_or_else(|| header_mismatch("Mcp-Method is required"))?;
+    if mirrored_method != method {
+        return Err(header_mismatch("Mcp-Method does not match the request"));
+    }
+    let name = match method {
+        "tools/call" => params.get("name").and_then(Value::as_str),
+        "resources/read" => params.get("uri").and_then(Value::as_str),
+        _ => None,
+    };
+    if matches!(method, "tools/call" | "resources/read") {
+        let name = name.ok_or_else(|| header_mismatch("request name is missing"))?;
+        let mirrored_name = decoded_header(headers, "mcp-name")?
+            .ok_or_else(|| header_mismatch("Mcp-Name is required"))?;
+        if mirrored_name != name {
+            return Err(header_mismatch("Mcp-Name does not match the request"));
+        }
+    }
+    Ok(())
+}
+
+fn single_header(headers: &HeaderMap, name: &str) -> Result<Option<String>, RpcFault> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(header_mismatch(format!("{name} must not be repeated")));
+    }
+    value
+        .to_str()
+        .map(str::to_owned)
+        .map(Some)
+        .map_err(|_| header_mismatch(format!("{name} is not valid ASCII")))
+}
+
+fn decoded_header(headers: &HeaderMap, name: &str) -> Result<Option<String>, RpcFault> {
+    let Some(value) = single_header(headers, name)? else {
+        return Ok(None);
+    };
+    let Some(encoded) = value
+        .strip_prefix("=?base64?")
+        .and_then(|value| value.strip_suffix("?="))
+    else {
+        return Ok(Some(value));
+    };
+    let decoded = BASE64
+        .decode(encoded)
+        .map_err(|_| header_mismatch(format!("{name} contains invalid base64")))?;
+    String::from_utf8(decoded)
+        .map(Some)
+        .map_err(|_| header_mismatch(format!("{name} contains invalid UTF-8")))
+}
+
+fn header_mismatch(message: impl Into<String>) -> RpcFault {
+    RpcFault {
+        code: -32020,
+        message: message.into(),
+        data: None,
+    }
+}
+
 fn accepts_mcp_responses(headers: &HeaderMap) -> bool {
     let mut json = false;
     let mut event_stream = false;
@@ -725,6 +953,14 @@ fn accepts_mcp_responses(headers: &HeaderMap) -> bool {
 }
 
 fn json_http_response(value: Value, session_id: Option<&str>) -> Response {
+    json_http_response_for(value, session_id, MCP_VERSION)
+}
+
+fn json_http_response_for(
+    value: Value,
+    session_id: Option<&str>,
+    protocol_version: &'static str,
+) -> Response {
     let body = serde_json::to_vec(&value).unwrap_or_else(|_| b"null".to_vec());
     let mut response = Response::new(Body::from(body));
     response.headers_mut().insert(
@@ -733,7 +969,7 @@ fn json_http_response(value: Value, session_id: Option<&str>) -> Response {
     );
     response.headers_mut().insert(
         "mcp-protocol-version",
-        HeaderValue::from_static(MCP_VERSION),
+        HeaderValue::from_static(protocol_version),
     );
     if let Some(session_id) = session_id
         && let Ok(value) = HeaderValue::from_str(session_id)
@@ -841,6 +1077,7 @@ mod tests {
         let state = HttpState {
             gateway: gateway.clone(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            stateless_pending: Arc::new(Semaphore::new(MAX_PENDING_REQUESTS)),
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
             advanced_tools: false,
@@ -1039,6 +1276,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streamable_http_accepts_stateless_mcp_requests() {
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let gateway = Arc::new(Gateway::new(config).unwrap());
+        let state = HttpState {
+            gateway: gateway.clone(),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            stateless_pending: Arc::new(Semaphore::new(MAX_PENDING_REQUESTS)),
+            sequence: Arc::new(AtomicU64::new(1)),
+            raw_admin: false,
+            advanced_tools: false,
+            auth_token: None,
+            trusted_origins: Arc::from([]),
+            max_sessions: 1,
+            idle_timeout: Duration::from_secs(1),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+        headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static(STATELESS_MCP_VERSION),
+        );
+        headers.insert("mcp-method", HeaderValue::from_static("server/discover"));
+        let metadata = json!({
+            "io.modelcontextprotocol/protocolVersion": STATELESS_MCP_VERSION,
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        let discovered = http_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": {"_meta": metadata}
+            })),
+        )
+        .await;
+        assert_eq!(discovered.status(), StatusCode::OK);
+        assert!(discovered.headers().get("mcp-session-id").is_none());
+        assert_eq!(
+            discovered.headers().get("mcp-protocol-version").unwrap(),
+            STATELESS_MCP_VERSION
+        );
+        let body = axum::body::to_bytes(discovered.into_body(), MAX_MESSAGE_BYTES)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(response["result"]["ttlMs"], 86_400_000_u64);
+
+        headers.insert("mcp-method", HeaderValue::from_static("tools/list"));
+        let listed = http_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {"_meta": metadata}
+            })),
+        )
+        .await;
+        assert_eq!(listed.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(listed.into_body(), MAX_MESSAGE_BYTES)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 9);
+
+        headers.insert("mcp-method", HeaderValue::from_static("ping"));
+        let mismatch = http_mcp(
+            State(state),
+            headers,
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/list",
+                "params": {"_meta": metadata}
+            })),
+        )
+        .await;
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(mismatch.into_body(), MAX_MESSAGE_BYTES)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["error"]["code"], -32020);
+        gateway.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn http_completion_cleans_pending_after_disconnect_and_panic() {
         async fn panic_operation() -> Result<Value, RpcFault> {
             panic!("operation panic")
@@ -1071,13 +1412,17 @@ mod tests {
         drop(disconnected);
         let completion = tokio::spawn(complete_http_operation(
             HttpCompletion {
-                sessions: sessions.clone(),
-                session_id: "mcp_test".into(),
-                key: "1".into(),
-                generation: 1,
+                reservation: Some(HttpReservation {
+                    sessions: sessions.clone(),
+                    session_id: "mcp_test".into(),
+                    key: "1".into(),
+                    generation: 1,
+                }),
                 response_id: json!(1),
                 deadline,
                 tracked: None,
+                stateless_method: None,
+                _permit: None,
                 response,
             },
             operation,
@@ -1100,13 +1445,17 @@ mod tests {
         let (response, received) = oneshot::channel();
         complete_http_operation(
             HttpCompletion {
-                sessions: sessions.clone(),
-                session_id: "mcp_test".into(),
-                key: "2".into(),
-                generation: 2,
+                reservation: Some(HttpReservation {
+                    sessions: sessions.clone(),
+                    session_id: "mcp_test".into(),
+                    key: "2".into(),
+                    generation: 2,
+                }),
                 response_id: json!(2),
                 deadline,
                 tracked: None,
+                stateless_method: None,
+                _permit: None,
                 response,
             },
             tokio::spawn(panic_operation()),
@@ -1135,13 +1484,17 @@ mod tests {
         let (response, received) = oneshot::channel();
         complete_http_operation(
             HttpCompletion {
-                sessions: sessions.clone(),
-                session_id: "mcp_test".into(),
-                key: "3".into(),
-                generation: 3,
+                reservation: Some(HttpReservation {
+                    sessions: sessions.clone(),
+                    session_id: "mcp_test".into(),
+                    key: "3".into(),
+                    generation: 3,
+                }),
                 response_id: json!(3),
                 deadline,
                 tracked: None,
+                stateless_method: None,
+                _permit: None,
                 response,
             },
             operation,
@@ -1175,6 +1528,7 @@ mod tests {
         let state = HttpState {
             gateway: gateway.clone(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            stateless_pending: Arc::new(Semaphore::new(MAX_PENDING_REQUESTS)),
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
             advanced_tools: false,
@@ -1254,6 +1608,7 @@ mod tests {
         let state = HttpState {
             gateway: Arc::new(Gateway::new(config).unwrap()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            stateless_pending: Arc::new(Semaphore::new(MAX_PENDING_REQUESTS)),
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
             advanced_tools: false,
@@ -1297,6 +1652,7 @@ mod tests {
         let state = HttpState {
             gateway: Arc::new(Gateway::new(config).unwrap()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            stateless_pending: Arc::new(Semaphore::new(MAX_PENDING_REQUESTS)),
             sequence: Arc::new(AtomicU64::new(1)),
             raw_admin: false,
             advanced_tools: false,
