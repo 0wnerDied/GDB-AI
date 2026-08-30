@@ -75,6 +75,7 @@ pub(super) enum WorkerRequest {
     },
     RefreshTargetCapabilities {
         operation: Option<ActiveOperation>,
+        deadline: tokio::time::Instant,
         response: oneshot::Sender<Result<SessionCapabilities>>,
     },
     RegisterValue {
@@ -541,12 +542,13 @@ impl SessionWorker {
     async fn refresh_target_capabilities(
         &mut self,
         operation: Option<ActiveOperation>,
+        deadline: tokio::time::Instant,
     ) -> Result<SessionCapabilities> {
         let reply = self
             .execute_operation_until(
                 MiCommand::new("-list-target-features")?,
                 operation,
-                command_deadline(self.command_timeout),
+                deadline,
             )
             .await?;
         let features = extract_string_list(&reply.record, "features");
@@ -777,14 +779,12 @@ impl SessionWorker {
             }
             WorkerRequest::RefreshTargetCapabilities {
                 operation,
+                deadline,
                 response,
             } => {
                 let result = match self.require_known_outcome_name("-list-target-features") {
-                    Ok(()) => match self
-                        .restore_deferred_commands(command_deadline(self.command_timeout))
-                        .await
-                    {
-                        Ok(()) => self.refresh_target_capabilities(operation).await,
+                    Ok(()) => match self.restore_deferred_commands(deadline).await {
+                        Ok(()) => self.refresh_target_capabilities(operation, deadline).await,
                         Err(error) => Err(error),
                     },
                     Err(error) => Err(error),

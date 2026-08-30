@@ -468,6 +468,27 @@ async fn cancelled_operation_skips_queued_observation_commands() {
 }
 
 #[tokio::test]
+async fn expired_capability_refresh_never_reaches_gdb() {
+    let Some(session) = control_test_session().await else {
+        return;
+    };
+    let (response, result) = oneshot::channel();
+    session
+        .requests
+        .send(WorkerRequest::RefreshTargetCapabilities {
+            operation: None,
+            deadline: tokio::time::Instant::now() - Duration::from_millis(1),
+            response,
+        })
+        .await
+        .unwrap();
+
+    let error = result.await.unwrap().unwrap_err();
+    assert_eq!(error.code, ErrorCode::Timeout);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_value_cleanup_does_not_consume_the_business_deadline() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;

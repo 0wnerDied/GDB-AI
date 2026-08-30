@@ -553,15 +553,18 @@ impl SessionHandle {
     }
 
     pub async fn refresh_target_capabilities(&self) -> Result<SessionCapabilities> {
-        if self.observation_active() {
-            return self.send_refresh_target_capabilities().await;
-        }
         let deadline = command_deadline(self.command_timeout);
+        if self.observation_active() {
+            return self.send_refresh_target_capabilities(deadline).await;
+        }
         let _sequence = self.command_sequence_until(deadline).await?;
-        self.send_refresh_target_capabilities().await
+        self.send_refresh_target_capabilities(deadline).await
     }
 
-    async fn send_refresh_target_capabilities(&self) -> Result<SessionCapabilities> {
+    async fn send_refresh_target_capabilities(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<SessionCapabilities> {
         // 2026-08-30: Preserve cancellation at both admission and actor
         // execution so a cancelled probe cannot continue refreshing GDB.
         let operation = active_operation();
@@ -569,13 +572,18 @@ impl SessionHandle {
             operation.require_active()?;
         }
         let (sender, receiver) = oneshot::channel();
-        self.requests
-            .send(WorkerRequest::RefreshTargetCapabilities {
+        // 2026-08-30: Refresh requests previously waited without a deadline
+        // and restarted their timeout in the actor. Expired work could still
+        // reach GDB after queue congestion.
+        self.enqueue_until(
+            WorkerRequest::RefreshTargetCapabilities {
                 operation,
+                deadline,
                 response: sender,
-            })
-            .await
-            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+            },
+            deadline,
+        )
+        .await?;
         receiver
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
