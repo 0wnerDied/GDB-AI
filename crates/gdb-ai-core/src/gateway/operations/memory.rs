@@ -66,6 +66,23 @@ fn require_complete_read(actual: usize, requested: usize, allow_partial: bool) -
     }
 }
 
+fn validate_memory_range(start: u64, length: usize) -> Result<()> {
+    let last_offset = u64::try_from(length.saturating_sub(1)).map_err(|_| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            "memory range length exceeds the address space",
+        )
+    })?;
+    // 2026-08-30: A one-chunk request near u64::MAX reached GDB before the
+    // per-chunk cursor advanced, so the existing overflow check never ran.
+    start.checked_add(last_offset).map(|_| ()).ok_or_else(|| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            "memory range overflows address space",
+        )
+    })
+}
+
 // 2026-08-28: A single 16 MiB read expands beyond the MI record limit as
 // hexadecimal text. Keep backend records bounded while preserving one API read.
 pub(super) async fn read_memory_bytes(
@@ -98,6 +115,7 @@ async fn read_memory_bytes_in_observation(
 ) -> Result<(Vec<u8>, u64)> {
     const CHUNK_BYTES: usize = 64 * 1024;
 
+    validate_memory_range(start, length)?;
     let mut bytes = Vec::with_capacity(length);
     let mut evidence_seq = handle.state().event_seq;
     while bytes.len() < length {
@@ -533,7 +551,9 @@ mod tests {
     use crate::ErrorCode;
     use gdb_ai_mi::{MiLimits, parse_record};
 
-    use super::{find_memory_matches, memory_contents, require_complete_read};
+    use super::{
+        find_memory_matches, memory_contents, require_complete_read, validate_memory_range,
+    };
 
     #[test]
     fn memory_matcher_preserves_overlaps_and_truncation() {
@@ -579,6 +599,15 @@ mod tests {
         assert_eq!(
             require_complete_read(2, 4, false).unwrap_err().code,
             ErrorCode::PartialRead
+        );
+    }
+
+    #[test]
+    fn memory_ranges_cannot_wrap_the_address_space() {
+        assert!(validate_memory_range(u64::MAX, 1).is_ok());
+        assert_eq!(
+            validate_memory_range(u64::MAX, 2).unwrap_err().code,
+            ErrorCode::InvalidArgument
         );
     }
 }

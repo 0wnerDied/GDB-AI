@@ -607,6 +607,14 @@ fn classifies_linux_memory_ranges_without_client_input() {
         classify_linux_maps(maps, 0x5000_0000, 0x5000_0004),
         MemoryRangeEffect::Unknown
     );
+    assert_eq!(
+        classify_linux_maps(maps, 0x0040_ffff, 0x0040_ffff),
+        MemoryRangeEffect::Ordinary
+    );
+    assert_eq!(
+        classify_linux_maps(maps, 0x0041_0000, 0x0041_0000),
+        MemoryRangeEffect::Unknown
+    );
 
     let mut state = SessionState::creating(crate::domain::SessionId("sess_effect".into()));
     let request = ApiRequest {
@@ -627,6 +635,17 @@ fn classifies_linux_memory_ranges_without_client_input() {
     assert_eq!(
         classify_memory_range(&state, &request).unwrap(),
         MemoryRangeEffect::Ordinary
+    );
+    let mut final_byte = request;
+    final_byte.parameters = json!({"address": "0xffffffffffffffff", "length": 1});
+    assert_eq!(
+        classify_memory_range(&state, &final_byte).unwrap(),
+        MemoryRangeEffect::Ordinary
+    );
+    final_byte.parameters["length"] = json!(2);
+    assert_eq!(
+        classify_memory_range(&state, &final_byte).unwrap_err().code,
+        ErrorCode::InvalidArgument
     );
 }
 

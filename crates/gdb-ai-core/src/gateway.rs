@@ -952,8 +952,10 @@ fn classify_memory_range(state: &SessionState, request: &ApiRequest) -> Result<M
     let length = request.parameters["length"]
         .as_u64()
         .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "memory length is required"))?;
-    let end = start
-        .checked_add(length)
+    // 2026-08-30: Range policy used an unrepresentable exclusive end at the
+    // final address and rejected a valid one-byte read before MI validation.
+    let last = start
+        .checked_add(length.saturating_sub(1))
         .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "memory range overflows"))?;
 
     match state.target_origin {
@@ -966,12 +968,12 @@ fn classify_memory_range(state: &SessionState, request: &ApiRequest) -> Result<M
             let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {
                 return Ok(MemoryRangeEffect::Unknown);
             };
-            Ok(classify_linux_maps(&maps, start, end))
+            Ok(classify_linux_maps(&maps, start, last))
         }
     }
 }
 
-fn classify_linux_maps(maps: &str, start: u64, end: u64) -> MemoryRangeEffect {
+fn classify_linux_maps(maps: &str, start: u64, last: u64) -> MemoryRangeEffect {
     for line in maps.lines() {
         let mut fields = line.split_whitespace();
         let Some((map_start, map_end)) = fields.next().and_then(|range| range.split_once('-'))
@@ -984,7 +986,7 @@ fn classify_linux_maps(maps: &str, start: u64, end: u64) -> MemoryRangeEffect {
         ) else {
             continue;
         };
-        if start < map_start || end > map_end {
+        if start < map_start || last >= map_end {
             continue;
         }
         let path = fields.nth(4).unwrap_or_default();
