@@ -38,7 +38,7 @@ type RpcOutput = (Option<(String, u64)>, Value);
 
 #[derive(Clone, Copy)]
 enum CanonicalPresentation {
-    Tool,
+    Tool(CanonicalMethod),
     Envelope,
 }
 
@@ -355,16 +355,15 @@ fn canonical_rpc_request(
                 .as_object_mut()
                 .and_then(|params| params.remove("arguments"))
                 .unwrap_or_else(|| json!({}));
-            Ok(Some((
-                map_tool(
-                    &name,
-                    arguments,
-                    advanced_tools,
-                    raw_admin,
-                    sequence.fetch_add(1, Ordering::Relaxed),
-                )?,
-                CanonicalPresentation::Tool,
-            )))
+            let request = map_tool(
+                &name,
+                arguments,
+                advanced_tools,
+                raw_admin,
+                sequence.fetch_add(1, Ordering::Relaxed),
+            )?;
+            let method = request.method;
+            Ok(Some((request, CanonicalPresentation::Tool(method))))
         }
         "gdb.ai/call" => {
             // 2026-08-30: MCP 2026 metadata belongs to the transport request,
@@ -387,7 +386,7 @@ fn present_canonical_response(
     presentation: CanonicalPresentation,
 ) -> Result<Value, RpcFault> {
     match presentation {
-        CanonicalPresentation::Tool => Ok(tool_result(response)),
+        CanonicalPresentation::Tool(method) => Ok(tool_result(response, method)),
         CanonicalPresentation::Envelope => {
             serde_json::to_value(response).map_err(|error| RpcFault::invalid(error.to_string()))
         }
@@ -502,7 +501,7 @@ fn map_tool(
     })
 }
 
-fn tool_result(response: ApiResponse) -> Value {
+fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
     let is_error = response.error.is_some();
     let summary = match &response.error {
         Some(error) => format!("{}: {}", error.code.code_name(), error.message),
@@ -511,7 +510,7 @@ fn tool_result(response: ApiResponse) -> Value {
             None => "request completed".into(),
         },
     };
-    let structured = compact_tool_response(response);
+    let structured = compact_tool_response(response, method);
     json!({
         "content": [{"type": "text", "text": summary}],
         "structuredContent": structured,
@@ -522,11 +521,11 @@ fn tool_result(response: ApiResponse) -> Value {
 // 2026-08-30: Repeating complete thread, breakpoint, module, and signal
 // registries after every tool call consumed Agent context and serialized data
 // unrelated to the operation. Detailed views remain available on demand.
-fn compact_tool_response(response: ApiResponse) -> Value {
+fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Value {
     let ApiResponse {
         session_id,
         revision,
-        state,
+        mut state,
         mut result,
         warnings,
         truncated,
@@ -536,6 +535,35 @@ fn compact_tool_response(response: ApiResponse) -> Value {
         error,
         ..
     } = response;
+    if let Some(Value::Object(result)) = result.as_mut() {
+        if result.get("state").is_some_and(|state| {
+            state.get("session_id").is_some() && state.get("revision").is_some()
+        }) {
+            result.remove("state");
+        }
+        // 2026-08-30: Semantic MCP results repeated complete MI replies and
+        // capability tables already available through evidence and explicit
+        // discovery calls. Keep them only where they are the requested data.
+        if !matches!(
+            method,
+            CanonicalMethod::RawMi | CanonicalMethod::RawConsole | CanonicalMethod::KernelMonitor
+        ) {
+            result.remove("command");
+            result.remove("commands");
+        }
+        if !matches!(
+            method,
+            CanonicalMethod::InspectionGet | CanonicalMethod::KernelInspect
+        ) {
+            result.remove("capabilities");
+        }
+        if result
+            .get("stop_id")
+            .is_some_and(|stop_id| !stop_id.is_null())
+        {
+            state = None;
+        }
+    }
     let mut compact = Map::new();
     if let Some(session_id) = session_id {
         compact.insert("session_id".into(), Value::String(session_id));
@@ -578,13 +606,6 @@ fn compact_tool_response(response: ApiResponse) -> Value {
             summary.insert("snapshot".into(), json!(snapshot));
         }
         compact.insert("state".into(), Value::Object(std::mem::take(summary)));
-    }
-    if let Some(Value::Object(result)) = result.as_mut()
-        && result.get("state").is_some_and(|state| {
-            state.get("session_id").is_some() && state.get("revision").is_some()
-        })
-    {
-        result.remove("state");
     }
     if let Some(result) = result {
         compact.insert("result".into(), result);

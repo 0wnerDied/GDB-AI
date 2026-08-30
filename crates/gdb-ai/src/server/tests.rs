@@ -112,7 +112,7 @@ fn tool_results_keep_only_agent_coordination_state() {
         json!({"status": "ready", "state": nested_state}),
     );
     let canonical_bytes = serde_json::to_vec(&response).unwrap().len();
-    let result = tool_result(response);
+    let result = tool_result(response, CanonicalMethod::SessionGet);
     let compact_bytes = serde_json::to_vec(&result["structuredContent"])
         .unwrap()
         .len();
@@ -125,4 +125,56 @@ fn tool_results_keep_only_agent_coordination_state() {
     assert!(structured.get("api_version").is_none());
     assert!(structured.get("request_id").is_none());
     assert!(compact_bytes * 4 < canonical_bytes);
+}
+
+#[test]
+fn tool_results_omit_on_demand_evidence_and_repeated_stop_state() {
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "test".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::InspectionGet,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let response = ApiResponse::success(
+        &request,
+        Some(SessionState::creating(
+            SessionId::parse("sess_test").unwrap(),
+        )),
+        json!({
+            "stop_id": "stop_test",
+            "command": {"record": "raw MI"},
+            "capabilities": {"unused": true},
+            "frames": []
+        }),
+    );
+    let result = tool_result(response, CanonicalMethod::TargetLaunch);
+    let structured = &result["structuredContent"];
+    assert!(structured.get("state").is_none());
+    assert!(structured["result"].get("command").is_none());
+    assert!(structured["result"].get("capabilities").is_none());
+
+    let running = ApiResponse::success(
+        &request,
+        Some(SessionState::creating(
+            SessionId::parse("sess_test").unwrap(),
+        )),
+        json!({"stop_id": null}),
+    );
+    let running = tool_result(running, CanonicalMethod::InspectionGet);
+    assert!(running["structuredContent"].get("state").is_some());
+
+    let capabilities = ApiResponse::success(
+        &request,
+        None,
+        json!({"capabilities": {"memory.read": {"status": "supported"}}}),
+    );
+    let capabilities = tool_result(capabilities, CanonicalMethod::InspectionGet);
+    assert!(capabilities["structuredContent"]["result"]["capabilities"].is_object());
+
+    let raw = ApiResponse::success(&request, None, json!({"command": {"record": "raw MI"}}));
+    let raw = tool_result(raw, CanonicalMethod::RawMi);
+    assert!(raw["structuredContent"]["result"].get("command").is_some());
 }
