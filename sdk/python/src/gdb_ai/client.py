@@ -40,7 +40,7 @@ class Client:
             "initialize",
             {
                 "protocolVersion": MCP_VERSION,
-                "clientInfo": {"name": "gdb-ai-python", "version": "1.1.0"},
+                "clientInfo": {"name": "gdb-ai-python", "version": "1.1.1"},
             },
             include_session=False,
         )

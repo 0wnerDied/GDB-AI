@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gdb-ai-sdk"
-version = "1.1.0"
+version = "1.1.1"
 description = "Canonical gdb.ai/v1 client for GDB/AI"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-or-later"}
