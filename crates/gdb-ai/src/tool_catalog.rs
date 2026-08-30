@@ -397,6 +397,7 @@ fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
 // Project transport metadata around the same per-method parameter schema.
 fn projected_method_schema(method: CanonicalMethod) -> Value {
     let mut schema = method.parameter_schema();
+    let effect = effect_for_method(method);
     let mut required = schema["required"]
         .as_array()
         .unwrap()
@@ -405,15 +406,16 @@ fn projected_method_schema(method: CanonicalMethod) -> Value {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let properties = schema["properties"].as_object_mut().unwrap();
-    // 2026-08-30: Read operations ignored lease, revision, and idempotency
-    // controls but repeated them in every MCP schema branch. Keep those
-    // coordination fields only where Gateway can act on them.
-    if effect_for_method(method) == Effect::Read {
+    // 2026-08-30: Read operations repeated mutation and target-cancellation
+    // controls in every MCP schema branch. The transport safely detaches a
+    // cancelled read waiter by default, so advertise controls only where the
+    // Gateway or target can act on them.
+    if effect == Effect::Read {
         properties.remove("accept_latest_revision");
         properties.remove("lease_id");
     }
     properties.insert("session_id".into(), json!({"type": "string"}));
-    if effect_for_method(method) != Effect::Read {
+    if effect != Effect::Read {
         properties.insert(
             "expected_revision".into(),
             json!({"type": "integer", "minimum": 0}),
@@ -422,14 +424,14 @@ fn projected_method_schema(method: CanonicalMethod) -> Value {
             "idempotency_key".into(),
             json!({"type": "string", "maxLength": 256}),
         );
+        properties.insert(
+            "cancel_mode".into(),
+            json!({
+                "type": "string",
+                "enum": ["detach_waiter", "interrupt_target", "close_session"]
+            }),
+        );
     }
-    properties.insert(
-        "cancel_mode".into(),
-        json!({
-            "type": "string",
-            "enum": ["detach_waiter", "interrupt_target", "close_session"]
-        }),
-    );
     if method.requires_session() {
         required.insert("session_id".into());
     }
@@ -549,6 +551,7 @@ mod tests {
             "lease_id",
             "expected_revision",
             "idempotency_key",
+            "cancel_mode",
         ] {
             assert!(!properties.contains_key(field));
         }
