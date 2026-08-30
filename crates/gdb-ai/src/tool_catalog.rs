@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use gdb_ai_core::protocol::CanonicalMethod;
+use gdb_ai_core::{
+    policy::{Effect, effect_for_method},
+    protocol::CanonicalMethod,
+};
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy)]
@@ -402,15 +405,24 @@ fn projected_method_schema(method: CanonicalMethod) -> Value {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let properties = schema["properties"].as_object_mut().unwrap();
+    // 2026-08-30: Read operations ignored lease, revision, and idempotency
+    // controls but repeated them in every MCP schema branch. Keep those
+    // coordination fields only where Gateway can act on them.
+    if effect_for_method(method) == Effect::Read {
+        properties.remove("accept_latest_revision");
+        properties.remove("lease_id");
+    }
     properties.insert("session_id".into(), json!({"type": "string"}));
-    properties.insert(
-        "expected_revision".into(),
-        json!({"type": "integer", "minimum": 0}),
-    );
-    properties.insert(
-        "idempotency_key".into(),
-        json!({"type": "string", "maxLength": 256}),
-    );
+    if effect_for_method(method) != Effect::Read {
+        properties.insert(
+            "expected_revision".into(),
+            json!({"type": "integer", "minimum": 0}),
+        );
+        properties.insert(
+            "idempotency_key".into(),
+            json!({"type": "string", "maxLength": 256}),
+        );
+    }
     properties.insert(
         "cancel_mode".into(),
         json!({
@@ -522,5 +534,23 @@ mod tests {
             8
         );
         assert!(serde_json::to_vec(&tools).unwrap().len() < 22_000);
+    }
+
+    #[test]
+    fn omits_inert_coordination_fields_from_read_tools() {
+        let tools = tools(false, false);
+        let evaluate = tools
+            .iter()
+            .find(|tool| tool["name"] == "gdb_evaluate")
+            .unwrap();
+        let properties = evaluate["inputSchema"]["properties"].as_object().unwrap();
+        for field in [
+            "accept_latest_revision",
+            "lease_id",
+            "expected_revision",
+            "idempotency_key",
+        ] {
+            assert!(!properties.contains_key(field));
+        }
     }
 }
