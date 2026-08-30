@@ -211,6 +211,9 @@ impl OutputSpool {
 
     fn capture(&self, bytes: &[u8]) {
         if !self.state.active.load(Ordering::Acquire) {
+            // 2026-08-30: PTY bytes can arrive after close timed out and the
+            // spool was finalized. Any such drop invalidates its completeness.
+            self.state.complete.store(false, Ordering::Release);
             self.state
                 .dropped
                 .fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -1313,5 +1316,27 @@ mod tests {
             status.sha256.as_deref(),
             Some("88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589")
         );
+    }
+
+    #[test]
+    fn late_output_invalidates_finalized_spool_completeness() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = PtyOutput::with_evidence(
+            16,
+            &OutputConfig {
+                evidence: OutputEvidenceMode::BoundedSpool,
+                max_bytes: 16,
+            },
+            directory.path(),
+            "late-output",
+        )
+        .unwrap();
+        output.append(b"kept");
+        assert!(output.finish_evidence().complete);
+
+        output.append(b"late");
+        let status = output.evidence_status();
+        assert!(!status.complete);
+        assert_eq!(status.dropped_bytes, 4);
     }
 }
