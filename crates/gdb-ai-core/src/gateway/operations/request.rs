@@ -16,16 +16,11 @@ pub(super) fn required_session(request: &ApiRequest) -> Result<&str> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "method requires session_id"))
 }
 
-pub(super) fn parameters<T: for<'de> Deserialize<'de>>(request: &ApiRequest) -> Result<T> {
-    let mut parameters = request.parameters.clone();
-    // 2026-08-28: Strict operation structs rejected the lease and revision
-    // controls that the shared Gateway contract adds to every parameter map.
-    // Consume those transport controls before decoding operation-owned fields.
-    if let Some(parameters) = parameters.as_object_mut() {
-        parameters.remove("lease_id");
-        parameters.remove("accept_latest_revision");
-    }
-    serde_json::from_value(parameters)
+pub(super) fn parameters<'a, T: Deserialize<'a>>(request: &'a ApiRequest) -> Result<T> {
+    // 2026-08-30: Gateway already rejects unknown and malformed parameters.
+    // Deserialize from its owned JSON tree so large argv and environment maps
+    // are not deep-cloned merely to discard coordination fields.
+    T::deserialize(&request.parameters)
         .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))
 }
 
@@ -82,10 +77,9 @@ mod tests {
     use crate::gateway::operations::lifecycle::StartPolicy;
 
     #[test]
-    fn strict_parameters_ignore_gateway_controls() {
+    fn typed_parameters_ignore_gateway_controls() {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct StrictParameters {
+        struct Parameters {
             stop: StartPolicy,
         }
 
@@ -102,7 +96,7 @@ mod tests {
                 "accept_latest_revision": true
             }),
         };
-        let decoded: StrictParameters = parameters(&request).unwrap();
+        let decoded: Parameters = parameters(&request).unwrap();
         assert_eq!(decoded.stop.as_str(), "main");
     }
 }

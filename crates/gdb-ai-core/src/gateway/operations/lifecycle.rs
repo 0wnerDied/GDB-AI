@@ -781,7 +781,7 @@ impl Gateway {
 
     pub(super) async fn target_restart(&self, request: &ApiRequest) -> Result<Value> {
         #[derive(Default, Deserialize)]
-        #[serde(default, deny_unknown_fields)]
+        #[serde(default)]
         struct Parameters {
             stop: Option<StartPolicy>,
             stop_at_entry: Option<bool>,
