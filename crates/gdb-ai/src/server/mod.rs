@@ -505,10 +505,10 @@ fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
     let is_error = response.error.is_some();
     let summary = match &response.error {
         Some(error) => format!("{}: {}", error.code.code_name(), error.message),
-        None => match response.revision {
-            Some(revision) => format!("request completed at revision {revision}"),
-            None => "request completed".into(),
-        },
+        // 2026-08-30: The structured result already carries the revision.
+        // Repeating it in successful text content costs tokens on every Agent
+        // call without adding information.
+        None => "ok".into(),
     };
     let structured = compact_tool_response(response, method);
     json!({

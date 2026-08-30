@@ -117,6 +117,7 @@ fn tool_results_keep_only_agent_coordination_state() {
         .unwrap()
         .len();
     let structured = &result["structuredContent"];
+    assert_eq!(result["content"][0]["text"], "ok");
     assert_eq!(structured["state"]["lifecycle"], "CREATING");
     assert_eq!(structured["result"]["status"], "ready");
     assert!(structured["result"].get("state").is_none());
