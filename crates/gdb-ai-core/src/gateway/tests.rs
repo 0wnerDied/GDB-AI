@@ -195,6 +195,71 @@ async fn lost_session_recovery_does_not_require_a_business_lease() {
 }
 
 #[tokio::test]
+async fn lease_cleanup_failure_does_not_retain_a_closed_session() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let sqlite = directory.path().join("state.sqlite");
+    let gateway = Gateway::new(Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: sqlite.clone(),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    })
+    .unwrap();
+    let caller = Caller::local("cleanup-test");
+    let created = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "create-cleanup".into(),
+                session_id: None,
+                method: crate::protocol::CanonicalMethod::SessionCreate,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    let session_id = created.session_id.unwrap();
+    rusqlite::Connection::open(sqlite)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_lease_cleanup BEFORE DELETE ON leases
+             BEGIN SELECT RAISE(ABORT, 'injected lease cleanup failure'); END;",
+        )
+        .unwrap();
+
+    let closed = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "force-cleanup".into(),
+                session_id: Some(session_id),
+                method: crate::protocol::CanonicalMethod::SessionForceAbort,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+
+    assert!(closed.error.is_none(), "{:?}", closed.error);
+    assert_eq!(
+        closed.result.unwrap()["warnings"][0]["code"],
+        "LEASE_CLEANUP_FAILED"
+    );
+    assert!(gateway.sessions.read().await.is_empty());
+}
+
+#[tokio::test]
 async fn concurrent_idempotent_create_runs_once() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
