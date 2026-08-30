@@ -292,7 +292,11 @@ impl OutputSpool {
             captured_bytes: self.state.captured.load(Ordering::Acquire),
             spooled_bytes: self.state.written.load(Ordering::Acquire),
             dropped_bytes: self.state.dropped.load(Ordering::Acquire),
-            complete: self.state.complete.load(Ordering::Acquire),
+            // 2026-08-30: The writer could publish complete=true after a
+            // concurrent late capture had already recorded dropped bytes.
+            // Dropped evidence is authoritative regardless of store order.
+            complete: self.state.complete.load(Ordering::Acquire)
+                && self.state.dropped.load(Ordering::Acquire) == 0,
             durability: if self
                 .state
                 .artifact_uri
@@ -1335,6 +1339,14 @@ mod tests {
         assert!(output.finish_evidence().complete);
 
         output.append(b"late");
+        // Model the spool writer winning the final complete-store race.
+        output
+            .spool
+            .as_ref()
+            .unwrap()
+            .state
+            .complete
+            .store(true, Ordering::Release);
         let status = output.evidence_status();
         assert!(!status.complete);
         assert_eq!(status.dropped_bytes, 4);
