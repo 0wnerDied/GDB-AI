@@ -1341,23 +1341,31 @@ impl SessionWorker {
             "may-write-memory",
             "may-write-registers",
         ];
+        let (settings, inspect_originals) = safe_evaluation_settings(self.profile, &SETTINGS);
         let mut originals = Vec::new();
-        for setting in SETTINGS {
-            if let Some(operation) = operation {
-                operation.require_active()?;
+        if inspect_originals {
+            for &setting in settings {
+                if let Some(operation) = operation {
+                    operation.require_active()?;
+                }
+                let reply = self
+                    .execute_until(MiCommand::new("-gdb-show")?.bare(setting)?, deadline)
+                    .await?;
+                let value = MiResult::find_str(reply.record.results(), "value")
+                    .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB setting has no value"))?;
+                originals.push((setting, value.to_owned()));
             }
-            let reply = self
-                .execute_until(MiCommand::new("-gdb-show")?.bare(setting)?, deadline)
-                .await?;
-            let value = MiResult::find_str(reply.record.results(), "value")
-                .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB setting has no value"))?;
-            originals.push((setting, value.to_owned()));
+        } else {
+            // 2026-08-30: Handshake fixes these values and non-raw profiles
+            // cannot alter them. Avoid three redundant queries per evaluation;
+            // only settings enabled for target control need temporary guards.
+            originals.extend(settings.iter().map(|&setting| (setting, "on".into())));
         }
         // 2026-08-28: Hard-coded restoration to "on" could weaken observer
         // policy after evaluation. Restore the exact values read in this worker.
         let mut setup_error = None;
         let mut guarded = Vec::new();
-        for setting in SETTINGS {
+        for &setting in settings {
             // 2026-08-30: Safe evaluation and capability refresh used to drop
             // operation identity, so cancelled probes could keep issuing MI
             // reads. Stop at command boundaries but still restore any setting
@@ -2193,6 +2201,17 @@ fn command_reply(
     })
 }
 
+fn safe_evaluation_settings<'a>(
+    profile: Profile,
+    settings: &'a [&'a str; 3],
+) -> (&'a [&'a str], bool) {
+    match profile {
+        Profile::RawAdmin => (&settings[..], true),
+        Profile::DebugControl | Profile::LabMutation => (&settings[1..], false),
+        Profile::OfflineCore | Profile::LiveObserver => (&settings[..0], false),
+    }
+}
+
 // 2026-08-28: Delayed results were detected only while the worker was idle;
 // another command could consume them without scheduling reconciliation.
 fn take_delayed_token(timed_out: &mut HashSet<u64>, record: &MiRecord) -> Option<u64> {
@@ -2294,6 +2313,27 @@ mod tests {
             true
         ));
         assert_eq!(command_timeout(42).details.unwrap()["token"], 42);
+    }
+
+    #[test]
+    fn safe_evaluation_reuses_non_raw_handshake_settings() {
+        let settings = [
+            "may-call-functions",
+            "may-write-memory",
+            "may-write-registers",
+        ];
+        assert_eq!(
+            safe_evaluation_settings(Profile::DebugControl, &settings),
+            (&settings[1..], false)
+        );
+        assert_eq!(
+            safe_evaluation_settings(Profile::LiveObserver, &settings),
+            (&settings[..0], false)
+        );
+        assert_eq!(
+            safe_evaluation_settings(Profile::RawAdmin, &settings),
+            (&settings[..], true)
+        );
     }
 
     #[test]
