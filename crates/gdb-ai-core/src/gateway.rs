@@ -507,9 +507,19 @@ impl Gateway {
             }
         }
 
-        let request_value = serde_json::to_value(request)?;
+        // 2026-08-30: Ordinary reads only need one journal representation.
+        // Move it into the worker instead of cloning the complete request;
+        // mutations retain one copy for durable audit.
+        let mut request_value = (entry.is_some() || durable_audit)
+            .then(|| serde_json::to_value(request))
+            .transpose()?;
         if let Some(entry) = &entry {
-            entry.handle.record_api(request_value.clone()).await?;
+            let journal_request = if durable_audit {
+                request_value.as_ref().unwrap().clone()
+            } else {
+                request_value.take().unwrap()
+            };
+            entry.handle.record_api(journal_request).await?;
         }
         if durable_audit {
             self.store.audit(
@@ -519,7 +529,7 @@ impl Gateway {
                 effect,
                 true,
                 entry.as_ref().map(|entry| entry.handle.state().revision),
-                &request_value,
+                request_value.as_ref().unwrap(),
                 "accepted",
             )?;
         }
@@ -565,7 +575,7 @@ impl Gateway {
                 effect,
                 result.is_ok(),
                 Some(entry.handle.state().revision),
-                &request_value,
+                request_value.as_ref().unwrap(),
                 outcome,
             ) {
                 tracing::error!(%error, method = %request.method, "completion audit failed");

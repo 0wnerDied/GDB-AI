@@ -80,8 +80,8 @@ impl Journal {
         )
     }
 
-    pub fn append_api(&mut self, request: &Value) -> Result<u64> {
-        let sequence = self.append("api.request", request.clone())?;
+    pub fn append_api(&mut self, request: Value) -> Result<u64> {
+        let sequence = self.append("api.request", request)?;
         self.flush_boundary(sequence)
     }
 
@@ -271,7 +271,7 @@ mod tests {
             Journal::create_with_durability(&path, 4096, JournalDurability::Durable).unwrap();
 
         journal
-            .append_api(&serde_json::json!({"method": "test"}))
+            .append_api(serde_json::json!({"method": "test"}))
             .unwrap();
         assert_eq!(journal.unflushed_records, 0);
         journal

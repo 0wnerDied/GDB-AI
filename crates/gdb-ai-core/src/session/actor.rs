@@ -776,7 +776,7 @@ impl SessionWorker {
                 let _ = response.send(Ok(()));
             }
             WorkerRequest::RecordApi { request, response } => {
-                let appended = self.journal.append_api(&request).map(|_| ());
+                let appended = self.journal.append_api(request).map(|_| ());
                 let result = self.journal_result(appended);
                 let _ = response.send(result);
             }
