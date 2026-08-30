@@ -3,7 +3,10 @@ use std::{
     io,
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::PathBuf,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use gdb_ai_core::{
@@ -27,6 +30,7 @@ use super::{
 use crate::AnyError;
 
 struct StreamPending {
+    generation: u64,
     waiter: JoinHandle<()>,
     cancellation: RequestCancellation,
 }
@@ -144,6 +148,7 @@ where
                     write_rpc(&mut output, rpc_error(id, -32600, "duplicate request id or too many pending requests")).await?;
                     continue;
                 }
+                let generation = sequence.fetch_add(1, Ordering::Relaxed);
                 let mut cancellation = match request_cancellation(method, &params) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
@@ -238,19 +243,22 @@ where
                             ))
                             .await;
                     }
-                    let _ = responses.send((Some(task_key), response)).await;
+                    let _ = responses
+                        .send((Some((task_key, generation)), response))
+                        .await;
                 });
                 pending.insert(
                     key,
                     StreamPending {
+                        generation,
                         waiter: handle,
                         cancellation,
                     },
                 );
             }
-            Some((key, response)) = response_rx.recv() => {
-                if let Some(key) = key {
-                    pending.remove(&key);
+            Some((reservation, response)) = response_rx.recv() => {
+                if let Some((key, generation)) = reservation {
+                    remove_stream_pending(&mut pending, &key, generation);
                 }
                 write_rpc(&mut output, response).await?;
             }
@@ -261,6 +269,18 @@ where
         request.waiter.abort();
     }
     Ok(())
+}
+
+fn remove_stream_pending(pending: &mut HashMap<String, StreamPending>, key: &str, generation: u64) {
+    // 2026-08-30: A completed response could remain queued while cancellation
+    // freed and reused its request ID. Match the reservation generation so an
+    // old response cannot remove the replacement request.
+    if pending
+        .get(key)
+        .is_some_and(|request| request.generation == generation)
+    {
+        pending.remove(key);
+    }
 }
 
 pub(crate) async fn serve_unix(
@@ -546,6 +566,26 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(closed["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn queued_response_preserves_a_reused_request_id() {
+        let mut pending = HashMap::from([(
+            "same-id".into(),
+            StreamPending {
+                generation: 2,
+                waiter: tokio::spawn(async {}),
+                cancellation: RequestCancellation {
+                    mode: super::super::CancelMode::DetachWaiter,
+                    operation_id: None,
+                },
+            },
+        )]);
+
+        remove_stream_pending(&mut pending, "same-id", 1);
+        assert!(pending.contains_key("same-id"));
+        remove_stream_pending(&mut pending, "same-id", 2);
+        assert!(pending.is_empty());
     }
 
     #[tokio::test]

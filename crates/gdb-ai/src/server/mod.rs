@@ -33,7 +33,7 @@ pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 128;
 const MAX_HTTP_PENDING_DURATION: Duration = Duration::from_secs(5 * 60);
 
-type RpcOutput = (Option<String>, Value);
+type RpcOutput = (Option<(String, u64)>, Value);
 
 #[derive(Clone, Copy)]
 enum CanonicalPresentation {
