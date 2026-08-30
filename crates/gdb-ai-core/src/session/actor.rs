@@ -1612,10 +1612,11 @@ impl SessionWorker {
             self.active_resume_operation = operation_id.clone();
         }
         let result = self.execute_until(command, deadline).await;
-        // 2026-08-30: An immediate ^error left the rejected resume as active.
-        // A late cancel could then interrupt an unrelated following command.
+        // 2026-08-30: A rejected or queue-expired resume remained active. A
+        // late cancel could then interrupt an unrelated following command.
+        // Keep ownership only when a sent command has an unresolved outcome.
         if resumes_target
-            && resume_was_rejected(&result)
+            && resume_failed_definitively(&result, !self.timed_out_tokens.is_empty())
             && self.active_resume_operation == operation_id
         {
             self.active_resume_operation = None;
@@ -2062,10 +2063,8 @@ fn command_resumes_target(command: &MiCommand) -> bool {
     )
 }
 
-fn resume_was_rejected(result: &Result<CommandReply>) -> bool {
-    result
-        .as_ref()
-        .is_err_and(|error| error.code == ErrorCode::GdbError)
+fn resume_failed_definitively(result: &Result<CommandReply>, outcome_unknown: bool) -> bool {
+    result.is_err() && !outcome_unknown
 }
 
 fn operation_owns_resume(active: Option<&OperationId>, requested: &OperationId) -> bool {
@@ -2217,14 +2216,18 @@ mod tests {
         assert!(command_resumes_target(
             &MiCommand::new("-exec-continue").unwrap()
         ));
-        assert!(resume_was_rejected(&Err(Error::new(
-            ErrorCode::GdbError,
-            "cannot execute"
-        ))));
-        assert!(!resume_was_rejected(&Err(Error::new(
-            ErrorCode::Timeout,
-            "unknown outcome"
-        ))));
+        assert!(resume_failed_definitively(
+            &Err(Error::new(ErrorCode::GdbError, "cannot execute")),
+            false
+        ));
+        assert!(resume_failed_definitively(
+            &Err(Error::new(ErrorCode::Timeout, "expired before send")),
+            false
+        ));
+        assert!(!resume_failed_definitively(
+            &Err(Error::new(ErrorCode::Timeout, "unknown outcome")),
+            true
+        ));
     }
 
     #[test]
