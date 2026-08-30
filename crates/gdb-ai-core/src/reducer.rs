@@ -8,6 +8,27 @@ use crate::{
     },
 };
 
+const MAX_LIMITATIONS: usize = 64;
+const LIMITATIONS_OMITTED: &str = "additional limitations omitted";
+
+fn push_limitation(limitations: &mut Vec<String>, limitation: String) {
+    if limitations.contains(&limitation)
+        || limitations
+            .iter()
+            .any(|current| current == LIMITATIONS_OMITTED)
+    {
+        return;
+    }
+    // 2026-08-30: Repeated backend anomalies grew every persisted state and
+    // amplified the journal quadratically. Keep a fixed unique prefix and an
+    // explicit truncation marker instead of retaining unbounded free text.
+    if limitations.len() < MAX_LIMITATIONS - 1 {
+        limitations.push(limitation);
+    } else {
+        limitations.push(LIMITATIONS_OMITTED.to_owned());
+    }
+}
+
 /// The sole transition point for session state. Events arrive in journal
 /// order so replay applies the same revisions as a live session.
 #[derive(Debug)]
@@ -464,7 +485,7 @@ impl StateReducer {
                     self.state.consistency = Consistency::ManagedDirty;
                 }
                 self.state.reconciliation_required = true;
-                self.state.limitations.push(reason.clone());
+                push_limitation(&mut self.state.limitations, reason.clone());
                 true
             }
             DomainEvent::ConsistencyReconciling => {
@@ -478,24 +499,29 @@ impl StateReducer {
             DomainEvent::ConsistencyTainted { reason } => {
                 self.state.consistency = Consistency::Tainted;
                 self.state.reconciliation_required = true;
-                self.state.limitations.push(reason.clone());
+                push_limitation(&mut self.state.limitations, reason.clone());
                 true
             }
             DomainEvent::ConsistencyRestored { warnings } => {
                 self.state.reconciliation_required = false;
                 if self.state.consistency == Consistency::Tainted {
-                    self.state.limitations.extend(warnings.clone());
+                    for warning in warnings {
+                        push_limitation(&mut self.state.limitations, warning.clone());
+                    }
                     !warnings.is_empty()
                 } else {
                     self.state.consistency = Consistency::Clean;
-                    self.state.limitations.clone_from(warnings);
+                    self.state.limitations.clear();
+                    for warning in warnings {
+                        push_limitation(&mut self.state.limitations, warning.clone());
+                    }
                     true
                 }
             }
             DomainEvent::ConsistencyLost { reason } => {
                 self.state.consistency = Consistency::Lost;
                 self.state.reconciliation_required = false;
-                self.state.limitations.push(reason.clone());
+                push_limitation(&mut self.state.limitations, reason.clone());
                 true
             }
             DomainEvent::TargetDisconnected => {
@@ -540,9 +566,7 @@ impl StateReducer {
                 self.state.consistency = Consistency::Tainted;
                 self.state.reconciliation_required = true;
                 let limitation = format!("unknown backend event: {class}");
-                if !self.state.limitations.contains(&limitation) {
-                    self.state.limitations.push(limitation);
-                }
+                push_limitation(&mut self.state.limitations, limitation);
                 true
             }
             DomainEvent::UnknownBackendNotification { class } => {
@@ -551,9 +575,7 @@ impl StateReducer {
                 }
                 self.state.reconciliation_required = true;
                 let limitation = format!("unknown backend notification: {class}");
-                if !self.state.limitations.contains(&limitation) {
-                    self.state.limitations.push(limitation);
-                }
+                push_limitation(&mut self.state.limitations, limitation);
                 true
             }
             DomainEvent::Output { .. } | DomainEvent::OutputAdvanced { .. } => false,
@@ -601,6 +623,27 @@ mod tests {
         assert_eq!(reducer.state().revision, 1);
         assert!(!reducer.fail_closed());
         assert_eq!(reducer.state().revision, 1);
+    }
+
+    #[test]
+    fn limitations_remain_bounded_under_repeated_anomalies() {
+        let mut reducer =
+            StateReducer::new(SessionState::creating(SessionId("sess_bounded".into())));
+        for seq in 1..=100 {
+            apply(
+                &mut reducer,
+                seq,
+                DomainEvent::ConsistencyDirty {
+                    reason: format!("anomaly {seq}"),
+                },
+            );
+        }
+
+        assert_eq!(reducer.state().limitations.len(), MAX_LIMITATIONS);
+        assert_eq!(
+            reducer.state().limitations.last().map(String::as_str),
+            Some(LIMITATIONS_OMITTED)
+        );
     }
 
     #[test]
