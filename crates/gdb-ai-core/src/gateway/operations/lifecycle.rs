@@ -29,21 +29,15 @@ impl Gateway {
         request: &ApiRequest,
         caller: &Caller,
     ) -> Result<Value> {
-        // 2026-08-28: Concurrent creates checked the registry before either
-        // inserted its worker, allowing both to exceed max_sessions. Session
-        // startup is rare, so serialize its reservation and insertion.
-        // ponytail: shard reservations only if startup throughput matters.
-        let _creation = self.session_creation.lock().await;
+        // 2026-08-30: A global mutex covered the complete GDB handshake and
+        // serialized independent Agent sessions. A read gate only coordinates
+        // shutdown; the owned permit reserves capacity through session close.
+        let _creation = self.session_creation.read().await;
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(Error::new(
                 ErrorCode::InvalidState,
                 "gateway is shutting down",
             ));
-        }
-        let live_sessions = self.sessions.read().await.keys().cloned().collect();
-        self.maintain_storage(&live_sessions)?;
-        if self.sessions.read().await.len() >= self.config.server.max_sessions {
-            return Err(Error::new(ErrorCode::Conflict, "maximum sessions reached"));
         }
         #[derive(Deserialize)]
         struct Parameters {
@@ -60,6 +54,11 @@ impl Gateway {
                 "selecting a non-default profile requires an administrative caller",
             ));
         }
+        let slot = self
+            .session_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::new(ErrorCode::Conflict, "maximum sessions reached"))?;
         let handle = SessionHandle::start(
             self.config.clone(),
             profile,
@@ -86,6 +85,7 @@ impl Gateway {
         }
         let entry = Arc::new(SessionEntry {
             handle,
+            _slot: slot,
             owner: caller.identity.clone(),
             target_state: tokio::sync::RwLock::new(()),
             mutation: tokio::sync::Mutex::new(()),

@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 
 use crate::{
     Error, ErrorCode, Result,
@@ -46,6 +46,7 @@ impl Caller {
 
 struct SessionEntry {
     handle: SessionHandle,
+    _slot: OwnedSemaphorePermit,
     owner: String,
     target_state: tokio::sync::RwLock<()>,
     mutation: Mutex<()>,
@@ -63,7 +64,8 @@ pub struct Gateway {
     idempotency: Mutex<BTreeMap<String, (String, ApiResponse)>>,
     idempotency_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
     rates: Mutex<BTreeMap<String, RateWindow>>,
-    session_creation: Mutex<()>,
+    session_creation: RwLock<()>,
+    session_slots: Arc<Semaphore>,
     shutting_down: AtomicBool,
     operations: OperationRegistry,
     _storage_lock: StorageLock,
@@ -77,6 +79,7 @@ struct RateWindow {
 impl Gateway {
     pub fn new(config: Config) -> Result<Self> {
         config.validate()?;
+        let max_sessions = config.server.max_sessions;
         let storage_lock = StorageLock::acquire(config.persistence.sqlite.with_extension("lock"))?;
         let store = Arc::new(Store::open_with_storage(
             &config.persistence.sqlite,
@@ -98,7 +101,8 @@ impl Gateway {
             idempotency: Mutex::new(BTreeMap::new()),
             idempotency_locks: Mutex::new(BTreeMap::new()),
             rates: Mutex::new(BTreeMap::new()),
-            session_creation: Mutex::new(()),
+            session_creation: RwLock::new(()),
+            session_slots: Arc::new(Semaphore::new(max_sessions)),
             shutting_down: AtomicBool::new(false),
             operations: OperationRegistry::new(operation_limit),
             _storage_lock: storage_lock,
@@ -764,7 +768,7 @@ impl Gateway {
         // create later inserted a live GDB. Close admission first, then share
         // the creation gate so every previously admitted session is drained.
         self.shutting_down.store(true, Ordering::Release);
-        let _creation = self.session_creation.lock().await;
+        let _creation = self.session_creation.write().await;
         let sessions = std::mem::take(&mut *self.sessions.write().await);
         for entry in sessions.into_values() {
             let _ = entry.handle.close().await;
