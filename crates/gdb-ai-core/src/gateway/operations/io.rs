@@ -66,14 +66,15 @@ impl Gateway {
                 "inferior input is limited to 64 KiB per call",
             ));
         }
-        entry.handle.write_inferior(bytes.clone()).await?;
+        let written = bytes.len();
+        entry.handle.write_inferior(bytes).await?;
         entry
             .handle
             .record_event(DomainEvent::ControllerChanged {
                 kind: "inferior_input".into(),
             })
             .await?;
-        Ok(json!({ "written": bytes.len() }))
+        Ok(json!({ "written": written }))
     }
 
     pub(super) async fn io_send_eof(&self, request: &ApiRequest) -> Result<Value> {
