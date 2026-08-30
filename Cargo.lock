@@ -378,6 +378,7 @@ dependencies = [
  "base64",
  "gdb-ai-mi",
  "libc",
+ "memchr",
  "nix",
  "rusqlite",
  "schemars",

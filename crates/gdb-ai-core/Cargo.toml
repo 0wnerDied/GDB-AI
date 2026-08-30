@@ -11,6 +11,7 @@ async-trait.workspace = true
 base64.workspace = true
 gdb-ai-mi = { path = "../gdb-ai-mi" }
 libc.workspace = true
+memchr.workspace = true
 nix.workspace = true
 rusqlite.workspace = true
 schemars.workspace = true

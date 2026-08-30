@@ -1,5 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_mi::{MiRecord, MiResult};
+use memchr::memmem::Finder;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -204,6 +205,26 @@ fn search_pattern(parameters: &Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn find_memory_matches(bytes: &[u8], pattern: &[u8], maximum: usize) -> (Vec<usize>, bool) {
+    let finder = Finder::new(pattern);
+    let mut matches = Vec::with_capacity(maximum.min(128));
+    let mut cursor = 0;
+    while cursor <= bytes.len().saturating_sub(pattern.len()) {
+        let Some(relative) = finder.find(&bytes[cursor..]) else {
+            break;
+        };
+        let offset = cursor + relative;
+        matches.push(offset);
+        if matches.len() > maximum {
+            break;
+        }
+        cursor = offset + 1;
+    }
+    let truncated = matches.len() > maximum;
+    matches.truncate(maximum);
+    (matches, truncated)
+}
+
 impl Gateway {
     pub(super) async fn memory_read(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
@@ -373,17 +394,16 @@ impl Gateway {
         let start_number = parse_address(start.as_str())?;
         let (bytes, evidence_seq) =
             read_memory_bytes(&entry.handle, &state, start_number, length, true).await?;
-        let mut matches = bytes
-            .windows(pattern.len())
-            .enumerate()
-            .filter(|(_, window)| *window == pattern.as_slice())
-            .take(max_results + 1)
-            .map(|(offset, _)| format!("0x{:016x}", start_number + offset as u64))
+        // 2026-08-30: Comparing every window with a caller-controlled 64 KiB
+        // pattern made worst-case 16 MiB searches approach O(n*m). Reuse the
+        // linear-time finder and retain the existing overlapping-match policy.
+        let (offsets, truncated) = find_memory_matches(&bytes, &pattern, max_results);
+        let matches = offsets
+            .into_iter()
+            .map(|offset| format!("0x{:016x}", start_number + offset as u64))
             .collect::<Vec<_>>();
         // 2026-08-28: Exactly max_results matches was incorrectly reported as
         // truncated. Read one sentinel match before setting the flag.
-        let truncated = matches.len() > max_results;
-        matches.truncate(max_results);
         // 2026-08-28: Search permits a bounded short read, but callers could
         // only infer it from two lengths. Mark partial evidence explicitly.
         let partial = bytes.len() < length;
@@ -477,5 +497,20 @@ impl Gateway {
     pub(super) async fn tracking_list(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
         Ok(serde_json::to_value(entry.handle.tracking().await?)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_memory_matches;
+
+    #[test]
+    fn memory_matcher_preserves_overlaps_and_truncation() {
+        assert_eq!(
+            find_memory_matches(b"aaaa", b"aa", 8),
+            (vec![0, 1, 2], false)
+        );
+        assert_eq!(find_memory_matches(b"aaaa", b"aa", 2), (vec![0, 1], true));
+        assert_eq!(find_memory_matches(b"abcdef", b"z", 8), (Vec::new(), false));
     }
 }
