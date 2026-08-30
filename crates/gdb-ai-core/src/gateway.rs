@@ -652,6 +652,7 @@ impl Gateway {
 
     async fn check_rate(&self, identity: &str) -> Result<()> {
         let mut rates = self.rates.lock().await;
+        let identity = principal_identity(identity);
         if rates.len() >= 1_024 && !rates.contains_key(identity) {
             rates.pop_first();
         }
@@ -1007,7 +1008,7 @@ fn classify_linux_maps(maps: &str, start: u64, last: u64) -> MemoryRangeEffect {
 fn idempotency_key(request: &ApiRequest, caller: &Caller) -> String {
     format!(
         "{}:{}:{}:{}",
-        caller.identity,
+        principal_identity(&caller.identity),
         request.session_id.as_deref().unwrap_or("global"),
         request.method,
         request.idempotency_key.as_deref().unwrap_or("")
@@ -1033,10 +1034,13 @@ fn now_unix_ms() -> u64 {
 }
 
 fn same_principal(left: &str, right: &str) -> bool {
-    fn principal(identity: &str) -> &str {
-        identity.split_once("/mcp:").map_or(identity, |part| part.0)
-    }
-    principal(left) == principal(right)
+    principal_identity(left) == principal_identity(right)
+}
+
+fn principal_identity(identity: &str) -> &str {
+    // 2026-08-30: MCP clientInfo.name is caller-controlled presentation data.
+    // Treating it as authority let one principal reset limits and idempotency.
+    identity.split_once("/mcp:").map_or(identity, |part| part.0)
 }
 
 #[cfg(test)]

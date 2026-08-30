@@ -833,3 +833,43 @@ async fn stable_read_for_unknown_session_returns_not_found() {
         .await;
     assert_eq!(response.error.unwrap().code, ErrorCode::NotFound);
 }
+
+#[tokio::test]
+async fn mcp_client_labels_share_principal_limits_and_idempotency() {
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.server.requests_per_second = 1;
+    config.server.request_burst = 0;
+    let gateway = Gateway::new(config).unwrap();
+    let first = Caller::local("mcp-http/mcp:first");
+    let second = Caller::local("mcp-http/mcp:second");
+
+    gateway.check_rate(&first.identity).await.unwrap();
+    assert_eq!(
+        gateway.check_rate(&second.identity).await.unwrap_err().code,
+        ErrorCode::Conflict
+    );
+
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "principal-key".into(),
+        session_id: None,
+        method: crate::protocol::CanonicalMethod::SessionList,
+        expected_revision: None,
+        idempotency_key: Some("same".into()),
+        parameters: json!({}),
+    };
+    assert_eq!(
+        idempotency_key(&request, &first),
+        idempotency_key(&request, &second)
+    );
+}
