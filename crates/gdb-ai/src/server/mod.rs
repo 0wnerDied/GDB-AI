@@ -503,14 +503,96 @@ fn tool_result(response: ApiResponse) -> Value {
             None => "request completed".into(),
         },
     };
-    let structured = serde_json::to_value(response).unwrap_or_else(
-        |error| json!({"error": {"code": "INTERNAL", "message": error.to_string()}}),
-    );
+    let structured = compact_tool_response(response);
     json!({
         "content": [{"type": "text", "text": summary}],
         "structuredContent": structured,
         "isError": is_error
     })
+}
+
+// 2026-08-30: Repeating complete thread, breakpoint, module, and signal
+// registries after every tool call consumed Agent context and serialized data
+// unrelated to the operation. Detailed views remain available on demand.
+fn compact_tool_response(response: ApiResponse) -> Value {
+    let ApiResponse {
+        session_id,
+        revision,
+        state,
+        result,
+        warnings,
+        truncated,
+        continuation,
+        artifacts,
+        evidence,
+        error,
+        ..
+    } = response;
+    let mut compact = Map::new();
+    if let Some(session_id) = session_id {
+        compact.insert("session_id".into(), Value::String(session_id));
+    }
+    if let Some(revision) = revision {
+        compact.insert("revision".into(), Value::from(revision));
+    }
+    if let Some(state) = state {
+        let mut summary = json!({
+            "lifecycle": state.lifecycle,
+            "backend": state.backend,
+            "consistency": state.consistency,
+            "reconciliation_required": state.reconciliation_required,
+            "event_seq": state.event_seq,
+            "execution_epoch": state.execution_epoch,
+            "target_origin": state.target_origin
+        });
+        let summary = summary.as_object_mut().unwrap();
+        if !state.outcome_unknown_tokens.is_empty() {
+            summary.insert(
+                "outcome_unknown_tokens".into(),
+                json!(state.outcome_unknown_tokens),
+            );
+        }
+        if let Some(stop_id) = state.stop_id {
+            summary.insert("stop_id".into(), json!(stop_id));
+        }
+        if let Some(reason) = state.stop_reason_detail {
+            summary.insert("stop_reason".into(), json!(reason));
+        } else if let Some(reason) = state.stop_reason {
+            summary.insert("stop_reason".into(), Value::String(reason));
+        }
+        if let Some(inferior_id) = state.stopped_inferior_id {
+            summary.insert("inferior_id".into(), json!(inferior_id));
+        }
+        if let Some(thread_id) = state.stopped_thread_id {
+            summary.insert("thread_id".into(), json!(thread_id));
+        }
+        if let Some(snapshot) = state.snapshot {
+            summary.insert("snapshot".into(), json!(snapshot));
+        }
+        compact.insert("state".into(), Value::Object(std::mem::take(summary)));
+    }
+    if let Some(result) = result {
+        compact.insert("result".into(), result);
+    }
+    if !warnings.is_empty() {
+        compact.insert("warnings".into(), json!(warnings));
+    }
+    if truncated {
+        compact.insert("truncated".into(), Value::Bool(true));
+    }
+    if let Some(continuation) = continuation {
+        compact.insert("continuation".into(), continuation);
+    }
+    if !artifacts.is_empty() {
+        compact.insert("artifacts".into(), json!(artifacts));
+    }
+    if !evidence.is_empty() {
+        compact.insert("evidence".into(), json!(evidence));
+    }
+    if let Some(error) = error {
+        compact.insert("error".into(), json!(error));
+    }
+    Value::Object(compact)
 }
 
 fn canonical_request(

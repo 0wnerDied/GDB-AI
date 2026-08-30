@@ -1,5 +1,9 @@
 use super::*;
 use crate::tool_catalog::tool_names;
+use gdb_ai_core::{
+    domain::{BreakpointState, SessionId, SessionState},
+    protocol::ApiResponse,
+};
 
 #[test]
 fn initialize_teaches_agents_the_stateful_workflow() {
@@ -73,4 +77,46 @@ fn maps_tool_metadata_outside_canonical_parameters() {
         -32601
     );
     assert!(!valid_request_id(&Value::String("x".repeat(129))));
+}
+
+#[test]
+fn tool_results_keep_only_agent_coordination_state() {
+    let mut state = SessionState::creating(SessionId::parse("sess_test").unwrap());
+    for index in 0..64 {
+        let id = format!("bp_{index}");
+        state.breakpoints.insert(
+            id.clone(),
+            BreakpointState {
+                id: gdb_ai_core::domain::BreakpointId(id),
+                backend_number: index.to_string(),
+                enabled: true,
+                pending: false,
+                locations: Vec::new(),
+            },
+        );
+    }
+    state.limitations.push("large repeated diagnostic".into());
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "test".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::SessionGet,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let response = ApiResponse::success(&request, Some(state), json!({"status": "ready"}));
+    let canonical_bytes = serde_json::to_vec(&response).unwrap().len();
+    let result = tool_result(response);
+    let compact_bytes = serde_json::to_vec(&result["structuredContent"])
+        .unwrap()
+        .len();
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["state"]["lifecycle"], "CREATING");
+    assert_eq!(structured["result"]["status"], "ready");
+    assert!(structured["state"].get("breakpoints").is_none());
+    assert!(structured["state"].get("limitations").is_none());
+    assert!(structured.get("api_version").is_none());
+    assert!(structured.get("request_id").is_none());
+    assert!(compact_bytes * 4 < canonical_bytes);
 }
