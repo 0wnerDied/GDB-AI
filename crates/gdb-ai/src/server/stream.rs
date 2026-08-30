@@ -91,33 +91,33 @@ where
                 if line.iter().all(u8::is_ascii_whitespace) {
                     continue;
                 }
-                let message = match serde_json::from_slice::<Value>(&line) {
+                let mut message = match serde_json::from_slice::<Value>(&line) {
                     Ok(message) => message,
                     Err(error) => {
                         write_rpc(&mut output, rpc_error(Value::Null, -32700, error.to_string())).await?;
                         continue;
                     }
                 };
-                let Some(object) = message.as_object() else {
+                let Some(object) = message.as_object_mut() else {
                     write_rpc(&mut output, rpc_error(Value::Null, -32600, "request must be an object")).await?;
                     continue;
                 };
-                let id = object.get("id").cloned();
+                let id = object.remove("id");
                 if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
                     write_rpc(&mut output, rpc_error(id.unwrap_or(Value::Null), -32600, "jsonrpc must be 2.0")).await?;
                     continue;
                 }
-                let Some(method) = object.get("method").and_then(Value::as_str) else {
+                let Some(Value::String(method)) = object.remove("method") else {
                     if id.is_some() {
                         write_rpc(&mut output, rpc_error(id.unwrap_or(Value::Null), -32600, "method is required")).await?;
                     }
                     continue;
                 };
-                let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
+                let mut params = object.remove("params").unwrap_or_else(|| json!({}));
 
                 if id.is_none() {
                     handle_notification(
-                        method,
+                        &method,
                         &params,
                         &mut phase,
                         &mut pending,
@@ -162,7 +162,7 @@ where
                     continue;
                 }
                 let generation = sequence.fetch_add(1, Ordering::Relaxed);
-                let mut cancellation = match request_cancellation(method, &params) {
+                let mut cancellation = match request_cancellation(&method, &params) {
                     Ok(cancellation) => cancellation,
                     Err(error) => {
                         write_rpc(&mut output, rpc_fault(id, error)).await?;
@@ -184,8 +184,8 @@ where
                     .await?;
                 }
                 let canonical = match canonical_rpc_request(
-                    method,
-                    params.clone(),
+                    &method,
+                    &mut params,
                     advanced_tools,
                     caller.admin,
                     &sequence,
@@ -216,7 +216,7 @@ where
                     let dispatch_gateway = gateway.clone();
                     let dispatch_caller = caller.clone();
                     let dispatch_sequence = sequence.clone();
-                    let method = method.to_owned();
+                    let method = method.clone();
                     (
                         None,
                         tokio::spawn(async move {

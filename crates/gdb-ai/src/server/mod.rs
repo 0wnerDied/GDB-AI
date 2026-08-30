@@ -306,15 +306,11 @@ async fn dispatch_rpc(
     advanced_tools: bool,
     sequence: &AtomicU64,
     method: &str,
-    params: Value,
+    mut params: Value,
 ) -> Result<Value, RpcFault> {
-    if let Some((request, presentation)) = canonical_rpc_request(
-        method,
-        params.clone(),
-        advanced_tools,
-        caller.admin,
-        sequence,
-    )? {
+    if let Some((request, presentation)) =
+        canonical_rpc_request(method, &mut params, advanced_tools, caller.admin, sequence)?
+    {
         return present_canonical_response(gateway.dispatch(request, caller).await, presentation);
     }
     match method {
@@ -339,9 +335,11 @@ async fn dispatch_rpc(
     }
 }
 
+// 2026-08-30: Move canonical payloads out of the outer request so large Agent
+// inputs are not deep-cloned before they enter the operation service.
 fn canonical_rpc_request(
     method: &str,
-    params: Value,
+    params: &mut Value,
     advanced_tools: bool,
     raw_admin: bool,
     sequence: &AtomicU64,
@@ -351,14 +349,15 @@ fn canonical_rpc_request(
             let name = params
                 .get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| RpcFault::invalid("tools/call requires name"))?;
+                .ok_or_else(|| RpcFault::invalid("tools/call requires name"))?
+                .to_owned();
             let arguments = params
-                .get("arguments")
-                .cloned()
+                .as_object_mut()
+                .and_then(|params| params.remove("arguments"))
                 .unwrap_or_else(|| json!({}));
             Ok(Some((
                 map_tool(
-                    name,
+                    &name,
                     arguments,
                     advanced_tools,
                     raw_admin,
@@ -368,7 +367,8 @@ fn canonical_rpc_request(
             )))
         }
         "gdb.ai/call" => Ok(Some((
-            serde_json::from_value(params).map_err(|error| RpcFault::invalid(error.to_string()))?,
+            serde_json::from_value(params.take())
+                .map_err(|error| RpcFault::invalid(error.to_string()))?,
             CanonicalPresentation::Envelope,
         ))),
         _ => Ok(None),
@@ -419,10 +419,15 @@ async fn call_tool(
     caller: &Caller,
     advanced_tools: bool,
     sequence: &AtomicU64,
-    params: Value,
+    mut params: Value,
 ) -> Result<Value, RpcFault> {
-    let Some((request, presentation)) =
-        canonical_rpc_request("tools/call", params, advanced_tools, caller.admin, sequence)?
+    let Some((request, presentation)) = canonical_rpc_request(
+        "tools/call",
+        &mut params,
+        advanced_tools,
+        caller.admin,
+        sequence,
+    )?
     else {
         unreachable!("tools/call always maps to a canonical request")
     };

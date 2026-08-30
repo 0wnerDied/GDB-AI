@@ -171,7 +171,7 @@ pub(crate) async fn serve_http(
 async fn http_mcp(
     State(state): State<HttpState>,
     headers: HeaderMap,
-    Json(message): Json<Value>,
+    Json(mut message): Json<Value>,
 ) -> Response {
     if !allow_http_origin(&state, &headers) {
         return StatusCode::FORBIDDEN.into_response();
@@ -182,28 +182,28 @@ async fn http_mcp(
     if !accepts_mcp_responses(&headers) {
         return StatusCode::NOT_ACCEPTABLE.into_response();
     }
-    let Some(object) = message.as_object() else {
+    let Some(object) = message.as_object_mut() else {
         return json_http_response(
             rpc_error(Value::Null, -32600, "request must be an object"),
             None,
         );
     };
-    let id = object.get("id").cloned();
+    let id = object.remove("id");
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return json_http_response(
             rpc_error(id.unwrap_or(Value::Null), -32600, "jsonrpc must be 2.0"),
             None,
         );
     }
-    let Some(method) = object.get("method").and_then(Value::as_str) else {
+    let Some(Value::String(method)) = object.remove("method") else {
         return json_http_response(
             rpc_error(id.unwrap_or(Value::Null), -32600, "method is required"),
             None,
         );
     };
-    let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
+    let mut params = object.remove("params").unwrap_or_else(|| json!({}));
     if uses_stateless_http(&headers, &params) {
-        return http_mcp_stateless(state, headers, id, method, params).await;
+        return http_mcp_stateless(state, headers, id, &method, params).await;
     }
     if method == "initialize" {
         let Some(id) = id else {
@@ -301,14 +301,14 @@ async fn http_mcp(
         );
     }
     let key = request_key(&id);
-    let cancellation = match request_cancellation(method, &params) {
+    let cancellation = match request_cancellation(&method, &params) {
         Ok(cancellation) => cancellation,
         Err(error) => return json_http_response(rpc_fault(id, error), Some(session_id)),
     };
     let admitted_cancellation = cancellation.clone();
     let canonical = match canonical_rpc_request(
-        method,
-        params.clone(),
+        &method,
+        &mut params,
         state.advanced_tools,
         caller.admin,
         &state.sequence,
@@ -393,7 +393,7 @@ async fn http_mcp(
         let gateway = state.gateway.clone();
         let sequence = state.sequence.clone();
         let advanced_tools = state.advanced_tools;
-        let method = method.to_owned();
+        let method = method.clone();
         let dispatch_caller = caller.clone();
         (
             None,
@@ -454,7 +454,7 @@ async fn http_mcp_stateless(
     headers: HeaderMap,
     id: Option<Value>,
     method: &str,
-    params: Value,
+    mut params: Value,
 ) -> Response {
     let validation = stateless_request(&params).and_then(|stateless| {
         if stateless {
@@ -497,7 +497,7 @@ async fn http_mcp_stateless(
     }
     let canonical = match canonical_rpc_request(
         method,
-        params.clone(),
+        &mut params,
         state.advanced_tools,
         caller.admin,
         &state.sequence,
