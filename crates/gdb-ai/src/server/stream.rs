@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncRead, AsyncWrite, BufReader},
     net::UnixListener,
-    sync::mpsc,
+    sync::{Semaphore, mpsc},
     task::JoinHandle,
 };
 
@@ -311,6 +311,7 @@ pub(crate) async fn serve_unix(
     raw_admin: bool,
     advanced_tools: bool,
 ) -> Result<(), AnyError> {
+    let max_clients = config.server.max_http_sessions;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -327,10 +328,17 @@ pub(crate) async fn serve_unix(
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     let gateway = Arc::new(Gateway::new(config)?);
+    let client_slots = Arc::new(Semaphore::new(max_clients));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
+                // 2026-08-30: One local caller could open unbounded Unix
+                // connections and multiply the per-stream pending limit.
+                let Ok(slot) = client_slots.clone().try_acquire_owned() else {
+                    tracing::warn!("rejected Unix client at the transport limit");
+                    continue;
+                };
                 // 2026-08-28: Falling back to unix:unknown made every
                 // credential lookup failure share one authorization principal.
                 let identity = match stream.peer_cred() {
@@ -343,6 +351,7 @@ pub(crate) async fn serve_unix(
                 let (input, output) = stream.into_split();
                 let gateway = gateway.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     if let Err(error) = serve_stream(
                         gateway,
                         Caller { identity, admin: raw_admin },
