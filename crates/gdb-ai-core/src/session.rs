@@ -453,9 +453,12 @@ impl SessionHandle {
         // 2026-08-28: Gateway locks did not protect direct SessionHandle users,
         // so composite reads could still interleave ordinary MI commands. Hold
         // the shared command sequence for the complete stop-scoped operation.
+        // 2026-08-30: Waiting for that sequence was unbounded even though each
+        // contained command had a deadline. Bound composite admission too.
         // ponytail: Keep composite builders in this task; use actor transaction
         // IDs before allowing them to spawn command-producing subtasks.
-        let _sequence = self.command_sequence.lock().await;
+        let deadline = command_deadline(self.command_timeout);
+        let _sequence = self.command_sequence_until(deadline).await?;
         self.require_observation_context(expected)?;
         ACTIVE_OBSERVATION_SESSION
             .scope(self.id.0.clone(), async {
@@ -546,7 +549,8 @@ impl SessionHandle {
         if self.observation_active() {
             return self.send_refresh_target_capabilities().await;
         }
-        let _sequence = self.command_sequence.lock().await;
+        let deadline = command_deadline(self.command_timeout);
+        let _sequence = self.command_sequence_until(deadline).await?;
         self.send_refresh_target_capabilities().await
     }
 

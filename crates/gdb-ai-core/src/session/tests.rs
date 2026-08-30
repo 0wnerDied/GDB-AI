@@ -682,6 +682,28 @@ async fn stable_observation_serializes_ordinary_commands() {
 }
 
 #[tokio::test]
+async fn stable_observation_admission_obeys_command_deadline() {
+    let Some(session) = control_test_session().await else {
+        return;
+    };
+    let sequence = session.command_sequence.lock().await;
+    let mut waiting = session.clone();
+    waiting.command_timeout = Duration::from_millis(20);
+    let expected = waiting.state();
+    let started = std::time::Instant::now();
+
+    let error = waiting
+        .stable_observation(&expected, Box::pin(async { Ok(()) }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::Timeout);
+    assert!(started.elapsed() < Duration::from_millis(150));
+    drop(sequence);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_snapshot_commit_leaves_no_snapshot() {
     let Some(session) = control_test_session().await else {
         return;
