@@ -1,11 +1,11 @@
-use std::{path::PathBuf, process::Command};
+use std::process::Command;
 
 use gdb_ai_core::{
     ErrorCode,
     config::{ArtifactConfig, Config, PersistenceConfig},
     domain::SessionId,
     gateway::{Caller, Gateway},
-    protocol::{API_VERSION, ApiRequest},
+    protocol::{API_VERSION, ApiRequest, ApiResponse},
     replay::replay,
 };
 use serde_json::{Value, json};
@@ -31,6 +31,12 @@ fn request(
     }
 }
 
+async fn call(gateway: &Gateway, caller: &Caller, request: ApiRequest) -> ApiResponse {
+    let response = gateway.dispatch(request, caller).await;
+    assert!(response.error.is_none(), "{:?}", response.error);
+    response
+}
+
 #[tokio::test]
 async fn rebinds_module_offset_after_explicit_loader_exec() {
     if !support::require_commands(&["gdb", "cc", "nm", "readelf", "strip"]) {
@@ -38,7 +44,12 @@ async fn rebinds_module_offset_after_explicit_loader_exec() {
     }
     let directory = tempdir().unwrap();
     let executable = directory.path().join("stripped");
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
+    let source = directory.path().join("stripped.c");
+    std::fs::write(
+        &source,
+        "#include <unistd.h>\nvolatile int value;\n__attribute__((noinline)) static void marker(void) { value++; }\nint main(void) { sleep(1); marker(); return value != 1; }\n",
+    )
+    .unwrap();
     assert!(
         Command::new("cc")
             .args(["-fPIE", "-pie", "-O2"])
@@ -228,6 +239,124 @@ async fn rebinds_module_offset_after_explicit_loader_exec() {
         .as_str()
         .unwrap();
     assert_eq!(rebound.locations[0].address.as_deref(), Some(pc));
+
+    macro_rules! call {
+        ($id:literal, $method:literal, $revision:expr, $parameters:expr) => {
+            call(
+                &gateway,
+                &caller,
+                request($id, Some(&session_id), $method, $revision, $parameters),
+            )
+            .await
+        };
+    }
+
+    let deleted = call!(
+        "delete-initial-module-offset",
+        "breakpoint.delete",
+        frame.revision,
+        json!({"lease_id": lease_id, "breakpoint_id": public_id})
+    );
+    let materialized = call!(
+        "materialized-module-offset",
+        "breakpoint.create",
+        deleted.revision,
+        json!({"lease_id": lease_id, "module_offset": {
+            "module": "stripped", "offset": format!("0x{marker_offset:x}")}})
+    );
+    let public_id = materialized.result.as_ref().unwrap()["breakpoint"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let disabled = call!(
+        "disable-module-offset",
+        "breakpoint.update",
+        materialized.revision,
+        json!({"lease_id": lease_id, "breakpoint_id": public_id, "enabled": false})
+    );
+    let restarted = call!(
+        "restart-with-module-offset",
+        "target.restart",
+        disabled.revision,
+        json!({"lease_id": lease_id, "stop": "first_instruction",
+            "wait": {"until": "snapshot", "timeout_ms": 5000}})
+    );
+    let restart_stop_id = restarted.state.as_ref().unwrap().stop_id.clone().unwrap();
+    let parked = restarted
+        .state
+        .as_ref()
+        .unwrap()
+        .breakpoints
+        .values()
+        .find(|breakpoint| breakpoint.id.0 == public_id)
+        .unwrap();
+    assert!(parked.pending && !parked.enabled);
+    let enabled = call!(
+        "enable-restarted-module-offset",
+        "breakpoint.update",
+        None,
+        json!({"lease_id": lease_id, "accept_latest_revision": true,
+            "breakpoint_id": public_id, "enabled": true})
+    );
+    let stopped_after_restart = call!(
+        "continue-after-restart",
+        "execution.control",
+        enabled.revision,
+        json!({"action": "continue", "lease_id": lease_id, "stop_id": restart_stop_id,
+            "wait": {"until": "snapshot", "timeout_ms": 5000}})
+    );
+    assert_eq!(
+        stopped_after_restart
+            .state
+            .as_ref()
+            .unwrap()
+            .stop_reason
+            .as_deref(),
+        Some("breakpoint-hit")
+    );
+    let killed = call!(
+        "kill-before-relaunch",
+        "target.kill",
+        stopped_after_restart.revision,
+        json!({"lease_id": lease_id, "wait": {"until": "exited", "timeout_ms": 5000}})
+    );
+    let relaunched = call!(
+        "relaunch-with-module-offset",
+        "target.launch",
+        killed.revision,
+        json!({"lease_id": lease_id, "program": loader, "argv": [executable],
+            "cwd": directory.path(), "stop": "first_instruction",
+            "wait": {"until": "snapshot", "timeout_ms": 5000}})
+    );
+    let relaunch_stop_id = relaunched.state.as_ref().unwrap().stop_id.clone().unwrap();
+    let stopped_after_relaunch = call!(
+        "continue-after-relaunch",
+        "execution.control",
+        None,
+        json!({"action": "continue", "accept_latest_revision": true, "lease_id": lease_id,
+            "stop_id": relaunch_stop_id,
+            "wait": {"until": "snapshot", "timeout_ms": 5000}})
+    );
+    assert_eq!(
+        stopped_after_relaunch
+            .state
+            .as_ref()
+            .unwrap()
+            .stop_reason
+            .as_deref(),
+        Some("breakpoint-hit"),
+        "{:?}",
+        stopped_after_relaunch.state
+    );
+    assert!(
+        stopped_after_relaunch
+            .state
+            .as_ref()
+            .unwrap()
+            .breakpoints
+            .values()
+            .any(|breakpoint| breakpoint.id.0 == public_id && !breakpoint.pending)
+    );
     gateway.shutdown().await;
     let replayed = replay(
         directory

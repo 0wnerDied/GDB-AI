@@ -677,7 +677,10 @@ pub enum DomainEvent {
         old_backend_number: String,
         new_backend_number: String,
         enabled: bool,
-        address: String,
+        // 2026-09-01: None keeps a parked logical module breakpoint pending
+        // without attributing the previous ASLR generation's address.
+        #[serde(default)]
+        address: Option<String>,
     },
     LibraryLoaded {
         id: String,

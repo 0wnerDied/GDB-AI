@@ -394,13 +394,18 @@ impl StateReducer {
                         id: id.clone(),
                         backend_number: new_backend_number.clone(),
                         enabled: *enabled,
-                        pending: false,
-                        locations: vec![BreakpointLocationState {
-                            id: format!("bpl_{}_{}_1", id.0, self.state.event_seq),
-                            backend_number: new_backend_number.clone(),
-                            address: Some(address.clone()),
-                            function: None,
-                        }],
+                        pending: address.is_none(),
+                        locations: address
+                            .as_ref()
+                            .map(|address| {
+                                vec![BreakpointLocationState {
+                                    id: format!("bpl_{}_{}_1", id.0, self.state.event_seq),
+                                    backend_number: new_backend_number.clone(),
+                                    address: Some(address.clone()),
+                                    function: None,
+                                }]
+                            })
+                            .unwrap_or_default(),
                     },
                 );
                 true

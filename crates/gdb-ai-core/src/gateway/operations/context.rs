@@ -85,7 +85,9 @@ impl Gateway {
             // as a shared library, so `module+offset` remained pending. The
             // existing local mapping provider supplies the actual load bias.
             if let Some(address) = live_module_offset(state, &module, offset)? {
-                return Ok((format!("*{address}"), None));
+                // 2026-09-01: Dropping metadata after immediate resolution
+                // left the absolute breakpoint stale on the next ASLR run.
+                return Ok((format!("*{address}"), Some((module, offset))));
             }
             return Ok((breakpoint_location(parameters)?, Some((module, offset))));
         }

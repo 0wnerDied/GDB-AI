@@ -19,8 +19,8 @@ use crate::{
     Error, ErrorCode, Result,
     artifact::ArtifactStore,
     backend::{
-        BackendInput, DebugBackend, GdbBackend, MiCommand, OutputEvidenceStatus, PtyOutput,
-        SandboxOptions,
+        BackendInput, DebugBackend, GdbBackend, MiArgument, MiCommand, OutputEvidenceStatus,
+        PtyOutput, SandboxOptions,
     },
     config::{Config, OutputEvidenceMode},
     domain::{
@@ -689,6 +689,12 @@ impl SessionWorker {
                     let _ = response.send(Err(error));
                     return false;
                 }
+                if command_starts_fresh_inferior(&command)
+                    && let Err(error) = self.park_module_breakpoints(deadline).await
+                {
+                    let _ = response.send(Err(error));
+                    return false;
+                }
                 let _ = response.send(
                     self.execute_operation_until(command, operation, deadline)
                         .await,
@@ -708,6 +714,12 @@ impl SessionWorker {
                     return false;
                 }
                 if let Err(error) = self.restore_deferred_commands(deadline).await {
+                    let _ = response.send(Err(error));
+                    return false;
+                }
+                if command_starts_fresh_inferior(&command)
+                    && let Err(error) = self.park_module_breakpoints(deadline).await
+                {
                     let _ = response.send(Err(error));
                     return false;
                 }
@@ -1299,6 +1311,13 @@ impl SessionWorker {
         let pending = self
             .pending_module_breakpoints
             .values()
+            .filter(|breakpoint| {
+                self.reducer
+                    .state()
+                    .breakpoints
+                    .get(&breakpoint.backend_number)
+                    .is_some_and(|state| state.pending)
+            })
             .cloned()
             .collect::<Vec<_>>();
         for breakpoint in pending {
@@ -1311,37 +1330,93 @@ impl SessionWorker {
             // loader entry stayed pending after exec because GDB interpreted
             // the module name as a symbol. Materialize it once /proc exposes
             // the load bias while preserving the public breakpoint handle.
-            let reply = self
-                .execute(
-                    breakpoint.command.clone().string(format!("*{address}")),
-                    self.command_timeout,
-                )
+            let enabled = breakpoint.enabled;
+            let command = breakpoint.command.clone().string(format!("*{address}"));
+            self.replace_module_breakpoint(
+                breakpoint,
+                enabled,
+                command,
+                Some(address),
+                command_deadline(self.command_timeout),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn park_module_breakpoints(&mut self, deadline: tokio::time::Instant) -> Result<()> {
+        let materialized = self
+            .pending_module_breakpoints
+            .values()
+            .filter_map(|breakpoint| {
+                self.reducer
+                    .state()
+                    .breakpoints
+                    .get(&breakpoint.backend_number)
+                    .filter(|state| !state.pending)
+                    .map(|state| (breakpoint.clone(), state.enabled))
+            })
+            .collect::<Vec<_>>();
+        // 2026-09-01: Rebinding discarded module metadata and left a PIE's
+        // absolute address enabled across the next ASLR generation, so GDB
+        // rejected the fresh run before its mappings existed. Replace it with
+        // a software pending placeholder while retaining the logical identity;
+        // GDB has no pending watchpoints, and rebind restores the saved kind.
+        for (breakpoint, enabled) in materialized {
+            let pending = format!("__gdb_ai_pending_{}", breakpoint.id.0);
+            let command = MiCommand::new("-break-insert")?.bare("-f")?.string(pending);
+            self.replace_module_breakpoint(breakpoint, enabled, command, None, deadline)
                 .await?;
-            let new_backend_number = breakpoint_number(&reply.record)?;
-            self.apply_event(DomainEvent::BreakpointRebound {
-                id: breakpoint.id.clone(),
-                old_backend_number: breakpoint.backend_number.clone(),
-                new_backend_number: new_backend_number.clone(),
-                enabled: breakpoint.enabled,
-                address,
+        }
+        if !self.pending_module_breakpoints.is_empty() {
+            self.module_rebind_needed = true;
+        }
+        Ok(())
+    }
+
+    async fn replace_module_breakpoint(
+        &mut self,
+        mut breakpoint: PendingModuleBreakpoint,
+        enabled: bool,
+        command: MiCommand,
+        address: Option<String>,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        let old_backend_number = breakpoint.backend_number.clone();
+        let reply = self.execute_until(command, deadline).await?;
+        let new_backend_number = breakpoint_number(&reply.record)?;
+        if !enabled {
+            self.execute_until(
+                MiCommand::new("-break-disable")?.bare(new_backend_number.clone())?,
+                deadline,
+            )
+            .await?;
+        }
+        self.apply_event(DomainEvent::BreakpointRebound {
+            id: breakpoint.id.clone(),
+            old_backend_number: old_backend_number.clone(),
+            new_backend_number: new_backend_number.clone(),
+            enabled,
+            address,
+        })?;
+        self.pending_module_breakpoints.remove(&old_backend_number);
+        breakpoint.backend_number.clone_from(&new_backend_number);
+        breakpoint.enabled = enabled;
+        self.pending_module_breakpoints
+            .insert(new_backend_number.clone(), breakpoint);
+        if let Err(error) = self
+            .execute_until(
+                MiCommand::new("-break-delete")?.bare(old_backend_number.clone())?,
+                deadline,
+            )
+            .await
+        {
+            self.apply_event(DomainEvent::ConsistencyDirty {
+                reason: format!(
+                    "module breakpoint moved to {new_backend_number}, but old breakpoint {old_backend_number} could not be deleted: {error}"
+                ),
             })?;
-            self.pending_module_breakpoints
-                .remove(&breakpoint.backend_number);
-            if let Err(error) = self
-                .execute(
-                    MiCommand::new("-break-delete")?.bare(breakpoint.backend_number.clone())?,
-                    self.command_timeout,
-                )
-                .await
-            {
-                self.apply_event(DomainEvent::ConsistencyDirty {
-                    reason: format!(
-                        "module breakpoint rebound to {new_backend_number}, but old breakpoint {} could not be deleted: {error}",
-                        breakpoint.backend_number
-                    ),
-                })?;
-                return Err(error);
-            }
+            return Err(error);
         }
         Ok(())
     }
@@ -1919,6 +1994,15 @@ impl SessionWorker {
         if let DomainEvent::BreakpointDeleted { backend_number } = &event {
             self.pending_module_breakpoints.remove(backend_number);
         }
+        if let DomainEvent::BreakpointModified {
+            backend_number,
+            enabled,
+            ..
+        } = &event
+            && let Some(breakpoint) = self.pending_module_breakpoints.get_mut(backend_number)
+        {
+            breakpoint.enabled = *enabled;
+        }
         if !self.pending_module_breakpoints.is_empty()
             && matches!(
                 &event,
@@ -2215,6 +2299,17 @@ fn command_resumes_target(command: &MiCommand) -> bool {
             | "-exec-jump"
             | "-exec-return"
     )
+}
+
+fn command_starts_fresh_inferior(command: &MiCommand) -> bool {
+    command.name == "-exec-run"
+        || matches!(
+            command.arguments.as_slice(),
+            [MiArgument::Bare(interpreter), MiArgument::String(console_command)]
+                if command.name == "-interpreter-exec"
+                    && interpreter == "console"
+                    && console_command == b"starti"
+        )
 }
 
 fn resume_failed_definitively(result: &Result<CommandReply>, outcome_unknown: bool) -> bool {

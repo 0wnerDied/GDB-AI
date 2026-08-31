@@ -381,9 +381,7 @@ impl Gateway {
         if let (Some((module, offset)), Some(command)) = (pending_module, rebind_command) {
             let backend_number = inserted_breakpoint_number(&reply.record)?;
             let state = entry.handle.state();
-            if let Some(breakpoint) = state.breakpoints.get(&backend_number)
-                && breakpoint.pending
-            {
+            if let Some(breakpoint) = state.breakpoints.get(&backend_number) {
                 entry
                     .handle
                     .register_pending_module_breakpoint(PendingModuleBreakpoint {
