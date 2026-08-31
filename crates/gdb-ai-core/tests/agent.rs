@@ -106,8 +106,7 @@ async fn probe_and_experiment_capture_and_clean_up() {
             json!({
                 "program": executable,
                 "lease_id": lease_id,
-                "stop": "first_instruction",
-                "wait": {"until": "snapshot", "timeout_ms": 5000}
+                "stop": "first_instruction"
             }),
         ),
     )
@@ -155,8 +154,7 @@ async fn probe_and_experiment_capture_and_clean_up() {
             probe.revision,
             json!({
                 "lease_id": lease_id,
-                "stop": "first_instruction",
-                "wait": {"until": "snapshot", "timeout_ms": 5000}
+                "stop": "first_instruction"
             }),
         ),
     )

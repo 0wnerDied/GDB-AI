@@ -487,6 +487,11 @@ impl Gateway {
         if let Some(wait) = &parameters.wait {
             wait.validate()?;
         }
+        let wait = parameters.wait.unwrap_or_else(|| {
+            parameters
+                .stop
+                .default_wait(self.config.server.wait_timeout_ms)
+        });
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
         let aslr = parameters.aslr.clone();
@@ -587,7 +592,7 @@ impl Gateway {
                 origin: TargetOrigin::Local,
             })
             .await?;
-        let state = wait_if_requested(&entry.handle, parameters.wait, Some(&baseline)).await?;
+        let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
         Ok(json!({
             "command": reply,
@@ -800,10 +805,13 @@ impl Gateway {
                 }
             })
         });
+        let wait = parameters
+            .wait
+            .unwrap_or_else(|| start_policy.default_wait(self.config.server.wait_timeout_ms));
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
         let reply = entry.handle.command(start_policy.command()?).await?;
-        let state = wait_if_requested(&entry.handle, parameters.wait, Some(&baseline)).await?;
+        let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
         Ok(json!({
             "command": reply,
@@ -860,6 +868,21 @@ impl StartPolicy {
             Self::FirstInstruction => "first_instruction",
             Self::Main => "main",
             Self::None => "none",
+        }
+    }
+
+    fn default_wait(self, timeout_ms: u64) -> WaitSpec {
+        // 2026-08-31: Omitted launch and restart waits raced their async state
+        // updates. Return an observed run or complete stop; `accepted` remains
+        // the explicit non-blocking policy.
+        WaitSpec {
+            until: if matches!(self, Self::None) {
+                "running"
+            } else {
+                "snapshot"
+            }
+            .into(),
+            timeout_ms,
         }
     }
 }
@@ -1071,6 +1094,8 @@ mod tests {
             StartPolicy::None.command().unwrap().encoded(3),
             b"3-exec-run\n"
         );
+        assert_eq!(first.default_wait(123).until, "snapshot");
+        assert_eq!(StartPolicy::None.default_wait(123).until, "running");
     }
 
     #[test]
