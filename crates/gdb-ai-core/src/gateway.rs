@@ -904,7 +904,7 @@ impl Gateway {
     }
 
     fn bound_response(&self, request: &ApiRequest, response: &mut ApiResponse) {
-        remove_repeated_state(request.method, response);
+        remove_repeated_state(response);
         let Ok(serialized) = serde_json::to_vec(response) else {
             return;
         };
@@ -1001,21 +1001,18 @@ impl Gateway {
 // 2026-08-31: Identical state in the envelope and result doubled response
 // serialization, cache size, and artifact traffic. Remove only exact JSON
 // duplicates, retaining one complete copy and every operation-specific field.
-fn remove_repeated_state(method: crate::protocol::CanonicalMethod, response: &mut ApiResponse) {
+fn remove_repeated_state(response: &mut ApiResponse) {
     let Some(state) = response.state.as_ref() else {
         return;
     };
     let Some(result) = response.result.as_ref() else {
         return;
     };
+    // 2026-08-31: Removing an equal result.breakpoints registry broke the
+    // canonical breakpoint response contract. Deduplicate only complete state
+    // copies, not operation-specific result fields.
     let candidate = result.get("state").is_some()
-        || (result.get("session_id").is_some() && result.get("revision").is_some())
-        || (matches!(
-            method,
-            crate::protocol::CanonicalMethod::BreakpointCreate
-                | crate::protocol::CanonicalMethod::BreakpointUpdate
-                | crate::protocol::CanonicalMethod::BreakpointDelete
-        ) && result.get("breakpoints").is_some());
+        || (result.get("session_id").is_some() && result.get("revision").is_some());
     if !candidate {
         return;
     }
@@ -1031,15 +1028,6 @@ fn remove_repeated_state(method: crate::protocol::CanonicalMethod, response: &mu
     };
     if result.get("state") == Some(&state) {
         result.remove("state");
-    }
-    if matches!(
-        method,
-        crate::protocol::CanonicalMethod::BreakpointCreate
-            | crate::protocol::CanonicalMethod::BreakpointUpdate
-            | crate::protocol::CanonicalMethod::BreakpointDelete
-    ) && result.get("breakpoints") == state.get("breakpoints")
-    {
-        result.remove("breakpoints");
     }
 }
 
