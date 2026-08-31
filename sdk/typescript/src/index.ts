@@ -149,15 +149,52 @@ export class Session {
     method: string,
     parameters: Record<string, unknown> = {},
   ): Promise<ApiResponse<T>> {
-    const response = await this.client.call<T>(method, {
+    const managedLease = !Object.hasOwn(parameters, "lease_id");
+    const request: Record<string, unknown> = {
       lease_id: this.leaseId,
       ...parameters,
-    }, {
-      sessionId: this.sessionId,
-      expectedRevision: this.revision,
-    });
-    if (response.revision !== undefined) this.revision = response.revision;
-    return response;
+    };
+    if (
+      [
+        "session.close",
+        "inferior_io.write",
+        "inferior_io.close_stdin",
+        "inferior_io.send_eof",
+        "inferior_io.resize",
+      ].includes(method)
+      || method === "execution.control" && request.action === "interrupt"
+    ) {
+      request.accept_latest_revision ??= true;
+    }
+
+    let renewed = false;
+    for (;;) {
+      try {
+        const response = await this.client.call<T>(method, request, {
+          sessionId: this.sessionId,
+          expectedRevision: request.accept_latest_revision === true
+            ? undefined
+            : this.revision,
+        });
+        if (response.revision !== undefined) this.revision = response.revision;
+        return response;
+      } catch (error) {
+        if (error instanceof ApiError && error.response.revision !== undefined) {
+          this.revision = error.response.revision;
+        }
+        // 2026-08-31: Lease expiry rejects before the target effect. Renewing
+        // and retrying one managed call keeps coordination out of Agent turns.
+        if (
+          !(error instanceof ApiError)
+          || error.response.error?.code !== "WRITE_LEASE_EXPIRED"
+          || !managedLease
+          || renewed
+        ) throw error;
+        await this.renew();
+        request.lease_id = this.leaseId;
+        renewed = true;
+      }
+    }
   }
 
   async renew(): Promise<void> {

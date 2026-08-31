@@ -210,7 +210,13 @@ pub(super) async fn synchronize_breakpoint(
         .breakpoints
         .get(&backend_number)
         .map(|breakpoint| breakpoint.id.0.clone())
-        .unwrap_or_else(|| format!("bp_{}", backend_number.replace('.', "_")));
+        .unwrap_or_else(|| {
+            if state.session_id.uses_compact_handles() {
+                format!("b{}", backend_number.replace('.', "_"))
+            } else {
+                format!("bp_{}", backend_number.replace('.', "_"))
+            }
+        });
     let location_fields = MiResult::find(fields, "locations")
         .map(|locations| aggregate_items(locations, "location"))
         .unwrap_or_default();

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import assert from "node:assert/strict";
-import { Client, Session } from "./dist/index.js";
+import { ApiError, Client, Session } from "./dist/index.js";
 
 const requests = [];
 globalThis.fetch = async (url, init) => {
@@ -47,6 +47,46 @@ const fakeClient = {
 const session = await Session.create(fakeClient);
 await session.renew();
 assert.equal(calls.at(-1).options.expectedRevision, undefined);
+
+let killAttempts = 0;
+const retryCalls = [];
+const retryClient = {
+  async call(method, parameters, options) {
+    retryCalls.push({ method, parameters: { ...parameters }, options });
+    if (method === "session.create") {
+      return {
+        revision: 7,
+        result: {
+          session_id: "sess_retry",
+          write_lease: { lease_id: "lease_old" },
+        },
+      };
+    }
+    if (method === "target.kill" && killAttempts++ === 0) {
+      throw new ApiError({
+        revision: 8,
+        warnings: [],
+        truncated: false,
+        artifacts: [],
+        evidence: [],
+        error: { code: "WRITE_LEASE_EXPIRED", message: "expired", retryable: true },
+      });
+    }
+    if (method === "session.acquire_write_lease") {
+      return { revision: 9, result: { lease_id: "lease_new" } };
+    }
+    return { revision: 10, result: { killed: true } };
+  },
+};
+const retrySession = await Session.create(retryClient);
+await retrySession.call("target.kill");
+assert.deepEqual(retryCalls.slice(1).map(({ method }) => method), [
+  "target.kill",
+  "session.acquire_write_lease",
+  "target.kill",
+]);
+assert.equal(retryCalls.at(-1).parameters.lease_id, "lease_new");
+assert.equal(retryCalls.at(-1).options.expectedRevision, 9);
 await session.forceAbort();
 assert.equal(calls.at(-1).method, "session.force_abort");
 assert.deepEqual(calls.at(-1).parameters, {});

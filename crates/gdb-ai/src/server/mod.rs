@@ -8,7 +8,7 @@ use std::{
 };
 
 use gdb_ai_core::{
-    domain::SessionState,
+    domain::{Consistency, SessionState, TargetOrigin},
     gateway::{Caller, Gateway},
     protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod},
 };
@@ -87,23 +87,14 @@ impl RpcFault {
 
 // 2026-08-31: An accepted continue can precede the running notification, so
 // immediate PTY input must request a running-state fence instead of racing it.
-const AGENT_INSTRUCTIONS: &str = "Use tools/list schemas as authoritative. Start with \
-gdb_session create, retain session_id, lease_id, and the latest revision, then launch; \
-argv contains arguments only, not the program path. debug_control permits reads and \
-run control; inferior PTY input and exploit experiments require a server configured \
-for lab_mutation or an administrative caller selecting it. Renew an expired lease \
-with acquire_write_lease and accept_latest_revision=true, omitting expected_revision. \
-Read inferior output from stream=pty. Use each returned stop_id for stop-scoped \
-inspection; resuming invalidates old frames and values. For stripped PIEs, set \
-module-offset breakpoints with names shown by inspection mappings; a local \
-explicit-loader breakpoint rebinds when its executable mapping appears. Read large evidence through \
-gdbai:// resources. For fast exploit loops, launch with stop=none, write \
-byte-exact PTY input (line protocols need a trailing LF), then use gdb_run \
-action=wait without operation_id and wait.until=settled; start crash triage with \
-profile=brief. For PTY input immediately after continue, set wait.until=running \
-on that continue. If HTTP returns an operation_id after waiter timeout, query \
-it with gdb_session action=operation_status; use operation_cancel only when \
-the record reports ACTOR_SCOPED cancellation. Close the session when finished.";
+const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once, keep session_id, then launch; \
+argv excludes the program path. MCP manages leases and revisions. Returned stop_id scopes \
+inspection and expires on resume. For exploit loops use stop=none, byte-exact PTY input \
+(include required LF), then wait until settled; request running before PTY input after \
+continue. Reuse the session with restart, batch deterministic input, and prefer gdb_batch \
+or gdb_agent probe. Start crash triage with profile=brief. PTY mutation needs a server \
+configured for lab_mutation. Query a returned operation_id with operation_status. Close \
+the session when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {
@@ -326,9 +317,10 @@ async fn dispatch_rpc(
     method: &str,
     mut params: Value,
 ) -> Result<Value, RpcFault> {
-    if let Some((request, presentation)) =
+    if let Some((mut request, presentation)) =
         canonical_rpc_request(method, &mut params, advanced_tools, caller.admin, sequence)?
     {
+        prepare_canonical_request(gateway, caller, &mut request, presentation).await?;
         return present_canonical_response(gateway.dispatch(request, caller).await, presentation);
     }
     match method {
@@ -414,10 +406,11 @@ fn present_canonical_response(
 async fn admit_canonical_operation(
     gateway: Arc<Gateway>,
     caller: Caller,
-    request: ApiRequest,
+    mut request: ApiRequest,
     presentation: CanonicalPresentation,
     waiter_timeout: Option<Duration>,
 ) -> Result<(String, JoinHandle<Result<Value, RpcFault>>), RpcFault> {
+    prepare_canonical_request(&gateway, &caller, &mut request, presentation).await?;
     let ticket = gateway
         .admit_operation(request, caller.clone(), waiter_timeout)
         .await
@@ -445,7 +438,7 @@ async fn call_tool(
     sequence: &AtomicU64,
     mut params: Value,
 ) -> Result<Value, RpcFault> {
-    let Some((request, presentation)) = canonical_rpc_request(
+    let Some((mut request, presentation)) = canonical_rpc_request(
         "tools/call",
         &mut params,
         advanced_tools,
@@ -455,7 +448,23 @@ async fn call_tool(
     else {
         unreachable!("tools/call always maps to a canonical request")
     };
+    prepare_canonical_request(gateway, caller, &mut request, presentation).await?;
     present_canonical_response(gateway.dispatch(request, caller).await, presentation)
+}
+
+async fn prepare_canonical_request(
+    gateway: &Gateway,
+    caller: &Caller,
+    request: &mut ApiRequest,
+    presentation: CanonicalPresentation,
+) -> Result<(), RpcFault> {
+    if matches!(presentation, CanonicalPresentation::Tool(_)) {
+        gateway
+            .prepare_agent_request(request, caller)
+            .await
+            .map_err(|error| core_fault(format!("{:?}", error.code), error.message))?;
+    }
+    Ok(())
 }
 
 fn map_tool(
@@ -565,8 +574,8 @@ fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
 // unrelated to the operation. Detailed views remain available on demand.
 fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Value {
     let ApiResponse {
-        session_id,
-        revision,
+        session_id: _,
+        revision: _,
         mut state,
         mut result,
         warnings,
@@ -619,6 +628,13 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
             }
         }
         match method {
+            CanonicalMethod::SessionCreate => {
+                // 2026-08-31: Session creation repeated the hidden lease,
+                // complete capabilities, backend PTY, and initial state before
+                // the Agent had a target. Keep only launch-relevant identity.
+                result.retain(|field, _| matches!(field.as_str(), "session_id" | "profile"));
+                state = None;
+            }
             CanonicalMethod::BreakpointCreate | CanonicalMethod::BreakpointUpdate
                 if result.get("breakpoint").is_some_and(Value::is_object) =>
             {
@@ -646,12 +662,8 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         }
     }
     let mut compact = Map::new();
-    if let Some(session_id) = session_id {
-        compact.insert("session_id".into(), Value::String(session_id));
-    }
-    if let Some(revision) = revision {
-        compact.insert("revision".into(), Value::from(revision));
-    }
+    // 2026-08-31: MCP owns session routing and revisions. Echoing both after
+    // every call consumed context without changing the next debugging action.
     if let Some(state) = state.as_ref() {
         compact.insert(
             "state".into(),
@@ -695,14 +707,36 @@ fn is_command_reply(value: &Value) -> bool {
 fn session_coordination_state(state: &SessionState) -> Value {
     let mut summary = json!({
         "lifecycle": state.lifecycle,
-        "backend": state.backend,
-        "consistency": state.consistency,
-        "reconciliation_required": state.reconciliation_required,
-        "event_seq": state.event_seq,
-        "execution_epoch": state.execution_epoch,
-        "target_origin": state.target_origin
+        "backend": state.backend
     });
     let summary = summary.as_object_mut().unwrap();
+    if state.consistency != Consistency::Clean {
+        summary.insert("consistency".into(), json!(state.consistency));
+    }
+    if state.reconciliation_required {
+        summary.insert("reconciliation_required".into(), Value::Bool(true));
+    }
+    if state.target_origin != TargetOrigin::Unknown {
+        summary.insert("target_origin".into(), json!(state.target_origin));
+    }
+    let inferior = state
+        .stopped_inferior_id
+        .as_ref()
+        .and_then(|id| state.inferiors.values().find(|inferior| &inferior.id == id))
+        .or_else(|| {
+            (state.inferiors.len() == 1)
+                .then(|| state.inferiors.values().next())
+                .flatten()
+        });
+    if let Some(inferior) = inferior {
+        summary.insert("status".into(), json!(inferior.status));
+        if let Some(pid) = inferior.pid {
+            summary.insert("pid".into(), Value::from(pid));
+        }
+        if let Some(exit_code) = &inferior.exit_code {
+            summary.insert("exit_code".into(), Value::String(exit_code.clone()));
+        }
+    }
     if !state.outcome_unknown_tokens.is_empty() {
         summary.insert(
             "outcome_unknown_tokens".into(),

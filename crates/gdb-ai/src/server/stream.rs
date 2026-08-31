@@ -500,11 +500,7 @@ mod tests {
         .unwrap();
         assert_eq!(created["isError"], false, "{created}");
         let response = &created["structuredContent"];
-        let session_id = response["session_id"].as_str().unwrap();
-        let revision = response["revision"].as_u64().unwrap();
-        let lease_id = response["result"]["write_lease"]["lease_id"]
-            .as_str()
-            .unwrap();
+        let session_id = response["result"]["session_id"].as_str().unwrap();
         let invalid = call_tool(
             &gateway,
             &caller,
@@ -515,8 +511,6 @@ mod tests {
                 "arguments": {
                     "action": "console",
                     "session_id": session_id,
-                    "expected_revision": revision,
-                    "lease_id": lease_id,
                     "command": "show language",
                     "timeout_ms": 0
                 }
@@ -525,11 +519,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(invalid["isError"], true);
-        assert_eq!(
-            invalid["structuredContent"]["state"]["consistency"],
-            "CLEAN"
-        );
-        assert_eq!(invalid["structuredContent"]["revision"], revision);
+        assert!(invalid["structuredContent"].get("revision").is_none());
+        assert!(invalid["structuredContent"].get("session_id").is_none());
         let raw = call_tool(
             &gateway,
             &caller,
@@ -540,8 +531,6 @@ mod tests {
                 "arguments": {
                     "action": "console",
                     "session_id": session_id,
-                    "expected_revision": revision,
-                    "lease_id": lease_id,
                     "command": "show language"
                 }
             }),
@@ -550,9 +539,10 @@ mod tests {
         .unwrap();
         assert_eq!(raw["isError"], false);
         assert_eq!(raw["structuredContent"]["state"]["consistency"], "TAINTED");
-        assert_eq!(
-            raw["structuredContent"]["state"]["reconciliation_required"],
-            false
+        assert!(
+            raw["structuredContent"]["state"]
+                .get("reconciliation_required")
+                .is_none()
         );
         let console = call_tool(
             &gateway,
@@ -577,7 +567,6 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains("source language"))
         );
-        let revision = raw["structuredContent"]["revision"].as_u64().unwrap();
         let denied = call_tool(
             &gateway,
             &caller,
@@ -588,8 +577,6 @@ mod tests {
                 "arguments": {
                     "action": "mi",
                     "session_id": session_id,
-                    "expected_revision": revision,
-                    "lease_id": lease_id,
                     "command": "-target-select",
                     "arguments": ["remote", "203.0.113.1:1"]
                 }
@@ -611,9 +598,7 @@ mod tests {
                 "name": "gdb_session",
                 "arguments": {
                     "action": "close",
-                    "session_id": session_id,
-                    "expected_revision": revision,
-                    "lease_id": lease_id
+                    "session_id": session_id
                 }
             }),
         )

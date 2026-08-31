@@ -336,14 +336,23 @@ impl StateReducer {
                     .get(backend_number)
                     .map(|breakpoint| breakpoint.id.clone())
                     .unwrap_or_else(|| {
-                        // 2026-08-28: GDB reuses deleted breakpoint numbers.
-                        // Include journal generation so public IDs never alias.
-                        BreakpointId(format!(
-                            "bp_{}_{}_{}",
-                            self.state.session_id.0,
-                            self.state.event_seq,
-                            backend_number.replace('.', "_")
-                        ))
+                        // 2026-08-31: GDB reuses deleted breakpoint numbers.
+                        // The session event sequence prevents aliases without
+                        // repeating the already-scoped session ID.
+                        if self.state.session_id.uses_compact_handles() {
+                            BreakpointId(format!(
+                                "b{}_{}",
+                                self.state.event_seq,
+                                backend_number.replace('.', "_")
+                            ))
+                        } else {
+                            BreakpointId(format!(
+                                "bp_{}_{}_{}",
+                                self.state.session_id.0,
+                                self.state.event_seq,
+                                backend_number.replace('.', "_")
+                            ))
+                        }
                     });
                 let locations = self
                     .state

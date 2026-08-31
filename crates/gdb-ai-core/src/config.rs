@@ -217,7 +217,9 @@ impl Default for ServerConfig {
             http_session_idle_ms: 15 * 60 * 1_000,
             command_timeout_ms: 15_000,
             wait_timeout_ms: 5_000,
-            write_lease_ms: 30_000,
+            // 2026-08-31: A 30-second lease expired during normal Agent
+            // reasoning. Five minutes still bounds abandoned controllers.
+            write_lease_ms: 5 * 60 * 1_000,
             unix_socket: None,
             requests_per_second: 100,
             request_burst: 200,

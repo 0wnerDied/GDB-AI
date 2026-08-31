@@ -1,9 +1,6 @@
 use std::collections::BTreeSet;
 
-use gdb_ai_core::{
-    policy::{Effect, effect_for_method},
-    protocol::CanonicalMethod,
-};
+use gdb_ai_core::protocol::CanonicalMethod;
 use serde_json::{Value, json};
 
 pub(crate) const DEFAULT_MCP_IO_READ_BYTES: u64 = 4 * 1024;
@@ -58,8 +55,6 @@ const SESSION_ACTIONS: &[ToolAction] = &[
     action!("list", SessionList),
     action!("capabilities", SessionCapabilities),
     action!("providers", SessionProviders),
-    action!("acquire_write_lease", SessionAcquireWriteLease),
-    action!("release_write_lease", SessionReleaseWriteLease),
     action!("attempt_recovery", SessionAttemptRecovery),
     action!("operation_status", OperationGet),
     action!("operation_cancel", OperationCancel),
@@ -399,7 +394,6 @@ fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
 // Project transport metadata around the same per-method parameter schema.
 fn projected_method_schema(method: CanonicalMethod) -> Value {
     let mut schema = method.parameter_schema();
-    let effect = effect_for_method(method);
     let mut required = schema["required"]
         .as_array()
         .unwrap()
@@ -408,34 +402,22 @@ fn projected_method_schema(method: CanonicalMethod) -> Value {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let properties = schema["properties"].as_object_mut().unwrap();
-    // 2026-08-30: Read operations repeated mutation and target-cancellation
-    // controls in every MCP schema branch. The transport safely detaches a
-    // cancelled read waiter by default, so advertise controls only where the
-    // Gateway or target can act on them.
-    if effect == Effect::Read {
-        properties.remove("accept_latest_revision");
-        properties.remove("lease_id");
+    // 2026-08-31: Lease, revision, retry, and cancellation bookkeeping made
+    // Agents parse and repeat transport state on every debugging turn. MCP
+    // owns those fields; stop_id remains visible because it carries target
+    // semantics and prevents inspection of the wrong stop.
+    for field in [
+        "accept_latest_revision",
+        "lease_id",
+        "expected_revision",
+        "idempotency_key",
+        "cancel_mode",
+    ] {
+        properties.remove(field);
     }
     if method.requires_session() {
         properties.insert("session_id".into(), json!({"type": "string"}));
         required.insert("session_id".into());
-    }
-    if effect != Effect::Read {
-        properties.insert(
-            "expected_revision".into(),
-            json!({"type": "integer", "minimum": 0}),
-        );
-        properties.insert(
-            "idempotency_key".into(),
-            json!({"type": "string", "maxLength": 256}),
-        );
-        properties.insert(
-            "cancel_mode".into(),
-            json!({
-                "type": "string",
-                "enum": ["detach_waiter", "interrupt_target", "close_session"]
-            }),
-        );
     }
     if method == CanonicalMethod::InferiorIoRead {
         schema["properties"]["max_bytes"]["default"] = Value::from(DEFAULT_MCP_IO_READ_BYTES);
@@ -546,6 +528,7 @@ mod tests {
         );
         assert!(method_for_tool("gdb_io", Some("close_stdin"), true, false).is_none());
         assert!(method_for_tool("gdb_agent", Some("experiment"), true, false).is_none());
+        assert!(method_for_tool("gdb_session", Some("acquire_write_lease"), true, false).is_none());
     }
 
     #[test]
@@ -574,17 +557,19 @@ mod tests {
                 .count(),
             1
         );
-        assert!(serde_json::to_vec(&tools).unwrap().len() < 22_000);
+        assert!(serde_json::to_vec(&tools).unwrap().len() < 14_000);
+        assert!(
+            serde_json::to_vec(&super::tools(true, false))
+                .unwrap()
+                .len()
+                < 29_000
+        );
     }
 
     #[test]
-    fn omits_inert_coordination_fields_from_read_tools() {
+    fn omits_transport_coordination_from_agent_tools() {
         let tools = tools(false, false);
-        let evaluate = tools
-            .iter()
-            .find(|tool| tool["name"] == "gdb_evaluate")
-            .unwrap();
-        let properties = evaluate["inputSchema"]["properties"].as_object().unwrap();
+        let encoded = serde_json::to_string(&tools).unwrap();
         for field in [
             "accept_latest_revision",
             "lease_id",
@@ -592,7 +577,8 @@ mod tests {
             "idempotency_key",
             "cancel_mode",
         ] {
-            assert!(!properties.contains_key(field));
+            assert!(!encoded.contains(&format!("\"{field}\"")));
         }
+        assert!(encoded.contains("\"stop_id\""));
     }
 }

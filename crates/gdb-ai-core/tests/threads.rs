@@ -176,7 +176,7 @@ async fn frame_handles_select_their_owning_thread() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(frame.starts_with(&format!("frm_{stopped_thread}_")));
+    assert!(frame.starts_with(&format!("f{stopped_thread}_")));
 
     let other_thread = state
         .inferiors
@@ -265,7 +265,7 @@ async fn frame_handles_select_their_owning_thread() {
         probe_frame["frame_id"]
             .as_str()
             .unwrap()
-            .starts_with(&format!("frm_{probe_thread}_"))
+            .starts_with(&format!("f{probe_thread}_"))
     );
 
     successful(

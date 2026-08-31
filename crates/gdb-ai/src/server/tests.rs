@@ -28,18 +28,17 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "tools/list",
         "argv",
         "lab_mutation",
-        "accept_latest_revision",
-        "stream=pty",
+        "MCP manages leases and revisions",
         "stop_id",
-        "inspection mappings",
-        "trailing LF",
-        "without operation_id",
-        "wait.until=settled",
-        "wait.until=running",
+        "byte-exact PTY",
+        "wait until settled",
+        "restart",
+        "gdb_batch",
         "profile=brief",
     ] {
         assert!(instructions.contains(required), "missing {required}");
     }
+    assert!(instructions.len() < 700);
 }
 
 #[test]
@@ -188,6 +187,63 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     assert!(!valid_request_id(&Value::String("x".repeat(129))));
 }
 
+#[tokio::test]
+async fn projected_tools_hide_and_recover_mutation_coordination() {
+    if std::process::Command::new("gdb")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.server.write_lease_ms = 1;
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("projected-coordination-test");
+    let sequence = AtomicU64::new(1);
+    let created = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({"name": "gdb_session", "arguments": {"action": "create"}}),
+    )
+    .await
+    .unwrap();
+    let result = created["structuredContent"]["result"].as_object().unwrap();
+    assert_eq!(result.len(), 2);
+    assert!(result.get("write_lease").is_none());
+    let session_id = result["session_id"].as_str().unwrap();
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let closed = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({
+            "name": "gdb_session",
+            "arguments": {"action": "close", "session_id": session_id}
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed["isError"], false);
+    assert!(closed["structuredContent"].get("revision").is_none());
+    assert!(closed["structuredContent"].get("session_id").is_none());
+    gateway.shutdown().await;
+}
+
 #[test]
 fn tool_results_preserve_requested_state_and_compact_repeated_state() {
     let mut state = SessionState::creating(SessionId::parse("sess_test").unwrap());
@@ -277,7 +333,7 @@ fn tool_results_preserve_requested_state_and_compact_repeated_state() {
         ApiResponse::success(&request, None, serde_json::to_value(&state).unwrap()),
         CanonicalMethod::SessionGet,
     );
-    assert_eq!(historical["structuredContent"]["session_id"], "sess_test");
+    assert!(historical["structuredContent"].get("session_id").is_none());
     assert_eq!(historical["structuredContent"]["result"]["revision"], 7);
     assert_eq!(
         historical["structuredContent"]["result"]["breakpoints"]
@@ -481,7 +537,7 @@ fn execution_wait_preserves_a_distinct_matched_state() {
 
     let result = tool_result(response, CanonicalMethod::ExecutionWait);
 
-    assert_eq!(result["structuredContent"]["revision"], 8);
+    assert!(result["structuredContent"].get("revision").is_none());
     assert_eq!(
         result["structuredContent"]["result"]["state"]["revision"],
         7

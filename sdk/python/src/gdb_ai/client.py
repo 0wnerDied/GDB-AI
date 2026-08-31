@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Dependency-free HTTP client for the canonical GDB/AI API."""
+"""Dependency-free HTTP client for canonical and projected GDB/AI calls."""
 
 from __future__ import annotations
 
@@ -12,9 +12,10 @@ MCP_VERSION = "2025-11-25"
 
 
 class ApiError(RuntimeError):
-    def __init__(self, error: dict[str, Any]) -> None:
+    def __init__(self, error: dict[str, Any], response: dict[str, Any] | None = None) -> None:
         self.code = str(error.get("code", "INTERNAL"))
         self.details = error.get("details")
+        self.response = response or {}
         super().__init__(f"{self.code}: {error.get('message', 'request failed')}")
 
 
@@ -90,8 +91,28 @@ class Client:
         }
         result, _ = self._request("gdb.ai/call", envelope)
         if result.get("error"):
-            raise ApiError(result["error"])
+            # 2026-08-31: Discarding the failed envelope also discarded its
+            # current revision, so clients reacquired a lease merely to learn
+            # state the server had already returned.
+            raise ApiError(result["error"], result)
         return result
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        result, _ = self._request("tools/list", {})
+        return result["tools"]
+
+    def call_tool(
+        self, name: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result, _ = self._request(
+            "tools/call", {"name": name, "arguments": arguments or {}}
+        )
+        structured = result.get("structuredContent")
+        if not isinstance(structured, dict):
+            raise RuntimeError("tool returned no structuredContent")
+        if structured.get("error"):
+            raise ApiError(structured["error"], structured)
+        return structured
 
     def _request(
         self,
@@ -165,13 +186,39 @@ class Session:
 
     def call(self, method: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:
         parameters = dict(parameters or {})
-        parameters.setdefault("lease_id", self.lease_id)
-        response = self.client.call(
-            method,
-            parameters,
-            session_id=self.session_id,
-            expected_revision=self.revision,
-        )
+        managed_lease = "lease_id" not in parameters
+        if managed_lease:
+            parameters["lease_id"] = self.lease_id
+        if method in {
+            "session.close",
+            "inferior_io.write",
+            "inferior_io.close_stdin",
+            "inferior_io.send_eof",
+            "inferior_io.resize",
+        } or method == "execution.control" and parameters.get("action") == "interrupt":
+            parameters.setdefault("accept_latest_revision", True)
+
+        renewed = False
+        while True:
+            accept_latest = parameters.get("accept_latest_revision") is True
+            try:
+                response = self.client.call(
+                    method,
+                    parameters,
+                    session_id=self.session_id,
+                    expected_revision=None if accept_latest else self.revision,
+                )
+                break
+            except ApiError as error:
+                if error.response.get("revision") is not None:
+                    self.revision = error.response["revision"]
+                # 2026-08-31: An expired lease rejects the mutation before its
+                # target effect. Renew and retry that one managed request once.
+                if error.code != "WRITE_LEASE_EXPIRED" or not managed_lease or renewed:
+                    raise
+                self.renew()
+                parameters["lease_id"] = self.lease_id
+                renewed = True
         if response.get("revision") is not None:
             self.revision = response["revision"]
         return response

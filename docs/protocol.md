@@ -7,6 +7,9 @@ which target matrices have actually run. Requests carry a request ID,
 optional session ID, method, expected revision, idempotency key, and
 parameters. Mutations require the current revision and write lease.
 Stop-sensitive reads require the current `stop_id`.
+Projected MCP tools manage revisions, write leases, retry metadata, and waiter
+cancellation outside their Agent-visible schemas. Stop-scoped operations still
+require `stop_id`; the canonical API keeps all coordination fields explicit.
 
 Session recovery authority is separate from a business write lease. The owner
 or an administrator may call `session.attempt_recovery` or

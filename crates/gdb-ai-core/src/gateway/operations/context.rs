@@ -217,8 +217,13 @@ pub(super) fn context_options(
             .values()
             .flat_map(|inferior| inferior.threads.values())
             .find_map(|thread| {
+                let prefix = if thread.id.0.starts_with("thr_") || stop.0.starts_with("stop_") {
+                    format!("frm_{}_{}_", thread.id.0, stop.0)
+                } else {
+                    format!("f{}_{}_", thread.id.0, stop.0)
+                };
                 frame
-                    .strip_prefix(&format!("frm_{}_{}_", thread.id.0, stop.0))
+                    .strip_prefix(&prefix)
                     .and_then(|level| level.parse::<u64>().ok())
                     .map(|level| (thread.backend_id.clone(), level))
             })

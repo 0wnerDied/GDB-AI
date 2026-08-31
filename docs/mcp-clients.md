@@ -158,20 +158,23 @@ gdb_disassemble   gdb_io           gdb_events
 ```
 
 The initialization response also teaches the Agent the stateful workflow:
-create a session, retain its lease and revision, launch a target, use the
-current `stop_id` for inspection, and close the session when finished.
+create a session, retain its `session_id`, launch a target, use the current
+`stop_id` for inspection, reuse the session across attempts, and close it when
+finished.
 
 ## Fast exploit loop
 
 For the shortest reliable local crash-or-exit loop:
 
-1. Create a session and retain its `session_id`, `lease_id`, and revision.
+1. Create a session and retain its `session_id`.
 2. Launch with `stop: "none"`; an omitted launch wait returns after the
    inferior is observed running.
 3. Write byte-exact input with `gdb_io`. Include the trailing LF required by a
    line-oriented target.
 4. Call `gdb_run` action `wait` without an `operation_id`, using
    `wait: {"until": "settled"}`.
+5. Use `gdb_session` action `restart` for the next attempt instead of creating
+   another session. Batch deterministic commands into one PTY write.
 
 The result reports `settled_by: "stopped"` with the crash `stop_id` and frame,
 or `settled_by: "exited"` after normal termination. Start bounded crash
@@ -180,6 +183,9 @@ already-stopped inferior must receive PTY input immediately after continue,
 put `wait: {"until": "running"}` on that continue request. An MCP `gdb_io`
 read with no `max_bytes` returns at most 4096 bytes; request a larger bound only
 when the additional output is needed.
+Projected tools do not expose lease or revision fields. Pass the returned
+`stop_id` wherever the schema requires it; the server rejects stale target
+context while handling transport coordination itself.
 
 Advanced targets, mutations, variable objects, probes, and kernel operations
 appear only when the server is started with `--advanced-tools`. Raw GDB access

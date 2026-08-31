@@ -792,14 +792,15 @@ impl Gateway {
             .ok_or_else(|| {
                 Error::new(ErrorCode::WriteLeaseRequired, "mutation requires lease_id")
             })?;
-        let lease = entry.lease.lock().await;
-        let lease = lease.as_ref().ok_or_else(|| {
+        let now = now_unix_ms();
+        let mut lease = entry.lease.lock().await;
+        let lease = lease.as_mut().ok_or_else(|| {
             Error::new(
                 ErrorCode::WriteLeaseRequired,
                 "session has no active write lease",
             )
         })?;
-        if lease.is_expired(now_unix_ms()) {
+        if lease.is_expired(now) {
             return Err(Error::new(
                 ErrorCode::WriteLeaseExpired,
                 "write lease has expired",
@@ -811,6 +812,68 @@ impl Gateway {
                 "write lease does not belong to this caller",
             ));
         }
+        let lease_ms = self.config.server.write_lease_ms.max(1);
+        if lease.expires_at_unix_ms.saturating_sub(now) <= lease_ms / 2 {
+            // 2026-08-31: Fixed-expiry leases forced active Agents to acquire
+            // a new controller token throughout long exploit loops. Refresh
+            // only near half-life so abandoned controllers still expire and
+            // active mutations do not add a persistence write each time.
+            lease.expires_at_unix_ms = now.saturating_add(lease_ms);
+            self.store.upsert_lease(lease)?;
+        }
+        Ok(())
+    }
+
+    pub async fn prepare_agent_request(
+        &self,
+        request: &mut ApiRequest,
+        caller: &Caller,
+    ) -> Result<()> {
+        if effect_for_method(request.method) == Effect::Read || !request.method.requires_session() {
+            return Ok(());
+        }
+        request.expected_revision = None;
+        let parameters = request.parameters.as_object_mut().ok_or_else(|| {
+            Error::new(ErrorCode::InvalidArgument, "parameters must be an object")
+        })?;
+        parameters.insert("accept_latest_revision".into(), Value::Bool(true));
+        if matches!(
+            request.method,
+            crate::protocol::CanonicalMethod::SessionForceAbort
+                | crate::protocol::CanonicalMethod::SessionAttemptRecovery
+                | crate::protocol::CanonicalMethod::SessionAcquireWriteLease
+        ) {
+            return Ok(());
+        }
+
+        let session_id = request
+            .session_id
+            .as_deref()
+            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "method requires session_id"))?;
+        let entry = self.entry(session_id).await?;
+        let now = now_unix_ms();
+        let mut lease = entry.lease.lock().await;
+        let lease = lease.as_mut().ok_or_else(|| {
+            Error::new(
+                ErrorCode::WriteLeaseRequired,
+                "session has no active write lease",
+            )
+        })?;
+        if lease.owner != caller.identity {
+            return Err(Error::new(
+                ErrorCode::WriteLeaseRequired,
+                "another Agent controls this session",
+            ));
+        }
+        if lease.is_expired(now) {
+            // 2026-08-31: Exposing transport lease expiry made Agents spend
+            // context on coordination unrelated to debugging. The projected
+            // interface revives its own controller while core mutations still
+            // serialize and stop-scoped handles still reject stale context.
+            lease.expires_at_unix_ms = now.saturating_add(self.config.server.write_lease_ms.max(1));
+            self.store.upsert_lease(lease)?;
+        }
+        parameters.insert("lease_id".into(), Value::String(lease.lease_id.0.clone()));
         Ok(())
     }
 

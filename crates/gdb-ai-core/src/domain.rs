@@ -8,6 +8,13 @@ use ulid::Ulid;
 
 use crate::{Error, ErrorCode, Result};
 
+fn short_ulid() -> String {
+    // 2026-08-31: Full ULIDs were repeated through nested Agent handles.
+    // Their final 16 characters retain all 80 random bits, which is enough
+    // for process-generated IDs without spending tokens on the timestamp.
+    Ulid::new().to_string()[10..].to_owned()
+}
+
 macro_rules! public_id {
     ($name:ident, $prefix:literal) => {
         #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -16,7 +23,7 @@ macro_rules! public_id {
 
         impl $name {
             pub fn new() -> Self {
-                Self(format!(concat!($prefix, "_{}"), Ulid::new()))
+                Self(format!(concat!($prefix, "_{}"), short_ulid()))
             }
 
             pub fn parse(value: impl Into<String>) -> Result<Self> {
@@ -67,7 +74,10 @@ pub struct ValueId(pub String);
 
 impl ValueId {
     pub fn for_stop(stop_id: &StopId) -> Self {
-        Self(format!("val_{stop_id}_{}", Ulid::new()))
+        // 2026-08-31: Values only need the short session-local stop handle to
+        // preserve stale-context errors; embedding the session again wasted
+        // tokens every time an Agent referenced the value.
+        Self(format!("v{stop_id}_{}", short_ulid()))
     }
 }
 
@@ -165,7 +175,14 @@ pub struct StopId(pub String);
 
 impl StopId {
     pub fn from_event(session: &SessionId, event_seq: u64) -> Self {
-        Self(format!("stop_{}_{event_seq}", session.0))
+        // 2026-08-31: Context handles embedded the 31-byte session ID even
+        // though every lookup is already session-scoped. Event sequence is
+        // unique in that scope and preserves exact stale-stop rejection.
+        if session.uses_compact_handles() {
+            Self(format!("s{event_seq}"))
+        } else {
+            Self(format!("stop_{}_{event_seq}", session.0))
+        }
     }
 }
 
@@ -181,12 +198,16 @@ pub struct InferiorId(pub String);
 
 impl InferiorId {
     pub fn from_backend(session: &SessionId, generation: u64, backend_id: &str) -> Self {
-        Self(format!(
-            "inf_{}_{}_{}",
-            session.0,
-            generation,
-            safe_component(backend_id)
-        ))
+        if session.uses_compact_handles() {
+            Self(format!("i{generation}_{}", safe_component(backend_id)))
+        } else {
+            Self(format!(
+                "inf_{}_{}_{}",
+                session.0,
+                generation,
+                safe_component(backend_id)
+            ))
+        }
     }
 }
 
@@ -199,12 +220,19 @@ impl ThreadId {
     // after exit alias the old public handle. Callers pass the thread's
     // creation event sequence and retain that ID until the thread exits.
     pub fn from_backend(inferior: &InferiorId, creation_generation: u64, backend_id: &str) -> Self {
-        Self(format!(
-            "thr_{}_{}_{}",
-            inferior.0,
-            creation_generation,
-            safe_component(backend_id)
-        ))
+        if inferior.0.starts_with("inf_") {
+            Self(format!(
+                "thr_{}_{}_{}",
+                inferior.0,
+                creation_generation,
+                safe_component(backend_id)
+            ))
+        } else {
+            Self(format!(
+                "t{creation_generation}_{}",
+                safe_component(backend_id)
+            ))
+        }
     }
 }
 
@@ -214,7 +242,19 @@ pub struct FrameId(pub String);
 
 impl FrameId {
     pub fn new(thread: &ThreadId, stop: &StopId, level: u32) -> Self {
-        Self(format!("frm_{}_{}_{}", thread.0, stop.0, level))
+        if thread.0.starts_with("thr_") || stop.0.starts_with("stop_") {
+            Self(format!("frm_{}_{}_{}", thread.0, stop.0, level))
+        } else {
+            Self(format!("f{}_{}_{}", thread.0, stop.0, level))
+        }
+    }
+}
+
+impl SessionId {
+    pub(crate) fn uses_compact_handles(&self) -> bool {
+        self.0
+            .strip_prefix("sess_")
+            .is_some_and(|suffix| suffix.len() == 16)
     }
 }
 
@@ -761,5 +801,20 @@ mod tests {
         assert!(Address::parse("127").is_err());
         assert!(Address::parse("0x10000000000000000").is_err());
         assert!(SessionId::parse("sess_../../journal.jsonl").is_err());
+    }
+
+    #[test]
+    fn context_handles_are_short_and_session_scoped() {
+        let session = SessionId::parse("sess_0123456789ABCDEF").unwrap();
+        let stop = StopId::from_event(&session, 42);
+        let inferior = InferiorId::from_backend(&session, 3, "1");
+        let thread = ThreadId::from_backend(&inferior, 44, "2");
+        assert_eq!(stop.0, "s42");
+        assert_eq!(inferior.0, "i3_1");
+        assert_eq!(thread.0, "t44_2");
+        assert_eq!(FrameId::new(&thread, &stop, 0).0, "ft44_2_s42_0");
+
+        let legacy = SessionId::parse("sess_test").unwrap();
+        assert_eq!(StopId::from_event(&legacy, 42).0, "stop_sess_test_42");
     }
 }

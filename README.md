@@ -207,13 +207,13 @@ projects only the stop-attributed bounded probe; experiment and hypothesis
 aliases remain canonical-only. `gdb_raw` is registered separately only with
 `--raw-admin`.
 
-Mutations require both the exact current `expected_revision` and `lease_id`,
-or an explicit `accept_latest_revision` where permitted. `session.create`
-returns the first expiring lease. Renew it with
-`session.acquire_write_lease`. Starting execution invalidates every previous
-frame and value handle. If a lease expires while consistency is unknown or
-lost, the owner can reacquire it, attempt recovery, or use `gdb_session`
-action `force_abort` to terminate resources without claiming a clean shutdown.
+Canonical mutations require the current revision and write lease. Valid owner
+mutations refresh the lease near half-life. Projected MCP tools keep that
+transport coordination server-side: Agents send the `session_id` and any
+schema-required `stop_id`, but no lease or revision. Starting execution
+invalidates previous frame and value handles. If consistency is unknown or
+lost, the owner can attempt recovery or use `gdb_session` action `force_abort`
+to terminate resources without claiming a clean shutdown.
 
 ## Configuration and SDKs
 
@@ -225,6 +225,9 @@ See [gdb-ai.example.toml](gdb-ai.example.toml) and the hardened distribution
 sample in [packaging/distro/gdb-ai.toml](packaging/distro/gdb-ai.toml).
 Python and TypeScript clients live under [sdk](sdk). Static protocol schemas
 and their SHA-256 hashes live under [schemas](schemas).
+Python Agents can use `Client.call_tool` for the compact projected MCP result.
+Python and TypeScript `Session` clients keep revisions from failed responses
+and renew then retry once when a managed lease expires before a mutation.
 
 The optional extension at [gdb-extension/gdb_ai.py](gdb-extension/gdb_ai.py)
 must be configured with an absolute path and its exact SHA-256 digest. It is

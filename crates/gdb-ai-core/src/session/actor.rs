@@ -821,7 +821,7 @@ impl SessionWorker {
             WorkerRequest::GetValue { value_id, response } => {
                 let result = self.values.get(&value_id).cloned().ok_or_else(|| {
                     let current = self.reducer.state().stop_id.as_ref();
-                    if value_id.starts_with("val_stop_")
+                    if value_id.starts_with('v')
                         && current.is_none_or(|stop| !value_id.contains(&stop.0))
                     {
                         Error::new(

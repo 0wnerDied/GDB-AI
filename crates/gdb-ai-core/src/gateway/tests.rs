@@ -118,6 +118,94 @@ async fn expired_lease_keeps_owner_cleanup_reachable() {
 }
 
 #[tokio::test]
+async fn active_owner_mutation_refreshes_lease_near_half_life() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.server.write_lease_ms = 10_000;
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("lease-refresh-test");
+    let created = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "create-refresh-test".into(),
+                session_id: None,
+                method: crate::protocol::CanonicalMethod::SessionCreate,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    let session_id = created.session_id.unwrap();
+    let entry = gateway.entry(&session_id).await.unwrap();
+    let shortened_expiry = now_unix_ms().saturating_add(1_000);
+    let lease_id = {
+        let mut lease = entry.lease.lock().await;
+        let lease = lease.as_mut().unwrap();
+        lease.expires_at_unix_ms = shortened_expiry;
+        lease.lease_id.0.clone()
+    };
+    let state = entry.handle.state();
+    gateway
+        .require_mutation_preconditions(
+            &ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "refresh-test".into(),
+                session_id: Some(session_id.clone()),
+                method: crate::protocol::CanonicalMethod::SessionClose,
+                expected_revision: Some(state.revision),
+                idempotency_key: None,
+                parameters: json!({"lease_id": lease_id}),
+            },
+            &caller,
+            &entry,
+            &state,
+        )
+        .await
+        .unwrap();
+    assert!(
+        entry
+            .lease
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .expires_at_unix_ms
+            > shortened_expiry
+    );
+
+    let aborted = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "abort-refresh-test".into(),
+                session_id: Some(session_id),
+                method: crate::protocol::CanonicalMethod::SessionForceAbort,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    assert!(aborted.error.is_none(), "{:?}", aborted.error);
+}
+
+#[tokio::test]
 async fn lost_session_recovery_does_not_require_a_business_lease() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;

@@ -10,23 +10,21 @@ Without an explicit config, persistent state lives under
 without either variable should configure absolute artifact, SQLite, and
 session paths instead of relying on the process-scoped temporary fallback.
 
-Every session returns an expiring write lease. Renew it with
-`session.acquire_write_lease`; expiration never interrupts a running target.
-Normal mutations and clean close still require that lease. If consistency is
-lost or the lease expires, the session owner or an administrator can reacquire
-the lease, call `session.attempt_recovery`, or use `gdb_session` action
-`force_abort`. Forced abort terminates session resources without claiming a
-clean debugger shutdown.
+The canonical API returns an expiring write lease. A valid owner mutation
+refreshes it near half-life; after inactivity, renew it with
+`session.acquire_write_lease`. Projected MCP tools manage this internally.
+Expiration never interrupts a running target. If consistency is lost, the
+session owner can attempt recovery or use `gdb_session` action `force_abort`.
+Forced abort terminates resources without claiming a clean debugger shutdown.
 An HTTP waiter timeout returns `operation_id` in the error data. Query it with
 `gdb_session` action `operation_status`; the returned canonical record contains
 the eventual response or an explicit `OUTCOME_UNKNOWN` state. A waiter timeout
 never means the operation stopped or the inferior exited.
 
-MCP cancellation defaults to `cancel_mode: "detach_waiter"`: it stops the
-client wait while the accepted debugger operation finishes in the background.
-Use `interrupt_target` or `close_session` on a tool request when cancellation
-must reach the session control lane. The transport binds the cancellation to
-the accepted operation; it does not reuse a current session lease or issue an
+MCP cancellation detaches the waiter while an accepted debugger operation
+finishes in the background. Use `gdb_run` interrupt or `gdb_session` close when
+the target or session itself must stop.
+The transport binds cancellation to the accepted operation and never issues an
 unscoped interrupt.
 
 After a waiter has expired, call `gdb_session` action `operation_cancel` with
@@ -39,7 +37,7 @@ Gateway owns the accepted canonical operation until a recorded outcome, while
 HTTP owns only the response waiter and pending request key. The result remains
 queryable after that waiter disconnects or expires. Only an explicit
 cancellation notification or transport-session DELETE applies the request's
-`cancel_mode`.
+cancellation behavior.
 
 Journals are stored per session. Use `gdb-ai transcript inspect`, `transcript
 export`, and `replay` for diagnosis without executing the inferior again.
