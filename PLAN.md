@@ -51,6 +51,8 @@ Complete these changes before the next comparison:
   state in normal tool results; leave full status and capabilities on demand.
 - [x] Hide compatibility-only start-policy aliases and incidental capability
   registries from projected lifecycle calls.
+- [x] Omit successful-call journal pointers while retaining failure evidence
+  and explicit event resources.
 - [x] Expose same-stop inspection batching without loading the unrelated
   advanced catalog.
 - [x] Make canonical Python and TypeScript `Session` clients retain rejected

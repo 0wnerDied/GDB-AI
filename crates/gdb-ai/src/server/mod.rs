@@ -717,7 +717,10 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
     if !artifacts.is_empty() {
         compact.insert("artifacts".into(), json!(artifacts));
     }
-    if !evidence.is_empty() {
+    // 2026-08-31: Successful structured results already contain the debugger
+    // facts an Agent requested; repeating journal URIs on every call added no
+    // exploit semantics. Retain them only when diagnosing a failed operation.
+    if error.is_some() && !evidence.is_empty() {
         compact.insert("evidence".into(), json!(evidence));
     }
     if let Some(error) = error {

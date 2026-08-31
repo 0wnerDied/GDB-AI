@@ -92,7 +92,7 @@ fn bounds_caller_controlled_faults_and_progress_tokens() {
     let request = ApiRequest {
         api_version: API_VERSION.into(),
         request_id: "large-error".into(),
-        session_id: None,
+        session_id: Some("sess_test".into()),
         method: CanonicalMethod::SessionList,
         expected_revision: None,
         idempotency_key: None,
@@ -104,7 +104,8 @@ fn bounds_caller_controlled_faults_and_progress_tokens() {
             gdb_ai_core::Error::new(
                 gdb_ai_core::ErrorCode::InvalidArgument,
                 "x".repeat(64 * 1024),
-            ),
+            )
+            .with_details(json!({"evidence_seq": 9})),
             None,
         ),
         CanonicalMethod::SessionList,
@@ -116,6 +117,10 @@ fn bounds_caller_controlled_faults_and_progress_tokens() {
             .unwrap()
             .len(),
         64 * 1024
+    );
+    assert_eq!(
+        result["structuredContent"]["evidence"][0]["kind"],
+        "journal-entry"
     );
 }
 
@@ -437,6 +442,7 @@ fn tool_results_omit_incidental_metadata_but_preserve_explicit_discovery() {
     assert!(structured.get("state").is_none());
     assert!(structured["result"].get("command").is_none());
     assert!(structured["result"].get("capabilities").is_none());
+    assert!(structured.get("evidence").is_none());
 
     let lifecycle = ApiResponse::success(
         &request,
