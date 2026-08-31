@@ -585,8 +585,13 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
     // requested data. Preserve them; only nested command state duplicates the
     // compact envelope and is safe to remove below.
     if let Some(Value::Object(result)) = result.as_mut() {
-        if result.get("state").is_some_and(|state| {
-            state.get("session_id").is_some() && state.get("revision").is_some()
+        // 2026-08-31: Removing nested state by field name discarded the exact
+        // state that satisfied execution.wait when the envelope had already
+        // advanced. Only byte-equivalent state is redundant.
+        if result.get("state").is_some_and(|result_state| {
+            state.as_ref().is_some_and(|state| {
+                serde_json::to_value(state).is_ok_and(|state| state == *result_state)
+            })
         }) {
             result.remove("state");
         }

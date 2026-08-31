@@ -455,6 +455,38 @@ fn coalesced_events_preserve_the_complete_resynchronization_state() {
     assert!(result["structuredContent"]["result"].get("state").is_none());
 }
 
+#[test]
+fn execution_wait_preserves_a_distinct_matched_state() {
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "wait".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::ExecutionWait,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let mut matched = SessionState::creating(SessionId::parse("sess_test").unwrap());
+    matched.revision = 7;
+    matched.event_seq = 7;
+    let mut current = matched.clone();
+    current.revision = 8;
+    current.event_seq = 8;
+    let response = ApiResponse::success(
+        &request,
+        Some(current),
+        json!({"state": matched, "operation": {"status": "COMPLETED"}}),
+    );
+
+    let result = tool_result(response, CanonicalMethod::ExecutionWait);
+
+    assert_eq!(result["structuredContent"]["revision"], 8);
+    assert_eq!(
+        result["structuredContent"]["result"]["state"]["revision"],
+        7
+    );
+}
+
 #[tokio::test]
 async fn resource_listing_does_not_serialize_complete_session_state() {
     if std::process::Command::new("gdb")
