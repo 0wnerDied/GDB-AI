@@ -50,10 +50,7 @@ impl StateReducer {
     }
 
     pub fn fail_closed(&mut self) -> bool {
-        let changed = self.state.lifecycle != SessionLifecycle::Failed
-            || self.state.backend != BackendHealth::Dead;
-        self.state.lifecycle = SessionLifecycle::Failed;
-        self.state.backend = BackendHealth::Dead;
+        let changed = self.fail_backend();
         if changed {
             self.state.revision += 1;
         }
@@ -95,11 +92,7 @@ impl StateReducer {
                 self.state.backend = BackendHealth::Healthy;
                 true
             }
-            DomainEvent::BackendExited { .. } => {
-                self.state.lifecycle = SessionLifecycle::Failed;
-                self.state.backend = BackendHealth::Dead;
-                true
-            }
+            DomainEvent::BackendExited { .. } => self.fail_backend(),
             DomainEvent::InferiorAdded { backend_id, pid } => {
                 let seq = self.state.event_seq;
                 let inferior = self.ensure_inferior(backend_id, seq);
@@ -601,6 +594,31 @@ impl StateReducer {
         }
     }
 
+    // 2026-09-01: GDB can exit before publishing its final RSP group-exit
+    // notification, which left a dead backend with a RUNNING inferior. Mark
+    // every still-live target disconnected while preserving proven exits.
+    fn fail_backend(&mut self) -> bool {
+        let mut changed = self.state.lifecycle != SessionLifecycle::Failed
+            || self.state.backend != BackendHealth::Dead
+            || self.state.stop_id.is_some();
+        self.state.lifecycle = SessionLifecycle::Failed;
+        self.state.backend = BackendHealth::Dead;
+        for inferior in self.state.inferiors.values_mut() {
+            if !matches!(
+                inferior.status,
+                InferiorStatus::Empty
+                    | InferiorStatus::Exited
+                    | InferiorStatus::Detached
+                    | InferiorStatus::Disconnected
+            ) {
+                inferior.status = InferiorStatus::Disconnected;
+                changed = true;
+            }
+        }
+        self.clear_stop_context();
+        changed
+    }
+
     fn clear_stop_context(&mut self) {
         self.state.stop_id = None;
         self.state.stop_reason = None;
@@ -739,6 +757,19 @@ mod tests {
                 frame: None,
             },
         );
+        let mut failed = StateReducer::new(reducer.state().clone());
+        apply(
+            &mut failed,
+            6,
+            DomainEvent::BackendExited { status: Some(134) },
+        );
+        assert_eq!(
+            failed.state().inferiors["i1"].status,
+            InferiorStatus::Disconnected
+        );
+        assert!(failed.state().stop_id.is_none());
+        assert!(failed.state().snapshot.is_none());
+
         apply(&mut reducer, 6, DomainEvent::TargetDisconnected);
         assert!(reducer.state().stop_id.is_none());
         assert!(reducer.state().snapshot.is_none());
@@ -856,6 +887,11 @@ mod tests {
                     exit_code: None,
                     from_stop_record,
                 },
+            );
+            apply(
+                &mut reducer,
+                5,
+                DomainEvent::BackendExited { status: Some(134) },
             );
             reducer.state().inferiors["i1"].status
         };

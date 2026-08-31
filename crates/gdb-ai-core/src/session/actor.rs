@@ -1936,6 +1936,7 @@ impl SessionWorker {
                 | DomainEvent::InferiorExited { .. }
                 | DomainEvent::TargetDisconnected
                 | DomainEvent::TargetDetached
+                | DomainEvent::BackendExited { .. }
         );
         let appended = self.journal.append_domain(event.clone());
         let journaled: JournaledEvent = self.journal_result(appended)?;
@@ -1959,7 +1960,9 @@ impl SessionWorker {
                     },
                 );
             }
-            DomainEvent::TargetDetached | DomainEvent::TargetDisconnected => {
+            DomainEvent::TargetDetached
+            | DomainEvent::TargetDisconnected
+            | DomainEvent::BackendExited { .. } => {
                 self.set_capability("execution", CapabilityStatus::TemporarilyUnavailable);
             }
             DomainEvent::InferiorExited { .. }
