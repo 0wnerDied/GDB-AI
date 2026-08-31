@@ -1,6 +1,5 @@
 use std::sync::atomic::AtomicU64;
 
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_core::{
     gateway::{Caller, Gateway},
     protocol::CanonicalMethod,
@@ -377,12 +376,12 @@ fn session_resource_contents(
                 .map_err(|error| RpcFault::invalid(error.to_string()))?
         }]}))
     };
-    let exact_blob = |mime_type: &str,
-                      range: ExactRange,
-                      requested_offset: Option<u64>,
-                      next_offset: Option<u64>,
-                      gap: bool,
-                      available_from: Option<u64>|
+    let exact_content = |mime_type: &str,
+                         range: ExactRange,
+                         requested_offset: Option<u64>,
+                         next_offset: Option<u64>,
+                         gap: bool,
+                         available_from: Option<u64>|
      -> Result<Value, RpcFault> {
         let end = range
             .offset
@@ -397,19 +396,21 @@ fn session_resource_contents(
                 "session resource did not contain the exact requested range",
             ));
         }
-        let blob = if let Some(blob) = result.get("data_base64").and_then(Value::as_str) {
-            blob.to_owned()
-        } else if let Some(text) = result.get("text").and_then(Value::as_str) {
-            BASE64.encode(text.as_bytes())
-        } else {
-            return Err(RpcFault::invalid("session resource contained no data"));
-        };
-        Ok(json!({"contents": [{
+        let mut content = json!({
             "uri": uri,
             "mimeType": mime_type,
-            "blob": blob,
             "_meta": {"offset": range.offset, "length": range.length}
-        }]}))
+        });
+        if let Some(blob) = result.get("data_base64").and_then(Value::as_str) {
+            content["blob"] = Value::String(blob.to_owned());
+        } else if let Some(text) = result.get("text").and_then(Value::as_str) {
+            // 2026-08-31: UTF-8 ranges were needlessly base64-encoded again
+            // after core had selected their lossless text representation.
+            content["text"] = Value::String(text.to_owned());
+        } else {
+            return Err(RpcFault::invalid("session resource contained no data"));
+        }
+        Ok(json!({"contents": [content]}))
     };
 
     match resource {
@@ -430,7 +431,7 @@ fn session_resource_contents(
                 }),
             )
         }
-        SessionResource::TranscriptRange(range) => exact_blob(
+        SessionResource::TranscriptRange(range) => exact_content(
             "application/x-ndjson",
             range,
             result.get("offset").and_then(Value::as_u64),
@@ -460,7 +461,7 @@ fn session_resource_contents(
                 }),
             )
         }
-        SessionResource::PtyRange(range) => exact_blob(
+        SessionResource::PtyRange(range) => exact_content(
             "application/octet-stream",
             range,
             result.get("requested_offset").and_then(Value::as_u64),
@@ -667,7 +668,8 @@ mod tests {
             json!({"offset": 0, "next_offset": 4, "text": "ABCD"}),
         )
         .unwrap();
-        assert_eq!(range["contents"][0]["blob"], "QUJDRA==");
+        assert_eq!(range["contents"][0]["text"], "ABCD");
+        assert!(range["contents"][0].get("blob").is_none());
 
         let pty_range = "gdbai://session/sess_test/output/pty?offset=4&length=4";
         let (_, resource) = parse_session_resource(pty_range).unwrap();
