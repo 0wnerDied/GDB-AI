@@ -675,6 +675,30 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
             }
             _ => {}
         }
+        if let Some(result_state) = result.get("state")
+            && let Ok(result_state) = serde_json::from_value::<SessionState>(result_state.clone())
+        {
+            // 2026-08-31: Execution waits retained a complete matched state
+            // beside the compact current state. Preserve a real target-state
+            // transition, but discard registries, coordination-only drift,
+            // and superseded snapshot-building progress for the same stop.
+            let matched = session_coordination_state(&result_state);
+            let same_target_state = state.as_ref().is_some_and(|current| {
+                let current = session_coordination_state(current);
+                current == matched || {
+                    let mut current = current;
+                    let mut matched = matched.clone();
+                    current.as_object_mut().unwrap().remove("snapshot");
+                    matched.as_object_mut().unwrap().remove("snapshot");
+                    current == matched
+                }
+            });
+            if same_target_state {
+                result.remove("state");
+            } else {
+                result.insert("state".into(), matched);
+            }
+        }
         if result
             .get("stop_id")
             .is_some_and(|stop_id| !stop_id.is_null())

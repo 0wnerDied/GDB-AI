@@ -4,7 +4,7 @@ use gdb_ai_core::{
     config::{ArtifactConfig, Config, PersistenceConfig},
     domain::{
         BreakpointState, FrameSummary, InferiorId, InferiorState, InferiorStatus, SessionId,
-        SessionState, StopId, ThreadId, ThreadState,
+        SessionState, SnapshotRef, SnapshotStatus, StopId, ThreadId, ThreadState,
     },
     protocol::ApiResponse,
 };
@@ -550,9 +550,42 @@ fn execution_wait_preserves_a_distinct_matched_state() {
     let mut matched = SessionState::creating(SessionId::parse("sess_test").unwrap());
     matched.revision = 7;
     matched.event_seq = 7;
+    matched.inferiors.insert(
+        "1".into(),
+        InferiorState {
+            id: InferiorId("inf_test".into()),
+            backend_id: "1".into(),
+            pid: Some(7),
+            generation: 1,
+            status: InferiorStatus::Running,
+            exit_code: None,
+            threads: std::collections::BTreeMap::new(),
+        },
+    );
+    matched.stop_id = Some(StopId("stop_wait".into()));
+    matched.snapshot = Some(SnapshotRef {
+        snapshot_id: "snap_wait".into(),
+        stop_id: StopId("stop_wait".into()),
+        status: SnapshotStatus::Building,
+        partial: false,
+    });
     let mut current = matched.clone();
     current.revision = 8;
     current.event_seq = 8;
+    current.snapshot.as_mut().unwrap().status = SnapshotStatus::Ready;
+    let coordination_only = ApiResponse::success(
+        &request,
+        Some(current.clone()),
+        json!({"state": matched.clone(), "operation": {"status": "COMPLETED"}}),
+    );
+    let coordination_only = tool_result(coordination_only, CanonicalMethod::ExecutionWait);
+    assert!(
+        coordination_only["structuredContent"]["result"]
+            .get("state")
+            .is_none()
+    );
+
+    current.inferiors.get_mut("1").unwrap().status = InferiorStatus::Stopped;
     let response = ApiResponse::success(
         &request,
         Some(current),
@@ -563,9 +596,15 @@ fn execution_wait_preserves_a_distinct_matched_state() {
 
     assert!(result["structuredContent"].get("revision").is_none());
     assert_eq!(
-        result["structuredContent"]["result"]["state"]["revision"],
-        7
+        result["structuredContent"]["result"]["state"]["status"],
+        "RUNNING"
     );
+    assert!(
+        result["structuredContent"]["result"]["state"]
+            .get("revision")
+            .is_none()
+    );
+    assert_eq!(result["structuredContent"]["state"]["status"], "STOPPED");
 }
 
 #[tokio::test]
