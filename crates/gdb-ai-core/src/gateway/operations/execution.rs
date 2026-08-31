@@ -17,7 +17,7 @@ use crate::{
     gateway::{Gateway, SessionEntry},
     normalize::breakpoint_number as inserted_breakpoint_number,
     protocol::ApiRequest,
-    session::{CommandReply, PendingModuleBreakpoint},
+    session::{CommandReply, PendingModuleBreakpoint, settled_by},
 };
 
 pub(super) fn breakpoint_location(parameters: &Value) -> Result<String> {
@@ -171,6 +171,7 @@ impl Gateway {
         };
         operation.accepted_event_seq = Some(reply.evidence_seq);
         if let Some(wait) = wait {
+            let report_settled_by = wait.until == "settled";
             operation.status = OperationStatus::WaitingForState;
             self.store.upsert_operation(&operation)?;
             match apply_wait(&entry.handle, wait, Some(&state)).await {
@@ -178,12 +179,25 @@ impl Gateway {
                     operation.status = OperationStatus::Completed;
                     operation.completed_event_seq = Some(state.event_seq);
                     self.store.upsert_operation(&operation)?;
-                    Ok(json!({
+                    let mut result = json!({
                         "operation_id": operation.operation_id,
                         "wait_status": "COMPLETED",
                         "command": reply,
                         "state": state
-                    }))
+                    });
+                    if report_settled_by {
+                        result["settled_by"] = Value::String(
+                            settled_by(&state, operation.wait_baseline.as_ref())
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        ErrorCode::Internal,
+                                        "settled wait completed without a stop or exit",
+                                    )
+                                })?
+                                .into(),
+                        );
+                    }
+                    Ok(result)
                 }
                 Err(error) if error.code == ErrorCode::Timeout => {
                     let state = entry.handle.state();
@@ -244,6 +258,7 @@ impl Gateway {
         let wait = wait_spec(&request.parameters)?.ok_or_else(|| {
             Error::new(ErrorCode::InvalidArgument, "wait parameters are required")
         })?;
+        let report_settled_by = wait.until == "settled";
         // 2026-08-28: Waiting without the operation's creation baseline let
         // an unrelated current or future state complete the wrong operation.
         let baseline = operation
@@ -270,12 +285,26 @@ impl Gateway {
             .transpose()?;
         let state =
             apply_wait_baseline(&entry.handle, wait, baseline, expected_execution_epoch).await?;
+        let settled_by = if report_settled_by {
+            Some(settled_by(&state, baseline).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Internal,
+                    "settled wait completed without a stop or exit",
+                )
+            })?)
+        } else {
+            None
+        };
         if let Some(operation) = &mut operation {
             operation.status = OperationStatus::Completed;
             operation.completed_event_seq = Some(state.event_seq);
             self.store.upsert_operation(operation)?;
         }
-        Ok(json!({ "operation": operation, "state": state }))
+        let mut result = json!({ "operation": operation, "state": state });
+        if let Some(settled_by) = settled_by {
+            result["settled_by"] = Value::String(settled_by.into());
+        }
+        Ok(result)
     }
 
     pub(super) async fn breakpoint_create(&self, request: &ApiRequest) -> Result<Value> {

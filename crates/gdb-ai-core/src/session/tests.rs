@@ -112,6 +112,11 @@ fn exit_wait_ignores_an_already_terminal_inferior() {
         WaitUntil::Settled,
         Some(&baseline)
     ));
+    let mut stopped = reducer.state().clone();
+    stopped.event_seq += 1;
+    stopped.stop_id = Some(StopId("stop_new".into()));
+    stopped.inferiors.get_mut("i2").unwrap().status = InferiorStatus::Stopped;
+    assert_eq!(settled_by(&stopped, Some(&baseline)), Some("stopped"));
     reducer
         .apply(&JournaledEvent::for_replay(
             5,
@@ -132,6 +137,7 @@ fn exit_wait_ignores_an_already_terminal_inferior() {
         WaitUntil::Settled,
         Some(&baseline)
     ));
+    assert_eq!(settled_by(reducer.state(), Some(&baseline)), Some("exited"));
 }
 
 #[tokio::test]

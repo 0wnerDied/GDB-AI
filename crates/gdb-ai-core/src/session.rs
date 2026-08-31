@@ -991,36 +991,46 @@ fn wait_satisfied(state: &SessionState, until: WaitUntil, baseline: Option<&Wait
             },
             |baseline| state.execution_epoch > baseline.execution_epoch,
         ),
-        WaitUntil::Stopped | WaitUntil::Settled
-            if after_baseline
-                && state.stop_id.is_some()
-                && baseline.is_none_or(|baseline| state.stop_id != baseline.stop_id)
-                && state
-                    .inferiors
-                    .values()
-                    .any(|inferior| inferior.status == InferiorStatus::Stopped) =>
-        {
-            true
-        }
-        WaitUntil::Stopped => false,
+        WaitUntil::Stopped => stopped_after(state, baseline),
+        WaitUntil::Settled => settled_by(state, baseline).is_some(),
         WaitUntil::Snapshot => state.snapshot.as_ref().is_some_and(|snapshot| {
             after_baseline
                 && snapshot.status == SnapshotStatus::Ready
                 && baseline
                     .is_none_or(|baseline| Some(&snapshot.stop_id) != baseline.stop_id.as_ref())
         }),
-        // 2026-08-28: An inferior that was already terminal at the baseline
-        // must not satisfy a new run-and-wait operation for another inferior.
-        // 2026-08-31: Snapshot waits ran to timeout after normal target exit.
-        // Settled observes either a new stop above or a new terminal inferior.
-        WaitUntil::Exited | WaitUntil::Settled => {
-            state.inferiors.iter().any(|(backend_id, inferior)| {
-                terminal(inferior.status)
-                    && baseline
-                        .is_none_or(|baseline| !baseline.terminal_inferiors.contains(backend_id))
-            })
-        }
+        WaitUntil::Exited => exited_after(state, baseline),
     }
+}
+
+fn stopped_after(state: &SessionState, baseline: Option<&WaitBaseline>) -> bool {
+    baseline.is_none_or(|baseline| state.event_seq > baseline.event_seq)
+        && state.stop_id.is_some()
+        && baseline.is_none_or(|baseline| state.stop_id != baseline.stop_id)
+        && state
+            .inferiors
+            .values()
+            .any(|inferior| inferior.status == InferiorStatus::Stopped)
+}
+
+fn exited_after(state: &SessionState, baseline: Option<&WaitBaseline>) -> bool {
+    // 2026-08-28: An inferior that was already terminal at the baseline
+    // must not satisfy a new run-and-wait operation for another inferior.
+    state.inferiors.iter().any(|(backend_id, inferior)| {
+        terminal(inferior.status)
+            && baseline.is_none_or(|baseline| !baseline.terminal_inferiors.contains(backend_id))
+    })
+}
+
+pub(crate) fn settled_by(
+    state: &SessionState,
+    baseline: Option<&WaitBaseline>,
+) -> Option<&'static str> {
+    // 2026-08-31: A settled response exposed no indication of whether a stop
+    // or exit satisfied it, forcing Agents to fetch status after normal exit.
+    stopped_after(state, baseline)
+        .then_some("stopped")
+        .or_else(|| exited_after(state, baseline).then_some("exited"))
 }
 
 fn terminal(status: InferiorStatus) -> bool {
