@@ -362,7 +362,9 @@ async fn http_mcp(
             Ok(operation) => operation,
             Err(error) => {
                 if let Some(client) = state.sessions.write().await.get_mut(session_id) {
-                    client.pending.remove(&key);
+                    // 2026-08-31: A stale admission failure could remove a
+                    // replacement using the same ID. Preserve its generation.
+                    remove_http_pending(client, &key, pending_generation);
                 }
                 return json_http_response(rpc_fault(id, error), Some(session_id));
             }
@@ -373,6 +375,7 @@ async fn http_mcp(
                 sessions
                     .get_mut(session_id)
                     .and_then(|client| client.pending.get_mut(&key)),
+                pending_generation,
                 &operation_id,
                 admitted_cancellation,
             )
@@ -1000,10 +1003,14 @@ fn cancel_http_waiter(state: &HttpState, caller: Caller, pending: HttpPending) {
 
 fn bind_http_operation(
     pending: Option<&mut HttpPending>,
+    generation: u64,
     operation_id: &str,
     mut cancellation: RequestCancellation,
 ) -> Option<RequestCancellation> {
-    if let Some(pending) = pending {
+    // 2026-08-31: Admission may finish after a cancelled JSON-RPC ID is
+    // reused. Bind only its reservation generation so the old operation
+    // cannot attach cancellation policy to the replacement request.
+    if let Some(pending) = pending.filter(|pending| pending.generation == generation) {
         pending.cancellation.operation_id = Some(operation_id.to_owned());
         None
     } else {
@@ -1042,28 +1049,54 @@ mod tests {
             mode: CancelMode::InterruptTarget,
             operation_id: None,
         };
-        let late = bind_http_operation(None, "op_late", cancellation.clone()).unwrap();
+        let late = bind_http_operation(None, 1, "op_late", cancellation.clone()).unwrap();
         assert!(matches!(late.mode, CancelMode::InterruptTarget));
         assert_eq!(late.operation_id.as_deref(), Some("op_late"));
 
         let (waiter, _cancelled) = oneshot::channel();
         let mut pending = detached_http_pending(1, waiter, Instant::now());
-        assert!(bind_http_operation(Some(&mut pending), "op_pending", cancellation).is_none());
+        assert!(
+            bind_http_operation(Some(&mut pending), 1, "op_pending", cancellation.clone())
+                .is_none()
+        );
         assert_eq!(
             pending.cancellation.operation_id.as_deref(),
             Some("op_pending")
         );
 
+        let (replacement_waiter, _replacement_cancelled) = oneshot::channel();
+        let replacement = detached_http_pending(2, replacement_waiter, Instant::now());
         let mut client = HttpClient {
             phase: Phase::Ready,
             protocol_version: MCP_VERSION.into(),
             caller: Caller::local("pending-generation-test"),
-            pending: HashMap::from([("same-id".into(), pending)]),
+            pending: HashMap::from([("same-id".into(), replacement)]),
             last_active: Instant::now(),
         };
-        remove_http_pending(&mut client, "same-id", 0);
-        assert!(client.pending.contains_key("same-id"));
+        let late =
+            bind_http_operation(client.pending.get_mut("same-id"), 1, "op_old", cancellation)
+                .unwrap();
+        assert_eq!(late.operation_id.as_deref(), Some("op_old"));
+        assert!(
+            client.pending["same-id"]
+                .cancellation
+                .operation_id
+                .is_none()
+        );
         remove_http_pending(&mut client, "same-id", 1);
+        assert!(client.pending.contains_key("same-id"));
+        assert!(
+            bind_http_operation(client.pending.get_mut("same-id"), 2, "op_replacement", late,)
+                .is_none()
+        );
+        assert_eq!(
+            client.pending["same-id"]
+                .cancellation
+                .operation_id
+                .as_deref(),
+            Some("op_replacement")
+        );
+        remove_http_pending(&mut client, "same-id", 2);
         assert!(client.pending.is_empty());
     }
 
