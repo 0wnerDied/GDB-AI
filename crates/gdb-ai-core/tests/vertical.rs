@@ -553,13 +553,17 @@ async fn local_debugging_vertical_slice() {
                     Some(&session_id),
                     "inspection.get",
                     None,
-                    json!({"view": "mappings"}),
+                    json!({"view": "mappings", "limit": 1}),
                 ),
                 &caller,
             )
             .await,
     );
-    assert_eq!(mappings.result.unwrap()["partial"], false);
+    let mappings = mappings.result.unwrap();
+    assert_eq!(mappings["partial"], false);
+    assert_eq!(mappings["mappings"].as_array().map(Vec::len), Some(1));
+    assert_eq!(mappings["truncated"], true);
+    assert_eq!(mappings["continuation"]["offset"], 1);
     let unavailable_register = successful(
         gateway
             .dispatch(

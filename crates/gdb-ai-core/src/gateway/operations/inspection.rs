@@ -200,7 +200,23 @@ impl Gateway {
                     }))
                 }
             }
-            "mappings" => mappings(&state),
+            "mappings" => {
+                let limit = bounded_limit(
+                    &request.parameters,
+                    64.min(self.config.limits.value_children),
+                    self.config.limits.value_children,
+                )?;
+                let offset = request
+                    .parameters
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .try_into()
+                    .map_err(|_| {
+                        Error::new(ErrorCode::OutputLimit, "mapping offset is too large")
+                    })?;
+                mappings(&state, offset, limit)
+            }
             "signals" => Ok(serde_json::to_value(state.signal_policies)?),
             _ => Err(Error::new(
                 ErrorCode::InvalidArgument,

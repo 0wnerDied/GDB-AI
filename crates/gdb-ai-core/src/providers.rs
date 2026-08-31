@@ -139,7 +139,7 @@ pub fn crash_signature(state: &SessionState) -> String {
     format!("sha256:{:x}", Sha256::digest(evidence.as_bytes()))
 }
 
-pub(crate) fn mappings(state: &SessionState) -> Result<Value> {
+pub(crate) fn mappings(state: &SessionState, offset: usize, limit: usize) -> Result<Value> {
     // 2026-08-28: A remote PID can collide with an unrelated host PID. Never
     // consult host /proc unless the reducer recorded a local target origin.
     if !matches!(
@@ -148,6 +148,9 @@ pub(crate) fn mappings(state: &SessionState) -> Result<Value> {
     ) {
         return Ok(json!({
             "mappings": [],
+            "offset": offset,
+            "limit": limit,
+            "truncated": false,
             "partial": true,
             "limitations": ["target origin does not permit host /proc access"],
             "source": {"provider": "remote", "mechanism": "unavailable"}
@@ -156,18 +159,40 @@ pub(crate) fn mappings(state: &SessionState) -> Result<Value> {
     let Some(pid) = state.inferiors.values().find_map(|inferior| inferior.pid) else {
         return Ok(json!({
             "mappings": [],
+            "offset": offset,
+            "limit": limit,
+            "truncated": false,
             "partial": true,
             "limitations": ["target does not expose a local /proc memory map"],
             "source": {"provider": "remote", "mechanism": "unavailable"}
         }));
     };
     let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
-    let ranges: Vec<Value> = maps.lines().filter_map(parse_proc_map).collect();
+    // 2026-08-31: Ignoring the requested limit returned every process mapping
+    // to Agents. Page during parsing so large targets do not inflate replies.
+    let (ranges, truncated) = mapping_page(&maps, offset, limit);
+    let next_offset = offset + ranges.len();
     Ok(json!({
         "mappings": ranges,
+        "offset": offset,
+        "limit": limit,
+        "truncated": truncated,
+        "continuation": truncated.then(|| json!({"offset": next_offset})),
         "partial": false,
         "source": {"provider": "linux-userland", "mechanism": "proc-maps"}
     }))
+}
+
+fn mapping_page(maps: &str, offset: usize, limit: usize) -> (Vec<Value>, bool) {
+    let mut ranges = maps
+        .lines()
+        .filter_map(parse_proc_map)
+        .skip(offset)
+        .take(limit + 1)
+        .collect::<Vec<_>>();
+    let truncated = ranges.len() > limit;
+    ranges.truncate(limit);
+    (ranges, truncated)
 }
 
 fn parse_proc_map(line: &str) -> Option<Value> {
@@ -261,5 +286,20 @@ mod mapping_tests {
             module_offset_from_maps(maps, "other", 0x1c9c).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn pages_process_mappings_at_the_requested_limit() {
+        let maps = concat!(
+            "1000-2000 r--p 00000000 00:00 1 /first\n",
+            "2000-3000 r-xp 00001000 00:00 1 /second\n",
+            "3000-4000 rw-p 00002000 00:00 1 /third\n",
+        );
+
+        let (page, truncated) = mapping_page(maps, 1, 1);
+
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0]["path"], "/second");
+        assert!(truncated);
     }
 }
