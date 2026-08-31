@@ -175,6 +175,9 @@ pub fn validate_console_command(command: &str) -> Result<()> {
         "list",
         "next",
         "nexti",
+        // 2026-08-31: Rejecting GDB's standard `p` alias while permitting
+        // `print` made common read-only raw-admin inspection fail needlessly.
+        "p",
         "print",
         "ptype",
         "rbreak",
@@ -251,5 +254,6 @@ mod tests {
             assert!(validate_console_command(command).is_err(), "{command}");
         }
         assert!(validate_console_command("info registers").is_ok());
+        assert!(validate_console_command("p &main_arena").is_ok());
     }
 }
