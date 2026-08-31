@@ -48,6 +48,7 @@ struct HttpPending {
     deadline: Instant,
 }
 
+#[derive(Clone)]
 struct TrackedOperation {
     gateway: Arc<Gateway>,
     caller: Caller,
@@ -414,6 +415,11 @@ async fn http_mcp(
         )
     };
     let (response_sender, mut response_receiver) = oneshot::channel();
+    let tracked = operation_id.map(|operation_id| TrackedOperation {
+        gateway: state.gateway.clone(),
+        caller,
+        operation_id,
+    });
     tokio::spawn(complete_http_operation(
         HttpCompletion {
             reservation: Some(HttpReservation {
@@ -424,11 +430,7 @@ async fn http_mcp(
             }),
             response_id,
             deadline,
-            tracked: operation_id.map(|operation_id| TrackedOperation {
-                gateway: state.gateway.clone(),
-                caller,
-                operation_id,
-            }),
+            tracked: tracked.clone(),
             stateless_method: None,
             _permit: None,
             response: response_sender,
@@ -438,17 +440,28 @@ async fn http_mcp(
     let mut cancelled = cancelled;
     // 2026-08-29: Normal completion drops the stored cancellation sender.
     // Only an explicit signal cancels the waiter; channel close awaits result.
-    let response = tokio::select! {
-        response = &mut response_receiver => response.unwrap_or_else(|_| {
-            rpc_error(id.clone(), -32603, "request completion channel closed")
-        }),
+    let (response, delivered) = tokio::select! {
+        response = &mut response_receiver => match response {
+            Ok(response) => (response, true),
+            Err(_) => (rpc_error(id.clone(), -32603, "request completion channel closed"), false),
+        },
         cancellation = &mut cancelled => match cancellation {
-            Ok(()) => rpc_error(id, -32800, "request waiter cancelled"),
-            Err(_) => response_receiver.await.unwrap_or_else(|_| {
-                rpc_error(id, -32603, "request completion channel closed")
-            }),
+            Ok(()) => (rpc_error(id, -32800, "request waiter cancelled"), false),
+            Err(_) => match response_receiver.await {
+                Ok(response) => (response, true),
+                Err(_) => (rpc_error(id, -32603, "request completion channel closed"), false),
+            },
         },
     };
+    // 2026-08-31: Completion previously erased results before the HTTP
+    // handler received them, so disconnects and cancellation lost the only
+    // queryable operation record. Release only after a normal handoff.
+    if delivered && let Some(tracked) = tracked {
+        tracked
+            .gateway
+            .release_delivered_operation(&tracked.operation_id, &tracked.caller)
+            .await;
+    }
     json_http_response(response, Some(session_id))
 }
 
@@ -548,25 +561,36 @@ async fn http_mcp_stateless(
         )
     };
     let (response_sender, response_receiver) = oneshot::channel();
+    let tracked = operation_id.map(|operation_id| TrackedOperation {
+        gateway: state.gateway.clone(),
+        caller,
+        operation_id,
+    });
     tokio::spawn(complete_http_operation(
         HttpCompletion {
             reservation: None,
             response_id: id.clone(),
             deadline,
-            tracked: operation_id.map(|operation_id| TrackedOperation {
-                gateway: state.gateway,
-                caller,
-                operation_id,
-            }),
+            tracked: tracked.clone(),
             stateless_method: Some(method.to_owned()),
             _permit: Some(permit),
             response: response_sender,
         },
         operation,
     ));
-    let response = response_receiver
-        .await
-        .unwrap_or_else(|_| rpc_error(id, -32603, "request completion channel closed"));
+    let (response, delivered) = match response_receiver.await {
+        Ok(response) => (response, true),
+        Err(_) => (
+            rpc_error(id, -32603, "request completion channel closed"),
+            false,
+        ),
+    };
+    if delivered && let Some(tracked) = tracked {
+        tracked
+            .gateway
+            .release_delivered_operation(&tracked.operation_id, &tracked.caller)
+            .await;
+    }
     json_http_response_for(response, None, STATELESS_MCP_VERSION)
 }
 
@@ -591,7 +615,6 @@ async fn complete_http_operation(
         &mut operation,
     )
     .await;
-    let timed_out = completed.is_err();
     let value = match completed {
         Ok(Ok(result)) => result.map_or_else(
             |error| rpc_fault(completion.response_id.clone(), error),
@@ -639,12 +662,6 @@ async fn complete_http_operation(
             }
         }
     };
-    if !timed_out && let Some(tracked) = &completion.tracked {
-        tracked
-            .gateway
-            .release_delivered_operation(&tracked.operation_id, &tracked.caller)
-            .await;
-    }
     // 2026-08-29: A dropped HTTP handler used to skip pending cleanup while
     // its detached target operation completed. Completion now owns cleanup.
     if let Some(reservation) = completion.reservation
@@ -1022,10 +1039,13 @@ fn bind_http_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gdb_ai_core::config::{ArtifactConfig, PersistenceConfig};
+    use gdb_ai_core::{
+        config::{ArtifactConfig, PersistenceConfig},
+        protocol::{API_VERSION, ApiRequest, CanonicalMethod},
+    };
     use tempfile::tempdir;
 
-    use super::super::CancelMode;
+    use super::super::{CancelMode, CanonicalPresentation};
 
     fn detached_http_pending(
         generation: u64,
@@ -1425,6 +1445,18 @@ mod tests {
             panic!("operation panic")
         }
 
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let gateway = Arc::new(Gateway::new(config).unwrap());
         let sessions = Arc::new(RwLock::new(HashMap::new()));
         let caller = Caller::local("http-cleanup-test");
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1443,11 +1475,23 @@ mod tests {
             },
         );
 
-        let (release, released) = oneshot::channel();
-        let operation = tokio::spawn(async move {
-            released.await.unwrap();
-            Ok(json!({"ok": true}))
-        });
+        let (operation_id, operation) = admit_canonical_operation(
+            gateway.clone(),
+            caller.clone(),
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "disconnect".into(),
+                session_id: None,
+                method: CanonicalMethod::SessionList,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            CanonicalPresentation::Envelope,
+            None,
+        )
+        .await
+        .unwrap();
         let (response, disconnected) = oneshot::channel();
         drop(disconnected);
         let completion = tokio::spawn(complete_http_operation(
@@ -1460,16 +1504,27 @@ mod tests {
                 }),
                 response_id: json!(1),
                 deadline,
-                tracked: None,
+                tracked: Some(TrackedOperation {
+                    gateway: gateway.clone(),
+                    caller: caller.clone(),
+                    operation_id: operation_id.clone(),
+                }),
                 stateless_method: None,
                 _permit: None,
                 response,
             },
             operation,
         ));
-        release.send(()).unwrap();
         completion.await.unwrap();
         assert!(sessions.read().await["mcp_test"].pending.is_empty());
+        assert!(
+            gateway
+                .wait_operation(&operation_id, &caller)
+                .await
+                .unwrap()
+                .result
+                .is_some()
+        );
 
         let (cancel_waiter, _cancelled) = oneshot::channel();
         sessions
@@ -1549,6 +1604,7 @@ mod tests {
         })
         .await
         .unwrap();
+        gateway.shutdown().await;
     }
 
     #[tokio::test]

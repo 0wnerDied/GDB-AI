@@ -232,13 +232,10 @@ where
                         }),
                     )
                 };
-                let delivered_operation = operation_id.clone();
                 cancellation.operation_id = operation_id;
                 let responses = responses.clone();
                 let task_key = key.clone();
                 let response_method = method.to_owned();
-                let response_gateway = gateway.clone();
-                let response_caller = caller.clone();
                 // Requests may wait for a target stop; separate tasks let
                 // cancellation and inferior I/O reach the gateway meanwhile.
                 // 2026-08-28: Cancelling the response task used to cancel the
@@ -259,11 +256,6 @@ where
                         ),
                         Err(error) => rpc_error(id, -32603, error.to_string()),
                     };
-                    if let Some(operation_id) = delivered_operation {
-                        response_gateway
-                            .release_delivered_operation(&operation_id, &response_caller)
-                            .await;
-                    }
                     if let Some(token) = progress_token {
                         let _ = responses
                             .send((
@@ -287,12 +279,21 @@ where
                 );
             }
             Some((reservation, response)) = response_rx.recv() => {
-                if let Some((key, generation)) = reservation
-                    && !remove_stream_pending(&mut pending, &key, generation)
-                {
-                    continue;
-                }
+                let delivered_operation = if let Some((key, generation)) = reservation {
+                    let Some(request) = remove_stream_pending(&mut pending, &key, generation) else {
+                        continue;
+                    };
+                    request.cancellation.operation_id
+                } else {
+                    None
+                };
                 write_rpc(&mut output, response).await?;
+                // 2026-08-31: Response tasks released operation records before
+                // enqueue and socket write, so cancellation or disconnect made
+                // completed results unqueryable. Release only after flush.
+                if let Some(operation_id) = delivered_operation {
+                    gateway.release_delivered_operation(&operation_id, &caller).await;
+                }
             }
         }
     }
@@ -307,7 +308,7 @@ fn remove_stream_pending(
     pending: &mut HashMap<String, StreamPending>,
     key: &str,
     generation: u64,
-) -> bool {
+) -> Option<StreamPending> {
     // 2026-08-30: A completed response could remain queued while cancellation
     // freed and reused its request ID. Deliver only the matching generation so
     // the old response cannot be mistaken for the replacement request.
@@ -315,10 +316,9 @@ fn remove_stream_pending(
         .get(key)
         .is_some_and(|request| request.generation == generation)
     {
-        pending.remove(key);
-        true
+        pending.remove(key)
     } else {
-        false
+        None
     }
 }
 
@@ -637,9 +637,9 @@ mod tests {
             },
         )]);
 
-        assert!(!remove_stream_pending(&mut pending, "same-id", 1));
+        assert!(remove_stream_pending(&mut pending, "same-id", 1).is_none());
         assert!(pending.contains_key("same-id"));
-        assert!(remove_stream_pending(&mut pending, "same-id", 2));
+        assert!(remove_stream_pending(&mut pending, "same-id", 2).is_some());
         assert!(pending.is_empty());
     }
 
