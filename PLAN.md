@@ -49,6 +49,8 @@ Complete these changes before the next comparison:
   value handles without weakening stale-context checks.
 - [x] Keep only launch-relevant session creation data and high-value target
   state in normal tool results; leave full status and capabilities on demand.
+- [x] Hide compatibility-only start-policy aliases and incidental capability
+  registries from projected lifecycle calls.
 - [x] Make canonical Python and TypeScript `Session` clients retain rejected
   revisions and renew then retry one pre-effect lease-expiry rejection.
 - [x] Teach Agents to reuse one session with `target.restart`, batch deterministic

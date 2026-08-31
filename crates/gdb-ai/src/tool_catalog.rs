@@ -422,6 +422,17 @@ fn projected_method_schema(method: CanonicalMethod) -> Value {
     if method == CanonicalMethod::InferiorIoRead {
         schema["properties"]["max_bytes"]["default"] = Value::from(DEFAULT_MCP_IO_READ_BYTES);
     }
+    if matches!(
+        method,
+        CanonicalMethod::TargetLaunch | CanonicalMethod::TargetRestart
+    ) && let Some(values) = schema["properties"]["stop"]["enum"].as_array_mut()
+    {
+        // 2026-08-31: Advertising the legacy `entry` alias made an Agent
+        // mistake the loader's first instruction for the target entry point.
+        // Keep compatibility in the canonical API, but expose one precise
+        // name for that policy in projected tools.
+        values.retain(|value| value != "entry");
+    }
     schema["required"] = Value::Array(required.into_iter().map(Value::String).collect());
     schema
 }
@@ -490,6 +501,17 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "gdb_session")
             .unwrap();
+        for action in ["launch", "restart"] {
+            let lifecycle = session["inputSchema"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|branch| branch["properties"]["action"]["const"] == action)
+                .unwrap();
+            let policies = lifecycle["properties"]["stop"]["enum"].as_array().unwrap();
+            assert!(policies.contains(&json!("first_instruction")));
+            assert!(!policies.contains(&json!("entry")));
+        }
         let create = session["inputSchema"]["oneOf"]
             .as_array()
             .unwrap()

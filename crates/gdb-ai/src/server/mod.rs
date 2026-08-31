@@ -627,6 +627,19 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                 result.remove("commands");
             }
         }
+        if matches!(
+            method,
+            CanonicalMethod::TargetLaunch
+                | CanonicalMethod::TargetAttach
+                | CanonicalMethod::TargetConnectRemote
+                | CanonicalMethod::TargetOpenCore
+                | CanonicalMethod::TargetRestart
+        ) {
+            // 2026-08-31: Target setup echoed the refreshed capability
+            // registry even though projected tools provide explicit discovery.
+            // Keep lifecycle replies focused on the resulting target state.
+            result.remove("capabilities");
+        }
         match method {
             CanonicalMethod::SessionCreate => {
                 // 2026-08-31: Session creation repeated the hidden lease,

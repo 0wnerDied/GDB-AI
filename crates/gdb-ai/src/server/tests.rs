@@ -406,7 +406,7 @@ fn tool_results_preserve_requested_state_and_compact_repeated_state() {
 }
 
 #[test]
-fn tool_results_omit_mi_evidence_but_preserve_explicit_discovery() {
+fn tool_results_omit_incidental_metadata_but_preserve_explicit_discovery() {
     let request = ApiRequest {
         api_version: API_VERSION.into(),
         request_id: "test".into(),
@@ -436,7 +436,7 @@ fn tool_results_omit_mi_evidence_but_preserve_explicit_discovery() {
     let structured = &result["structuredContent"];
     assert!(structured.get("state").is_none());
     assert!(structured["result"].get("command").is_none());
-    assert!(structured["result"].get("capabilities").is_some());
+    assert!(structured["result"].get("capabilities").is_none());
 
     let running = ApiResponse::success(
         &request,
