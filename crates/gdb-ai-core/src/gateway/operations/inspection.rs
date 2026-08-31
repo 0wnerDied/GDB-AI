@@ -864,7 +864,22 @@ impl Gateway {
             .ok()
             .map(|reply| target_architecture(&result_string_list(&reply.record, "register-names")))
             .unwrap_or("unknown");
-        let instructions = disassembly_instructions(&reply.record, current, around_limit);
+        let mut instructions = disassembly_instructions(&reply.record, current, around_limit);
+        // 2026-08-31: Some GDB modes still supplied source metadata and the
+        // normalizer emitted null opcode fields. Enforce both requested
+        // projections on the semantic result instead of trusting MI shape.
+        if !include_source || !include_bytes {
+            for instruction in &mut instructions {
+                if let Some(instruction) = instruction.as_object_mut() {
+                    if !include_source {
+                        instruction.remove("source");
+                    }
+                    if !include_bytes {
+                        instruction.remove("bytes");
+                    }
+                }
+            }
+        }
         // 2026-08-30: Disassembly omitted its stop identity, so MCP repeated
         // the session state and callers could not attribute cached evidence.
         Ok(json!({

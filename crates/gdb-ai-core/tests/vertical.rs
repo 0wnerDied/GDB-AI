@@ -951,6 +951,8 @@ async fn local_debugging_vertical_slice() {
                     None,
                     json!({
                         "around": {"expression": "$pc", "before_instructions": 2, "after_instructions": 4},
+                        "include_source": false,
+                        "include_bytes": false,
                         "stop_id": second_stop
                     }),
                 ),
@@ -964,6 +966,14 @@ async fn local_debugging_vertical_slice() {
             .is_some_and(|instructions| instructions.len() <= 7)
     );
     assert_eq!(disassembly.result.as_ref().unwrap()["stop_id"], second_stop);
+    assert!(
+        disassembly.result.as_ref().unwrap()["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|instruction| instruction.get("source").is_none()
+                && instruction.get("bytes").is_none())
+    );
 
     let stable_memory = gateway.dispatch(
         request(
