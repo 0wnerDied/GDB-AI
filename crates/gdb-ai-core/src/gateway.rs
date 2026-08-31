@@ -904,6 +904,7 @@ impl Gateway {
     }
 
     fn bound_response(&self, request: &ApiRequest, response: &mut ApiResponse) {
+        remove_repeated_state(request.method, response);
         let Ok(serialized) = serde_json::to_vec(response) else {
             return;
         };
@@ -994,6 +995,51 @@ impl Gateway {
              gdbai_artifact_verification_cache_misses_total {verification_misses}\n",
             self.metrics.render()
         )
+    }
+}
+
+// 2026-08-31: Identical state in the envelope and result doubled response
+// serialization, cache size, and artifact traffic. Remove only exact JSON
+// duplicates, retaining one complete copy and every operation-specific field.
+fn remove_repeated_state(method: crate::protocol::CanonicalMethod, response: &mut ApiResponse) {
+    let Some(state) = response.state.as_ref() else {
+        return;
+    };
+    let Some(result) = response.result.as_ref() else {
+        return;
+    };
+    let candidate = result.get("state").is_some()
+        || (result.get("session_id").is_some() && result.get("revision").is_some())
+        || (matches!(
+            method,
+            crate::protocol::CanonicalMethod::BreakpointCreate
+                | crate::protocol::CanonicalMethod::BreakpointUpdate
+                | crate::protocol::CanonicalMethod::BreakpointDelete
+        ) && result.get("breakpoints").is_some());
+    if !candidate {
+        return;
+    }
+    let Ok(state) = serde_json::to_value(state) else {
+        return;
+    };
+    if response.result.as_ref() == Some(&state) {
+        response.state = None;
+        return;
+    }
+    let Some(result) = response.result.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    if result.get("state") == Some(&state) {
+        result.remove("state");
+    }
+    if matches!(
+        method,
+        crate::protocol::CanonicalMethod::BreakpointCreate
+            | crate::protocol::CanonicalMethod::BreakpointUpdate
+            | crate::protocol::CanonicalMethod::BreakpointDelete
+    ) && result.get("breakpoints") == state.get("breakpoints")
+    {
+        result.remove("breakpoints");
     }
 }
 

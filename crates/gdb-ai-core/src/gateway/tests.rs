@@ -643,6 +643,45 @@ fn bounds_the_complete_response_envelope() {
 }
 
 #[test]
+fn removes_exact_state_duplicates_before_bounding() {
+    let directory = tempdir().unwrap();
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "deduplicate".into(),
+        session_id: Some("sess_deduplicate".into()),
+        method: crate::protocol::CanonicalMethod::SessionGet,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let mut state =
+        crate::domain::SessionState::creating(crate::domain::SessionId("sess_deduplicate".into()));
+    state.limitations.push("x".repeat(2_048));
+    let mut response = ApiResponse::success(&request, Some(state.clone()), json!(state));
+    let mut single = response.clone();
+    single.state = None;
+    let inline_size = serde_json::to_vec(&single).unwrap().len() + 64;
+    assert!(serde_json::to_vec(&response).unwrap().len() > inline_size);
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.limits.tool_response_bytes = inline_size;
+    let gateway = Gateway::new(config).unwrap();
+
+    gateway.bound_response(&request, &mut response);
+
+    assert!(response.state.is_none());
+    assert!(!response.truncated);
+}
+
+#[test]
 fn bounds_the_fallback_when_artifact_publication_fails() {
     let directory = tempdir().unwrap();
     let mut config = Config {
