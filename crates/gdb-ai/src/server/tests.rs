@@ -149,6 +149,15 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     .unwrap();
     assert!(matches!(cancellation.mode, CancelMode::InterruptTarget));
     assert!(cancellation.operation_id.is_none());
+    let read = map_tool(
+        "gdb_io",
+        json!({"action": "read", "session_id": "sess_test"}),
+        false,
+        false,
+        4,
+    )
+    .unwrap();
+    assert_eq!(read.parameters["max_bytes"], DEFAULT_MCP_IO_READ_BYTES);
     assert!(!tool_names(false, false).contains(&"gdb_raw"));
     assert!(tool_names(false, true).contains(&"gdb_raw"));
     assert_eq!(

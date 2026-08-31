@@ -6,6 +6,8 @@ use gdb_ai_core::{
 };
 use serde_json::{Value, json};
 
+pub(crate) const DEFAULT_MCP_IO_READ_BYTES: u64 = 4 * 1024;
+
 #[derive(Clone, Copy)]
 struct ToolAction {
     name: &'static str,
@@ -435,6 +437,9 @@ fn projected_method_schema(method: CanonicalMethod) -> Value {
     if method.requires_session() {
         required.insert("session_id".into());
     }
+    if method == CanonicalMethod::InferiorIoRead {
+        schema["properties"]["max_bytes"]["default"] = Value::from(DEFAULT_MCP_IO_READ_BYTES);
+    }
     schema["required"] = Value::Array(required.into_iter().map(Value::String).collect());
     schema
 }
@@ -487,6 +492,17 @@ mod tests {
         assert_eq!(
             method_for_tool("gdb_io", Some("send_eof"), false, false),
             Some(CanonicalMethod::InferiorIoSendEof)
+        );
+        let io = tools.iter().find(|tool| tool["name"] == "gdb_io").unwrap();
+        let read = io["inputSchema"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| branch["properties"]["action"]["const"] == "read")
+            .unwrap();
+        assert_eq!(
+            read["properties"]["max_bytes"]["default"],
+            DEFAULT_MCP_IO_READ_BYTES
         );
     }
 

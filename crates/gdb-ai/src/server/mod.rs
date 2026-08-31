@@ -18,7 +18,9 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::tool_catalog::{discriminator_for_tool, method_for_tool, tool_exists, tools};
+use crate::tool_catalog::{
+    DEFAULT_MCP_IO_READ_BYTES, discriminator_for_tool, method_for_tool, tool_exists, tools,
+};
 
 mod http;
 mod resources;
@@ -497,6 +499,13 @@ fn map_tool(
         }
         ("gdb_inspect", CanonicalMethod::InspectionGet, Some(view)) => {
             parameters.insert("view".into(), Value::String(view.into()));
+        }
+        ("gdb_io", CanonicalMethod::InferiorIoRead, Some("read")) => {
+            // 2026-08-31: Omitted MCP reads returned up to 64 KiB and could
+            // consume 88 KiB after binary encoding. Keep larger reads explicit.
+            parameters
+                .entry("max_bytes")
+                .or_insert(Value::from(DEFAULT_MCP_IO_READ_BYTES));
         }
         _ => {}
     }
