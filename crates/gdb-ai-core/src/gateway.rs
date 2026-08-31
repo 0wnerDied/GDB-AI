@@ -998,9 +998,9 @@ impl Gateway {
     }
 }
 
-// 2026-08-31: Identical state in the envelope and result doubled response
-// serialization, cache size, and artifact traffic. Remove only exact JSON
-// duplicates, retaining one complete copy and every operation-specific field.
+// 2026-08-31: Nested command state identical to the envelope doubled response
+// serialization, cache size, and artifact traffic. Remove only that exact
+// nested copy while retaining every public root result and envelope field.
 fn remove_repeated_state(response: &mut ApiResponse) {
     let Some(state) = response.state.as_ref() else {
         return;
@@ -1008,24 +1008,17 @@ fn remove_repeated_state(response: &mut ApiResponse) {
     let Some(result) = response.result.as_ref() else {
         return;
     };
-    // 2026-08-31: Removing an equal result.breakpoints registry broke the
-    // canonical breakpoint response contract. Deduplicate only complete state
-    // copies, not operation-specific result fields.
-    let candidate = result.get("state").is_some()
-        || (result.get("session_id").is_some() && result.get("revision").is_some());
-    if !candidate {
+    if result.get("state").is_none() {
         return;
     }
     let Ok(state) = serde_json::to_value(state) else {
         return;
     };
-    if response.result.as_ref() == Some(&state) {
-        response.state = None;
-        return;
-    }
     let Some(result) = response.result.as_mut().and_then(Value::as_object_mut) else {
         return;
     };
+    // 2026-08-31: Root result and envelope state are independent canonical
+    // paths used by existing clients; equality does not make either optional.
     if result.get("state") == Some(&state) {
         result.remove("state");
     }
