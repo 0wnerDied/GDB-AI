@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    os::unix::fs::PermissionsExt,
     path::Path,
     sync::{Arc, atomic::Ordering},
 };
@@ -452,6 +453,7 @@ impl Gateway {
             requested_program.to_owned()
         };
         let program = self.workspace_path(&program_path.to_string_lossy(), false)?;
+        validate_launch_program(&program)?;
         let cwd = if let Some(cwd) = requested_cwd {
             cwd
         } else {
@@ -932,6 +934,18 @@ pub(super) fn validate_argv(arguments: &[String]) -> Result<()> {
     }
 }
 
+fn validate_launch_program(program: &Path) -> Result<()> {
+    // 2026-08-31: Non-executable files previously reached GDB and collapsed
+    // exec permission failures into an opaque startup exit code 127.
+    if program.metadata()?.permissions().mode() & 0o111 == 0 {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            format!("program is not executable: {}", program.display()),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn remote_endpoint(parameters: &Value) -> Result<String> {
     let endpoint = parameters
         .get("endpoint")
@@ -1097,5 +1111,19 @@ mod tests {
 
         assert_eq!(environment.len(), 1);
         assert_eq!(environment.get("PATH"), Some(&path));
+    }
+
+    #[test]
+    fn rejects_a_program_without_execute_permission() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("program");
+        std::fs::File::create(&program).unwrap();
+
+        let error = validate_launch_program(&program).unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert!(error.message.contains(program.to_str().unwrap()));
+
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        validate_launch_program(&program).unwrap();
     }
 }
