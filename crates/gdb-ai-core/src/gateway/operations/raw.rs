@@ -47,7 +47,10 @@ impl Gateway {
                 ),
             })
             .await?;
-        let reply = entry
+        // 2026-08-31: Propagating a raw command error before reconciliation
+        // made the next request pay for recovery and then fail its revision.
+        // Reconcile definitive GDB errors, but preserve timeout fences.
+        let reply = match entry
             .handle
             .command_with_timeout(
                 MiCommand::new("-interpreter-exec")?
@@ -55,7 +58,15 @@ impl Gateway {
                     .string(command_text),
                 Duration::from_millis(timeout),
             )
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) if error.code == ErrorCode::GdbError => {
+                let _ = self.reconcile_session(&entry, false).await;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let reconciliation = self.reconcile_session(&entry, false).await?;
         Ok(json!({
             "command": reply,
@@ -142,10 +153,18 @@ impl Gateway {
                 }
             })
             .await?;
-        let reply = entry
+        let reply = match entry
             .handle
             .command_with_timeout(command, Duration::from_millis(timeout))
-            .await?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) if error.code == ErrorCode::GdbError => {
+                let _ = self.reconcile_session(&entry, managed).await;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let reconciliation = self.reconcile_session(&entry, managed).await?;
         Ok(json!({
             "command": reply,

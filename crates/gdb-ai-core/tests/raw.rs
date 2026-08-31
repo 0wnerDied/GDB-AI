@@ -126,6 +126,27 @@ async fn raw_admin_reconciles_managed_and_console_commands() {
         "tainted"
     );
 
+    let failed = gateway
+        .dispatch(
+            request(
+                "raw-console-error",
+                Some(&session_id),
+                "raw.console",
+                raw_console.revision,
+                json!({
+                    "lease_id": lease_id,
+                    "command": "info address gdb_ai_missing_symbol"
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(
+        failed.error.as_ref().unwrap().code,
+        gdb_ai_core::ErrorCode::GdbError
+    );
+    assert!(!failed.state.as_ref().unwrap().reconciliation_required);
+
     call(
         &gateway,
         &caller,
@@ -133,7 +154,7 @@ async fn raw_admin_reconciles_managed_and_console_commands() {
             "close",
             Some(&session_id),
             "session.close",
-            raw_console.revision,
+            failed.revision,
             json!({"lease_id": lease_id}),
         ),
     )
