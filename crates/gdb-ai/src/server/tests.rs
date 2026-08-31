@@ -170,7 +170,7 @@ fn maps_tool_metadata_outside_canonical_parameters() {
 }
 
 #[test]
-fn tool_results_keep_only_agent_coordination_state() {
+fn tool_results_preserve_requested_state_and_compact_repeated_state() {
     let mut state = SessionState::creating(SessionId::parse("sess_test").unwrap());
     state.revision = 7;
     state.stop_id = Some(StopId("stop_test".into()));
@@ -237,25 +237,35 @@ fn tool_results_keep_only_agent_coordination_state() {
         .len();
     let structured = &result["structuredContent"];
     assert_eq!(result["content"][0]["text"], "ok");
-    assert_eq!(structured["state"]["lifecycle"], "CREATING");
-    assert_eq!(structured["state"]["frame"]["function"], "main");
-    assert!(structured.get("result").is_none());
-    assert!(structured["state"].get("breakpoints").is_none());
-    assert!(structured["state"].get("limitations").is_none());
+    assert!(structured.get("state").is_none());
+    assert_eq!(
+        structured["result"]["breakpoints"]
+            .as_object()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        structured["result"]["limitations"][0],
+        "large repeated diagnostic"
+    );
+    assert_eq!(structured["result"]["inferiors"]["1"]["pid"], 7);
     assert!(structured.get("api_version").is_none());
     assert!(structured.get("request_id").is_none());
-    assert!(compact_bytes * 4 < canonical_bytes);
+    assert!(compact_bytes < canonical_bytes);
 
     let historical = tool_result(
         ApiResponse::success(&request, None, serde_json::to_value(&state).unwrap()),
         CanonicalMethod::SessionGet,
     );
     assert_eq!(historical["structuredContent"]["session_id"], "sess_test");
-    assert_eq!(historical["structuredContent"]["revision"], 7);
-    assert!(
-        historical["structuredContent"]["state"]
-            .get("breakpoints")
-            .is_none()
+    assert_eq!(historical["structuredContent"]["result"]["revision"], 7);
+    assert_eq!(
+        historical["structuredContent"]["result"]["breakpoints"]
+            .as_object()
+            .unwrap()
+            .len(),
+        64
     );
 
     let target = tool_result(
@@ -266,7 +276,36 @@ fn tool_results_keep_only_agent_coordination_state() {
         ),
         CanonicalMethod::InspectionGet,
     );
-    assert!(target["structuredContent"].get("result").is_none());
+    assert_eq!(
+        target["structuredContent"]["result"]["breakpoints"]
+            .as_object()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        target["structuredContent"]["result"]["inferiors"]["1"]["threads"]["1"]["frame"]["function"],
+        "main"
+    );
+
+    let launch = tool_result(
+        ApiResponse::success(
+            &request,
+            Some(state.clone()),
+            json!({"state": state.clone(), "start_policy": "main"}),
+        ),
+        CanonicalMethod::TargetLaunch,
+    );
+    assert!(launch["structuredContent"]["result"].get("state").is_none());
+    assert_eq!(
+        launch["structuredContent"]["state"]["frame"]["function"],
+        "main"
+    );
+    assert!(
+        launch["structuredContent"]["state"]
+            .get("breakpoints")
+            .is_none()
+    );
 
     let listed = tool_result(
         ApiResponse::success(
@@ -287,8 +326,8 @@ fn tool_results_keep_only_agent_coordination_state() {
     let listed = &listed["structuredContent"]["result"][0];
     assert_eq!(listed["session_id"], "sess_test");
     assert_eq!(listed["revision"], 7);
-    assert!(listed["state"].get("breakpoints").is_none());
-    assert!(serde_json::to_vec(listed).unwrap().len() < 2 * 1024);
+    assert_eq!(listed["breakpoints"].as_object().unwrap().len(), 64);
+    assert_eq!(listed["limitations"][0], "large repeated diagnostic");
 }
 
 #[test]

@@ -552,8 +552,8 @@ fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
 // unrelated to the operation. Detailed views remain available on demand.
 fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Value {
     let ApiResponse {
-        mut session_id,
-        mut revision,
+        session_id,
+        revision,
         mut state,
         mut result,
         warnings,
@@ -564,34 +564,9 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         error,
         ..
     } = response;
-    let mut serialized_state = None;
-    // 2026-08-31: Session status and target results contain SessionState at
-    // the result root, while session list contains an array. Compact those
-    // production shapes instead of only recognizing nested lifecycle state.
-    if matches!(
-        method,
-        CanonicalMethod::SessionGet | CanonicalMethod::InspectionGet
-    ) && let Some(value) = result.as_mut()
-        && let Some((result_session_id, result_revision)) = compact_serialized_session(value)
-    {
-        session_id.get_or_insert(result_session_id);
-        revision.get_or_insert(result_revision);
-        serialized_state = Some(value.take());
-        result = None;
-    }
-    if method == CanonicalMethod::SessionList
-        && let Some(Value::Array(sessions)) = result.as_mut()
-    {
-        for session in sessions {
-            if let Some((session_id, revision)) = compact_serialized_session(session) {
-                *session = json!({
-                    "session_id": session_id,
-                    "revision": revision,
-                    "state": session.take()
-                });
-            }
-        }
-    }
+    // 2026-08-31: Root status, list, and target states are explicitly
+    // requested data. Preserve them; only nested command state duplicates the
+    // compact envelope and is safe to remove below.
     if let Some(Value::Object(result)) = result.as_mut() {
         if result.get("state").is_some_and(|state| {
             state.get("session_id").is_some() && state.get("revision").is_some()
@@ -650,8 +625,6 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
     }
     if let Some(state) = state.as_ref() {
         compact.insert("state".into(), session_coordination_state(state));
-    } else if let Some(state) = serialized_state {
-        compact.insert("state".into(), state);
     }
     if let Some(result) = result {
         compact.insert("result".into(), result);
@@ -717,45 +690,6 @@ fn session_coordination_state(state: &SessionState) -> Value {
         summary.insert("snapshot".into(), json!(snapshot));
     }
     Value::Object(std::mem::take(summary))
-}
-
-fn compact_serialized_session(value: &mut Value) -> Option<(String, u64)> {
-    let state = value.as_object_mut()?;
-    let session_id = state.get("session_id")?.as_str()?.to_owned();
-    let revision = state.get("revision")?.as_u64()?;
-    if !state.contains_key("lifecycle")
-        || !state.contains_key("backend")
-        || !state.contains_key("consistency")
-    {
-        return None;
-    }
-    if let Some(reason) = state
-        .remove("stop_reason_detail")
-        .filter(|reason| !reason.is_null())
-    {
-        state.insert("stop_reason".into(), reason);
-    }
-    for (source, destination) in [
-        ("stopped_inferior_id", "inferior_id"),
-        ("stopped_thread_id", "thread_id"),
-    ] {
-        if let Some(id) = state.remove(source).filter(|id| !id.is_null()) {
-            state.insert(destination.into(), id);
-        }
-    }
-    state.retain(|field, value| match field.as_str() {
-        "lifecycle"
-        | "backend"
-        | "consistency"
-        | "reconciliation_required"
-        | "event_seq"
-        | "execution_epoch"
-        | "target_origin" => true,
-        "outcome_unknown_tokens" => value.as_array().is_none_or(|tokens| !tokens.is_empty()),
-        "stop_id" | "stop_reason" | "inferior_id" | "thread_id" | "snapshot" => !value.is_null(),
-        _ => false,
-    });
-    Some((session_id, revision))
 }
 
 fn canonical_request(
