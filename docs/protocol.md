@@ -35,6 +35,13 @@ Canonical operations expose `operation.get` through `gdb_session` action
 `operation_status`. Actor-scoped target cancellation uses `operation.cancel`;
 waiter detachment and target control are distinct operations.
 
+Wait objects accept `accepted`, `running`, `stopped`, `settled`, `snapshot`,
+and `exited`. `settled` completes at the first attributable stop or terminal
+inferior state and reports that branch in `settled_by`. An omitted launch or
+restart wait observes `running` for `stop: "none"`, and the selected stop plus
+its snapshot for other start policies; an explicit `accepted` remains
+non-blocking. Execution control without a wait is also accepted immediately.
+
 Streamable HTTP supports two version-specific request paths over the same
 endpoint and canonical dispatcher. MCP `2025-11-25` stores the negotiated
 version in a transport session and requires it in
@@ -67,8 +74,8 @@ are unavailable. A resource page therefore never inherits an ambiguous base
 URI.
 Canonical I/O and transcript reads return exactly one lossless representation:
 `text` for valid UTF-8 or `data_base64` for binary bytes. This avoids charging
-an Agent context for the same evidence twice. MCP resource adapters encode a
-text range as a base64 `blob` only where the resource schema requires it.
+an Agent context for the same evidence twice. MCP session resource ranges use
+`text` for UTF-8 and a base64 `blob` for binary bytes, never both.
 The `output.evidence` setting selects an `ephemeral_ring`, a retained
 `bounded_spool`, or an `artifact` finalized when the session closes. I/O reads
 and close responses report captured, spooled, dropped, completeness, digest,
@@ -78,6 +85,8 @@ Successful responses retain the method-specific `result` and also promote
 `warnings`, `truncated`, `continuation`, and artifact references into the
 canonical response envelope. Clients can therefore handle pagination and
 bounded-output metadata without knowing each result's internal shape.
+The `mappings` inspection applies `offset` and `limit` while parsing and
+returns the next offset in `continuation` only when more mappings remain.
 
 Canonical selector and binary-input shapes are deterministic: breakpoint
 locations, expected memory, search patterns, memory writes, and PTY writes

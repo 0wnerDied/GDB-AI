@@ -35,6 +35,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "trailing LF",
         "without operation_id",
         "wait.until=settled",
+        "wait.until=running",
         "profile=brief",
     ] {
         assert!(instructions.contains(required), "missing {required}");

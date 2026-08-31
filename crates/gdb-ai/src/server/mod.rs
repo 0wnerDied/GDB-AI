@@ -85,6 +85,8 @@ impl RpcFault {
     }
 }
 
+// 2026-08-31: An accepted continue can precede the running notification, so
+// immediate PTY input must request a running-state fence instead of racing it.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list schemas as authoritative. Start with \
 gdb_session create, retain session_id, lease_id, and the latest revision, then launch; \
 argv contains arguments only, not the program path. debug_control permits reads and \
@@ -98,7 +100,8 @@ explicit-loader breakpoint rebinds when its executable mapping appears. Read lar
 gdbai:// resources. For fast exploit loops, launch with stop=none, write \
 byte-exact PTY input (line protocols need a trailing LF), then use gdb_run \
 action=wait without operation_id and wait.until=settled; start crash triage with \
-profile=brief. If HTTP returns an operation_id after waiter timeout, query \
+profile=brief. For PTY input immediately after continue, set wait.until=running \
+on that continue. If HTTP returns an operation_id after waiter timeout, query \
 it with gdb_session action=operation_status; use operation_cancel only when \
 the record reports ACTOR_SCOPED cancellation. Close the session when finished.";
 
