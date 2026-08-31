@@ -451,6 +451,9 @@ fn add_discriminator(schema: &mut Value, discriminator: &str, action_names: &[&s
     let required = schema["required"].as_array_mut().unwrap();
     required.push(Value::String(discriminator.into()));
     required.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    // 2026-08-31: Canonical schemas may already require their MCP
+    // discriminator. Keep `required` unique so strict clients accept it.
+    required.dedup();
 }
 
 #[cfg(test)]
@@ -534,6 +537,15 @@ mod tests {
                 .unwrap()
                 .len(),
             8
+        );
+        assert_eq!(
+            control["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|field| field.as_str() == Some("action"))
+                .count(),
+            1
         );
         assert!(serde_json::to_vec(&tools).unwrap().len() < 22_000);
     }
