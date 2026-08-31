@@ -8,32 +8,17 @@ use serde_json::{Value, json};
 
 use super::{ErrorCodeName, RpcFault, canonical_request, core_fault};
 
-pub(super) async fn list_resources(
-    gateway: &Gateway,
-    caller: &Caller,
-    sequence: &AtomicU64,
-) -> Result<Value, RpcFault> {
-    let response = gateway
-        .dispatch(
-            canonical_request(sequence, None, CanonicalMethod::SessionList, json!({})),
-            caller,
-        )
-        .await;
-    if let Some(error) = response.error {
-        return Err(core_fault(error.code.code_name(), error.message));
-    }
-    let resources = response
-        .result
-        .and_then(|result| result.as_array().cloned())
-        .unwrap_or_default()
+pub(super) async fn list_resources(gateway: &Gateway, caller: &Caller) -> Result<Value, RpcFault> {
+    let resources = gateway
+        .list_session_ids(caller)
+        .map_err(|error| core_fault(error.code.code_name(), error.message))?
         .into_iter()
-        .filter_map(|state| {
-            let id = state.get("session_id")?.as_str()?;
-            Some(json!({
+        .map(|id| {
+            json!({
                 "uri": format!("gdbai://session/{id}/status"),
                 "name": format!("Session {id} status"),
                 "mimeType": "application/json"
-            }))
+            })
         })
         .collect::<Vec<_>>();
     Ok(json!({"resources": resources}))

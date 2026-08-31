@@ -392,6 +392,24 @@ impl Store {
         })
     }
 
+    pub fn list_session_id_owners(&self) -> Result<Vec<(String, Option<String>)>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT sessions.id, session_owners.owner
+                 FROM sessions
+                 LEFT JOIN session_owners ON session_owners.session_id=sessions.id
+                 ORDER BY sessions.created_unix_ms, sessions.id",
+                )
+                .map_err(sql_error)?;
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(sql_error)?
+                .map(|row| row.map_err(sql_error))
+                .collect()
+        })
+    }
+
     pub fn upsert_lease(&self, lease: &WriteLease) -> Result<()> {
         self.with_connection(|connection| {
             connection

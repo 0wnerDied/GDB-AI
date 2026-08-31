@@ -112,6 +112,24 @@ impl Gateway {
         Ok(gateway)
     }
 
+    pub fn list_session_ids(&self, caller: &Caller) -> Result<Vec<String>> {
+        // 2026-08-31: MCP resource discovery loaded and serialized complete
+        // session states, so a large breakpoint registry became an artifact
+        // and was then reported as an empty resource list. Query IDs directly.
+        Ok(self
+            .store
+            .list_session_id_owners()?
+            .into_iter()
+            .filter(|(_, owner)| {
+                caller.admin
+                    || owner
+                        .as_deref()
+                        .is_some_and(|owner| same_principal(owner, &caller.identity))
+            })
+            .map(|(id, _)| id)
+            .collect())
+    }
+
     pub async fn dispatch(&self, request: ApiRequest, caller: &Caller) -> ApiResponse {
         self.dispatch_inner(request, caller, false).await
     }

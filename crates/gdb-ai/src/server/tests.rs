@@ -1,12 +1,14 @@
 use super::*;
 use crate::tool_catalog::tool_names;
 use gdb_ai_core::{
+    config::{ArtifactConfig, Config, PersistenceConfig},
     domain::{
         BreakpointState, FrameSummary, InferiorId, InferiorState, InferiorStatus, SessionId,
         SessionState, StopId, ThreadId, ThreadState,
     },
     protocol::ApiResponse,
 };
+use tempfile::tempdir;
 
 #[test]
 fn initialize_teaches_agents_the_stateful_workflow() {
@@ -447,6 +449,55 @@ fn coalesced_events_preserve_the_complete_resynchronization_state() {
         "resynchronization detail"
     );
     assert!(result["structuredContent"]["result"].get("state").is_none());
+}
+
+#[tokio::test]
+async fn resource_listing_does_not_serialize_complete_session_state() {
+    if std::process::Command::new("gdb")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        if std::env::var_os("GDB_AI_REQUIRE_INTEGRATION").is_some() {
+            panic!("required GDB executable is unavailable");
+        }
+        eprintln!("skipped MCP resource test; GDB is unavailable");
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.limits.tool_response_bytes = 1_024;
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("resource-test");
+    let created = gateway
+        .dispatch(
+            canonical_request(
+                &AtomicU64::new(1),
+                None,
+                CanonicalMethod::SessionCreate,
+                json!({}),
+            ),
+            &caller,
+        )
+        .await;
+    let session_id = created.session_id.unwrap();
+    let listed = list_resources(&gateway, &caller).await.unwrap();
+
+    assert_eq!(listed["resources"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed["resources"][0]["uri"],
+        format!("gdbai://session/{session_id}/status")
+    );
+    gateway.shutdown().await;
 }
 
 #[test]

@@ -336,7 +336,7 @@ async fn dispatch_rpc(
             "instructions": AGENT_INSTRUCTIONS
         })),
         "tools/list" => Ok(json!({"tools": tools(advanced_tools, caller.admin)})),
-        "resources/list" => list_resources(gateway, caller, sequence).await,
+        "resources/list" => list_resources(gateway, caller).await,
         "resources/templates/list" => Ok(resource_templates()),
         "resources/read" => read_resource(gateway, caller, sequence, &params).await,
         _ => Err(RpcFault {
