@@ -189,7 +189,7 @@ impl Gateway {
             }
             "source" => {
                 if request.parameters.get("path").is_some() {
-                    self.source_excerpt(request)
+                    self.source_excerpt(request).await
                 } else {
                     let reply = self
                         .inspection_command(&entry, request, "-file-list-exec-source-files", vec![])
@@ -893,7 +893,7 @@ impl Gateway {
         }))
     }
 
-    pub(super) fn source_excerpt(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn source_excerpt(&self, request: &ApiRequest) -> Result<Value> {
         let requested = std::path::PathBuf::from(string(&request.parameters, "path")?);
         let mapped = self
             .config
@@ -908,16 +908,46 @@ impl Gateway {
             })
             .unwrap_or(requested);
         let path = self.workspace_path(&mapped.to_string_lossy(), false)?;
-        let metadata = std::fs::metadata(&path)?;
-        if metadata.len() > 1024 * 1024 {
-            return Err(Error::new(
-                ErrorCode::OutputLimit,
-                "source file exceeds 1 MiB",
-            ));
-        }
-        let source = std::fs::read_to_string(&path).map_err(|_| {
-            Error::new(ErrorCode::InvalidArgument, "source file is not valid UTF-8")
-        })?;
+        let source_path = path.clone();
+        // 2026-08-31: A workspace entry could change after path validation,
+        // and synchronous FIFO or filesystem reads blocked the async Gateway.
+        // Verify that the opened descriptor is regular and cap its
+        // blocking-pool read.
+        let source = tokio::task::spawn_blocking(move || -> Result<String> {
+            use std::{io::Read as _, os::unix::fs::OpenOptionsExt as _};
+
+            const MAX_SOURCE_BYTES: usize = 1024 * 1024;
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+                .open(source_path)?;
+            if !file.metadata()?.is_file() {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "source path is not a regular file",
+                ));
+            }
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take((MAX_SOURCE_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_SOURCE_BYTES {
+                return Err(Error::new(
+                    ErrorCode::OutputLimit,
+                    "source file exceeds 1 MiB",
+                ));
+            }
+            String::from_utf8(bytes).map_err(|_| {
+                Error::new(ErrorCode::InvalidArgument, "source file is not valid UTF-8")
+            })
+        })
+        .await
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("source read task failed: {error}"),
+            )
+        })??;
         let lines = source.lines().collect::<Vec<_>>();
         let center = request
             .parameters

@@ -28,7 +28,15 @@ impl Gateway {
                 format!("cannot canonicalize path {value:?}: {error}"),
             )
         })?;
-        if directory != path.is_dir() {
+        // 2026-08-31: Treating every non-directory as a file admitted FIFOs,
+        // sockets, and devices into source and target paths. File inputs must
+        // resolve to regular files before any potentially blocking open.
+        let expected_type = if directory {
+            path.is_dir()
+        } else {
+            path.is_file()
+        };
+        if !expected_type {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
                 if directory {
@@ -330,10 +338,37 @@ pub(super) fn require_stopped_context(
 mod tests {
     use super::*;
     use crate::{
+        config::{ArtifactConfig, Config, PersistenceConfig},
         domain::{DomainEvent, FrameId, JournaledEvent, SessionId, SessionState, StopReason},
         reducer::StateReducer,
     };
     use serde_json::json;
+    use tempfile::tempdir;
+
+    #[test]
+    fn workspace_file_paths_reject_special_files() {
+        let directory = tempdir().unwrap();
+        let fifo = directory.path().join("source.fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        let mut config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        config.security.workspace_roots = vec![directory.path().to_owned()];
+        let gateway = Gateway::new(config).unwrap();
+
+        let error = gateway
+            .workspace_path(&fifo.to_string_lossy(), false)
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+    }
 
     #[test]
     fn frame_context_encodes_its_thread_before_positional_arguments() {
