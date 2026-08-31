@@ -438,6 +438,24 @@ fn tool_results_omit_incidental_metadata_but_preserve_explicit_discovery() {
     assert!(structured["result"].get("command").is_none());
     assert!(structured["result"].get("capabilities").is_none());
 
+    let lifecycle = ApiResponse::success(
+        &request,
+        Some(SessionState::creating(
+            SessionId::parse("sess_test").unwrap(),
+        )),
+        json!({
+            "state": {"lifecycle": "ACTIVE", "snapshot": {"status": "BUILDING"}},
+            "start_policy": "first_instruction"
+        }),
+    );
+    let lifecycle = tool_result(lifecycle, CanonicalMethod::TargetLaunch);
+    assert!(lifecycle["structuredContent"]["state"].is_object());
+    assert!(
+        lifecycle["structuredContent"]["result"]
+            .get("state")
+            .is_none()
+    );
+
     let running = ApiResponse::success(
         &request,
         Some(SessionState::creating(

@@ -640,6 +640,21 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
             // Keep lifecycle replies focused on the resulting target state.
             result.remove("capabilities");
         }
+        if matches!(
+            method,
+            CanonicalMethod::TargetLaunch
+                | CanonicalMethod::TargetAttach
+                | CanonicalMethod::TargetConnectRemote
+                | CanonicalMethod::TargetOpenCore
+                | CanonicalMethod::TargetDetach
+                | CanonicalMethod::TargetRestart
+                | CanonicalMethod::TargetKill
+        ) {
+            // 2026-08-31: A snapshot could advance while a lifecycle response
+            // was assembled, defeating byte-equality deduplication and
+            // returning both an older full state and the current compact one.
+            result.remove("state");
+        }
         match method {
             CanonicalMethod::SessionCreate => {
                 // 2026-08-31: Session creation repeated the hidden lease,
