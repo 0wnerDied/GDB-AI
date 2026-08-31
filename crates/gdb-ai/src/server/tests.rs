@@ -33,6 +33,84 @@ fn initialize_teaches_agents_the_stateful_workflow() {
 }
 
 #[test]
+fn bounds_caller_controlled_faults_and_progress_tokens() {
+    for fault in [
+        RpcFault {
+            code: -32601,
+            message: "x".repeat(64 * 1024),
+            data: None,
+        },
+        RpcFault {
+            code: -32002,
+            message: "resource not found".into(),
+            data: Some(json!({"uri": "x".repeat(64 * 1024)})),
+        },
+    ] {
+        let response = rpc_fault(json!(1), fault);
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(encoded.len() < 5 * 1024);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encoded).unwrap()["error"]["code"],
+            response["error"]["code"]
+        );
+    }
+
+    let fault = stateless_request(&json!({
+        "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "x".repeat(1024),
+            "io.modelcontextprotocol/clientCapabilities": {}
+        }
+    }))
+    .unwrap_err();
+    let response = rpc_fault(json!(2), fault);
+    assert!(serde_json::to_vec(&response).unwrap().len() < 1024);
+    assert!(response["error"]["data"].get("requested").is_none());
+
+    assert!(
+        progress_token(&json!({
+            "_meta": {"progressToken": "x".repeat(MAX_PROGRESS_TOKEN_BYTES + 1)}
+        }))
+        .is_err()
+    );
+    assert!(
+        progress_token(&json!({
+            "_meta": {"progressToken": "x".repeat(MAX_PROGRESS_TOKEN_BYTES)}
+        }))
+        .is_ok()
+    );
+    assert!(progress_token(&json!({"_meta": {"progressToken": 7}})).is_ok());
+
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "large-error".into(),
+        session_id: None,
+        method: CanonicalMethod::SessionList,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let result = tool_result(
+        ApiResponse::failure(
+            &request,
+            gdb_ai_core::Error::new(
+                gdb_ai_core::ErrorCode::InvalidArgument,
+                "x".repeat(64 * 1024),
+            ),
+            None,
+        ),
+        CanonicalMethod::SessionList,
+    );
+    assert!(result["content"][0]["text"].as_str().unwrap().len() <= MAX_TOOL_SUMMARY_BYTES);
+    assert_eq!(
+        result["structuredContent"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64 * 1024
+    );
+}
+
+#[test]
 fn maps_tool_metadata_outside_canonical_parameters() {
     let request = map_tool(
         "gdb_run",

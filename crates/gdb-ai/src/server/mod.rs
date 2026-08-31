@@ -33,6 +33,9 @@ pub(super) const STATELESS_MCP_VERSION: &str = "2026-07-28";
 pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 128;
 const MAX_HTTP_PENDING_DURATION: Duration = Duration::from_secs(5 * 60);
+const MAX_RPC_FAULT_BYTES: usize = 4 * 1024;
+const MAX_PROGRESS_TOKEN_BYTES: usize = 128;
+const MAX_TOOL_SUMMARY_BYTES: usize = 512;
 
 type RpcOutput = (Option<(String, u64)>, Value);
 
@@ -145,13 +148,12 @@ fn stateless_request(params: &Value) -> Result<bool, RpcFault> {
         .as_str()
         .ok_or_else(|| RpcFault::invalid(format!("_meta.{VERSION_KEY} must be a string")))?;
     if requested != STATELESS_MCP_VERSION {
+        // 2026-08-31: Echoing an unsupported near-limit version in both the
+        // message and data doubled a caller-controlled MCP response.
         return Err(RpcFault {
             code: -32022,
-            message: format!("unsupported MCP protocol version {requested}"),
-            data: Some(json!({
-                "requested": requested,
-                "supported": [STATELESS_MCP_VERSION]
-            })),
+            message: "unsupported MCP protocol version".into(),
+            data: Some(json!({"supported": [STATELESS_MCP_VERSION]})),
         });
     }
     if !params
@@ -278,12 +280,19 @@ fn progress_token(params: &Value) -> Result<Option<Value>, RpcFault> {
     else {
         return Ok(None);
     };
-    if token.is_string() || token.is_number() {
-        Ok(Some(token.clone()))
-    } else {
-        Err(RpcFault::invalid(
+    match token {
+        // 2026-08-31: An unbounded string token was repeated in both progress
+        // notifications. Match the existing bounded request-ID convention.
+        Value::String(token) if token.len() <= MAX_PROGRESS_TOKEN_BYTES => {
+            Ok(Some(Value::String(token.clone())))
+        }
+        Value::Number(_) => Ok(Some(token.clone())),
+        Value::String(_) => Err(RpcFault::invalid(
+            "_meta.progressToken must be at most 128 bytes",
+        )),
+        _ => Err(RpcFault::invalid(
             "_meta.progressToken must be a string or number",
-        ))
+        )),
     }
 }
 
@@ -503,13 +512,23 @@ fn map_tool(
 
 fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
     let is_error = response.error.is_some();
-    let summary = match &response.error {
+    let mut summary = match &response.error {
         Some(error) => format!("{}: {}", error.code.code_name(), error.message),
         // 2026-08-30: The structured result already carries the revision.
         // Repeating it in successful text content costs tokens on every Agent
         // call without adding information.
         None => "ok".into(),
     };
+    // 2026-08-31: MCP text duplicated potentially large structured errors.
+    // Keep a short compatibility summary and preserve the full error below.
+    if summary.len() > MAX_TOOL_SUMMARY_BYTES {
+        let mut end = MAX_TOOL_SUMMARY_BYTES - 3;
+        while !summary.is_char_boundary(end) {
+            end -= 1;
+        }
+        summary.truncate(end);
+        summary.push_str("...");
+    }
     let structured = compact_tool_response(response, method);
     json!({
         "content": [{"type": "text", "text": summary}],
@@ -704,9 +723,16 @@ fn rpc_result(id: Value, result: Value) -> Value {
 }
 
 fn rpc_fault(id: Value, fault: RpcFault) -> Value {
-    let mut error = json!({"code": fault.code, "message": fault.message});
+    let code = fault.code;
+    let mut error = json!({"code": code, "message": fault.message});
     if let Some(data) = fault.data {
         error["data"] = data;
+    }
+    // 2026-08-31: Fault messages and data could echo caller-controlled fields
+    // up to the inbound limit. Replace an oversized fault as valid JSON while
+    // preserving its code; successful and canonical responses stay unchanged.
+    if serde_json::to_vec(&error).map_or(true, |bytes| bytes.len() > MAX_RPC_FAULT_BYTES) {
+        error = json!({"code": code, "message": "error details exceeded limit"});
     }
     json!({"jsonrpc": "2.0", "id": id, "error": error})
 }

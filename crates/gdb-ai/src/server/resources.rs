@@ -138,11 +138,13 @@ enum SessionResource {
     PtyRange(ExactRange),
 }
 
-fn resource_not_found(uri: &str) -> RpcFault {
+fn resource_not_found() -> RpcFault {
+    // 2026-08-31: Returning an arbitrary rejected URI duplicated nearly the
+    // full inbound MCP message. The caller already has the requested URI.
     RpcFault {
         code: -32002,
         message: "resource not found".into(),
-        data: Some(json!({"uri": uri})),
+        data: None,
     }
 }
 
@@ -202,13 +204,13 @@ fn parse_session_resource(uri: &str) -> Result<(String, SessionResource), RpcFau
     };
     let path = base_uri
         .strip_prefix("gdbai://session/")
-        .ok_or_else(|| resource_not_found(uri))?;
+        .ok_or_else(resource_not_found)?;
     let parts = path.split('/').collect::<Vec<_>>();
     let session = parts
         .first()
         .copied()
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| resource_not_found(uri))?
+        .ok_or_else(resource_not_found)?
         .to_owned();
     let resource = match (parts.as_slice(), query) {
         ([_, "status"] | [_, "events"], None) => SessionResource::Json {
@@ -243,7 +245,7 @@ fn parse_session_resource(uri: &str) -> Result<(String, SessionResource), RpcFau
         ([_, "output", "pty"], Some(query)) => {
             SessionResource::PtyRange(parse_exact_range(query, "PTY output")?)
         }
-        _ => return Err(resource_not_found(uri)),
+        _ => return Err(resource_not_found()),
     };
     Ok((session, resource))
 }
@@ -625,6 +627,11 @@ mod tests {
         assert!(templates.contains("output/pty?offset={offset}&length={length}"));
         assert!(templates.contains("transcript?offset={offset}&length={length}"));
         assert!(!templates.contains("/inferior/{inferior_id}/output"));
+    }
+
+    #[test]
+    fn resource_errors_do_not_echo_rejected_uris() {
+        assert!(resource_not_found().data.is_none());
     }
 
     #[test]
