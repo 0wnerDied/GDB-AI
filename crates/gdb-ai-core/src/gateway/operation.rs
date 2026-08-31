@@ -334,7 +334,14 @@ impl Gateway {
         let session = self.entry(&session_id).await?;
         let operation_id = OperationId::parse(operation_id)?;
         match session.handle.cancel_operation(operation_id, mode).await {
-            Ok(()) => entry.cancellation_applied.store(true, Ordering::Release),
+            Ok(()) => {
+                entry.cancellation_applied.store(true, Ordering::Release);
+                if mode == crate::session::OperationCancelMode::CloseSession
+                    && let Some(error) = self.retire_session(&session_id, &session).await
+                {
+                    tracing::warn!(%error, "cancelled session lease cleanup failed");
+                }
+            }
             // A queued operation observes the shared cancellation flag before
             // it sends MI; no active resume exists for the actor to interrupt.
             Err(error) if error.code == ErrorCode::Conflict => {}

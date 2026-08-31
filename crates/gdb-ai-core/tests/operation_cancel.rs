@@ -54,7 +54,7 @@ async fn wait_running(gateway: &Gateway, caller: &Caller, session_id: &str) -> u
 }
 
 #[tokio::test]
-async fn stale_cancel_does_not_interrupt_a_later_resume() {
+async fn cancellation_stays_scoped_and_close_releases_the_session() {
     if !support::require_commands(&["gdb", "cc"]) {
         return;
     }
@@ -82,6 +82,7 @@ async fn stale_cancel_does_not_interrupt_a_later_resume() {
         ..Config::default()
     };
     config.security.workspace_roots = vec![directory.path().to_owned()];
+    config.server.max_sessions = 1;
     if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
         config.gdb.path = path.into();
     }
@@ -196,7 +197,7 @@ async fn stale_cancel_does_not_interrupt_a_later_resume() {
     assert_eq!(stale.error.unwrap().code, ErrorCode::Conflict);
     wait_running(&gateway, &caller, &session_id).await;
 
-    let _ = gateway
+    let closed = gateway
         .dispatch(
             request(
                 "cancel-second",
@@ -205,11 +206,40 @@ async fn stale_cancel_does_not_interrupt_a_later_resume() {
                 None,
                 json!({
                     "operation_id": second.operation_id,
-                    "mode": "interrupt_target"
+                    "mode": "close_session"
                 }),
             ),
             &caller,
         )
         .await;
+    assert!(closed.error.is_none(), "{:?}", closed.error);
+    assert_eq!(
+        gateway
+            .wait_operation(&second.operation_id.0, &caller)
+            .await
+            .unwrap()
+            .status,
+        RequestOperationStatus::Aborted
+    );
+    let already_closed = gateway
+        .dispatch(
+            request(
+                "close-again",
+                Some(&session_id),
+                "session.close",
+                None,
+                json!({"lease_id": lease_id, "accept_latest_revision": true}),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(already_closed.error.unwrap().code, ErrorCode::NotFound);
+    let replacement = gateway
+        .dispatch(
+            request("replacement", None, "session.create", None, json!({})),
+            &caller,
+        )
+        .await;
+    assert!(replacement.error.is_none(), "{:?}", replacement.error);
     gateway.shutdown().await;
 }

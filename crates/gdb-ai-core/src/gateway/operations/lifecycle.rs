@@ -366,24 +366,12 @@ impl Gateway {
         // after the control lane has attempted GDB process-group shutdown.
         let state = entry.handle.state();
         let output_evidence = entry.handle.inferior_output_evidence();
-        // 2026-08-30: A lease-delete failure after GDB had exited returned
-        // early and stranded a closed worker in the live registry. Resource
-        // termination must not depend on best-effort metadata cleanup.
-        let lease_warning = self
-            .store
-            .delete_lease(entry.handle.id())
-            .err()
-            .map(|error| {
-                json!({
-                    "code": "LEASE_CLEANUP_FAILED",
-                    "message": error.to_string()
-                })
-            });
-        self.sessions.write().await.remove(&id);
-        let live_sessions = self.sessions.read().await.keys().cloned().collect();
-        if let Err(error) = self.maintain_storage(&live_sessions) {
-            tracing::warn!(%error, "closed session retention failed");
-        }
+        let lease_warning = self.retire_session(&id, &entry).await.map(|message| {
+            json!({
+                "code": "LEASE_CLEANUP_FAILED",
+                "message": message
+            })
+        });
         Ok(json!({
             "closed": true,
             "clean_shutdown": !forced && close_error.is_none(),

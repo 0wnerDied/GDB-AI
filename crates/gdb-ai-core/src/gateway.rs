@@ -805,6 +805,28 @@ impl Gateway {
             .ok_or_else(|| Error::new(ErrorCode::NotFound, "session not found"))
     }
 
+    // 2026-08-31: Actor-scoped close cancellation stopped GDB without
+    // releasing its registry entry, lease, or max-session slot. Every path
+    // that closes the actor must share the same post-shutdown retirement.
+    async fn retire_session(&self, session_id: &str, entry: &Arc<SessionEntry>) -> Option<String> {
+        // 2026-08-30: Metadata cleanup failure must not retain a terminated
+        // process in the live registry.
+        let lease_warning = self
+            .store
+            .delete_lease(entry.handle.id())
+            .err()
+            .map(|error| error.to_string());
+        let live_sessions = {
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(session_id);
+            sessions.keys().cloned().collect()
+        };
+        if let Err(error) = self.maintain_storage(&live_sessions) {
+            tracing::warn!(%error, "closed session retention failed");
+        }
+        lease_warning
+    }
+
     pub async fn shutdown(&self) {
         // 2026-08-30: Shutdown could drain an empty registry while an in-flight
         // create later inserted a live GDB. Close admission first, then share
