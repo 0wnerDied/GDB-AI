@@ -154,9 +154,9 @@ Single-client stdio:
 target/release/gdb-ai serve --stdio
 ```
 
-The default MCP catalog is the bounded nine-tool Agent surface below. Use
+The default MCP catalog is the bounded ten-tool Agent surface below. Use
 `--advanced-tools` only when an Agent needs extended targets, mutations,
-variable objects, tracking, batches, probes, or kernel operations. The full
+variable objects, tracking, probes, or kernel operations. The full
 canonical `gdb.ai/call` API remains available independently of MCP discovery.
 
 Multi-client local socket:
@@ -194,6 +194,7 @@ modes without claiming legacy HTTP+SSE.
 | `gdb_run` | Continue, interrupt, source/instruction stepping, and waits |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
+| `gdb_batch` | Multiple bounded inspection views attributed to one stop |
 | `gdb_evaluate` | Side-effect-denied one-shot expression evaluation |
 | `gdb_memory` | Bounded stop-consistent memory reads |
 | `gdb_disassemble` | Normalized bounded instructions with source and bytes |
@@ -201,7 +202,7 @@ modes without claiming legacy HTTP+SSE.
 | `gdb_events` | Finite event waits |
 
 `--advanced-tools` additionally projects `gdb_values`, `gdb_registers`,
-`gdb_tracking`, `gdb_signals`, `gdb_batch`, `gdb_agent`, and `gdb_kernel`, plus
+`gdb_tracking`, `gdb_signals`, `gdb_agent`, and `gdb_kernel`, plus
 extended-target and mutation actions on the core tools. `gdb_agent` currently
 projects only the stop-attributed bounded probe; experiment and hypothesis
 aliases remain canonical-only. `gdb_raw` is registered separately only with

@@ -249,13 +249,16 @@ const TOOLS: &[ToolProjection] = &[
         advanced: true,
         raw: false,
     },
+    // 2026-08-31: Initialization recommended same-stop batching while default
+    // discovery hid it behind the much larger advanced catalog. Keep the
+    // token-saving primitive available without exposing unrelated tools.
     ToolProjection {
         name: "gdb_batch",
         description: "Run bounded inspection requests against one stop context.",
         discriminator: None,
         actions: BATCH_ACTIONS,
         read_only: true,
-        advanced: true,
+        advanced: false,
         raw: false,
     },
     ToolProjection {
@@ -534,11 +537,13 @@ mod tests {
                 "gdb_memory",
                 "gdb_disassemble",
                 "gdb_io",
+                "gdb_batch",
                 "gdb_events",
             ]
         );
         assert!(!tool_exists("gdb_values", false, false));
         assert!(tool_exists("gdb_values", true, false));
+        assert!(tool_exists("gdb_batch", false, false));
         assert!(method_for_tool("gdb_memory", Some("write"), false, false).is_none());
         assert!(method_for_tool("gdb_memory", Some("write"), true, false).is_some());
         assert_eq!(
@@ -579,7 +584,7 @@ mod tests {
                 .count(),
             1
         );
-        assert!(serde_json::to_vec(&tools).unwrap().len() < 14_000);
+        assert!(serde_json::to_vec(&tools).unwrap().len() < 16_000);
         assert!(
             serde_json::to_vec(&super::tools(true, false))
                 .unwrap()

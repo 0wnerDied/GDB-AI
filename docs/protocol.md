@@ -25,11 +25,12 @@ Schema branches and MCP tool input schemas. MCP itself remains UTF-8 JSON-RPC;
 large binary evidence uses bounded artifact resources instead of embedding a
 second wire format inside tool calls.
 
-MCP discovery defaults to nine bounded tools for ordinary Agent debugging.
-Starting the server with `--advanced-tools` exposes the existing advanced
-target, mutation, value, tracking, batch, probe, and kernel projections;
-`--raw-admin` independently exposes the audited raw escape hatch. Hidden MCP
-projections do not remove methods from the canonical API.
+MCP discovery defaults to ten bounded tools for ordinary Agent debugging,
+including same-stop inspection batching. Starting the server with
+`--advanced-tools` exposes the existing advanced target, mutation, value,
+tracking, probe, and kernel projections; `--raw-admin` independently exposes
+the audited raw escape hatch. Hidden MCP projections do not remove methods
+from the canonical API.
 
 Stdio and Unix stream clients may attach `_meta.progressToken` to a request.
 GDB/AI emits ordered `notifications/progress` records before and after the

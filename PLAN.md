@@ -13,7 +13,7 @@ Completed and superseded plans are preserved in:
 
 ## Version-1 maintenance
 
-- Preserve the `gdb.ai/v1` compatibility rules and the default nine-tool MCP
+- Preserve the `gdb.ai/v1` compatibility rules and the default ten-tool MCP
   catalog. Add public surface only for a demonstrated user or Agent need.
 - Keep correctness, bounded output, stop consistency, operation ownership,
   cancellation scope, evidence integrity, and cleanup paths covered by a
@@ -51,6 +51,8 @@ Complete these changes before the next comparison:
   state in normal tool results; leave full status and capabilities on demand.
 - [x] Hide compatibility-only start-policy aliases and incidental capability
   registries from projected lifecycle calls.
+- [x] Expose same-stop inspection batching without loading the unrelated
+  advanced catalog.
 - [x] Make canonical Python and TypeScript `Session` clients retain rejected
   revisions and renew then retry one pre-effect lease-expiry rejection.
 - [x] Teach Agents to reuse one session with `target.restart`, batch deterministic
@@ -71,7 +73,7 @@ budgets, environments, tasks, blind grading, and multiple seeds:
 ```text
 A  shell plus CLI GDB
 B  persistent raw GDB
-C  default nine-tool structured GDB/AI
+C  default ten-tool structured GDB/AI
 D  C plus typed probe
 ```
 
