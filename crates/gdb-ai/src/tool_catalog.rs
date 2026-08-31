@@ -229,7 +229,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_io",
-        description: "Read or write the inferior PTY independently from GDB control output.",
+        description: "Read or write the inferior PTY; send_eof requires a stopped target.",
         discriminator: Some("action"),
         actions: IO_ACTIONS,
         read_only: false,

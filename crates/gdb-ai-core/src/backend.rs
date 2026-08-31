@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, Write},
-    os::fd::AsRawFd,
+    os::fd::{AsFd, AsRawFd},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
@@ -567,6 +567,7 @@ pub struct GdbBackend {
     stdin: ChildStdin,
     input: BackendInputs,
     pty_writer: tokio::fs::File,
+    pty_raw: bool,
     pty_output: Arc<PtyOutput>,
     descriptor: BackendDescriptor,
 }
@@ -611,7 +612,7 @@ pub trait DebugBackend: Send {
     fn pty_path(&self) -> &str;
     async fn send(&mut self, raw: &[u8]) -> Result<()>;
     async fn next_input(&mut self) -> Option<BackendInput>;
-    async fn write_inferior(&mut self, bytes: &[u8]) -> Result<()>;
+    async fn write_inferior(&mut self, bytes: &[u8], eof: bool) -> Result<()>;
     async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()>;
     fn inferior_output(&self) -> Arc<PtyOutput>;
     fn signal_interrupt(&mut self) -> Result<()>;
@@ -633,22 +634,7 @@ impl GdbBackend {
         let pty = openpty(None, None).map_err(|error| {
             Error::new(ErrorCode::Internal, format!("cannot allocate PTY: {error}"))
         })?;
-        // 2026-08-31: The default line discipline consumed control bytes such
-        // as XOFF before a stopped inferior could read binary exploit input.
-        // Start the inferior PTY raw so every accepted byte reaches the target.
-        let mut settings = termios::tcgetattr(&pty.slave).map_err(|error| {
-            Error::new(
-                ErrorCode::Internal,
-                format!("cannot read inferior PTY settings: {error}"),
-            )
-        })?;
-        termios::cfmakeraw(&mut settings);
-        termios::tcsetattr(&pty.slave, SetArg::TCSANOW, &settings).map_err(|error| {
-            Error::new(
-                ErrorCode::Internal,
-                format!("cannot configure inferior PTY: {error}"),
-            )
-        })?;
+        configure_inferior_pty(&pty.slave, true)?;
         let pty_path = ttyname(&pty.slave).map_err(|error| {
             Error::new(
                 ErrorCode::Internal,
@@ -809,6 +795,7 @@ impl GdbBackend {
                 pty_closed: false,
             },
             pty_writer: tokio::fs::File::from_std(writer),
+            pty_raw: true,
             pty_output,
             descriptor: BackendDescriptor {
                 name: "gdb",
@@ -848,7 +835,12 @@ impl GdbBackend {
         self.input.recv().await
     }
 
-    pub async fn write_inferior(&mut self, bytes: &[u8]) -> Result<()> {
+    pub async fn write_inferior(&mut self, bytes: &[u8], eof: bool) -> Result<()> {
+        let raw = !eof;
+        if self.pty_raw != raw {
+            configure_inferior_pty(&self.pty_writer, raw)?;
+            self.pty_raw = raw;
+        }
         self.pty_writer.write_all(bytes).await?;
         self.pty_writer.flush().await?;
         Ok(())
@@ -961,8 +953,8 @@ impl DebugBackend for GdbBackend {
         self.next_input().await
     }
 
-    async fn write_inferior(&mut self, bytes: &[u8]) -> Result<()> {
-        self.write_inferior(bytes).await
+    async fn write_inferior(&mut self, bytes: &[u8], eof: bool) -> Result<()> {
+        self.write_inferior(bytes, eof).await
     }
 
     async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()> {
@@ -984,6 +976,30 @@ impl DebugBackend for GdbBackend {
     async fn shutdown(&mut self) -> Result<()> {
         self.shutdown().await
     }
+}
+
+fn configure_inferior_pty(fd: &impl AsFd, raw: bool) -> Result<()> {
+    // 2026-08-31: Making the PTY byte-exact also made VEOF a literal byte.
+    // Queue EOF in canonical mode, then restore raw mode on the next input.
+    let mut settings = termios::tcgetattr(fd).map_err(|error| {
+        Error::new(
+            ErrorCode::Internal,
+            format!("cannot read inferior PTY settings: {error}"),
+        )
+    })?;
+    if raw {
+        termios::cfmakeraw(&mut settings);
+    } else {
+        settings.local_flags.insert(termios::LocalFlags::ICANON);
+        settings.control_chars[termios::SpecialCharacterIndices::VEOF as usize] = 0x04;
+    }
+    termios::tcsetattr(fd, SetArg::TCSANOW, &settings).map_err(|error| {
+        Error::new(
+            ErrorCode::Internal,
+            format!("cannot configure inferior PTY: {error}"),
+        )
+    })?;
+    Ok(())
 }
 
 fn process_descendants(root: u32) -> Vec<i32> {

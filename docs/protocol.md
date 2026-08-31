@@ -78,6 +78,8 @@ an Agent context for the same evidence twice. MCP session resource ranges use
 `text` for UTF-8 and a base64 `blob` for binary bytes, never both.
 The inferior PTY starts in raw mode, so `data_base64` input reaches the target
 without terminal flow-control, signal, newline, or echo transformations.
+`send_eof` requires a stopped inferior, switches to canonical mode, and queues
+an EOF boundary for resume. A later ordinary write restores raw mode.
 The `output.evidence` setting selects an `ephemeral_ring`, a retained
 `bounded_spool`, or an `artifact` finalized when the session closes. I/O reads
 and close responses report captured, spooled, dropped, completeness, digest,

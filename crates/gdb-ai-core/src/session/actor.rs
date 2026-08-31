@@ -125,6 +125,7 @@ pub(super) enum WorkerRequest {
     },
     WriteInferior {
         bytes: Vec<u8>,
+        eof: bool,
         response: oneshot::Sender<Result<()>>,
     },
     ResizeInferior {
@@ -992,10 +993,14 @@ impl SessionWorker {
                 };
                 let _ = response.send(read);
             }
-            WorkerRequest::WriteInferior { bytes, response } => {
+            WorkerRequest::WriteInferior {
+                bytes,
+                eof,
+                response,
+            } => {
                 let appended = self.journal.append_inferior_input(&bytes);
                 let result = match self.journal_result(appended) {
-                    Ok(_) => self.backend.write_inferior(&bytes).await,
+                    Ok(_) => self.backend.write_inferior(&bytes, eof).await,
                     Err(error) => Err(error),
                 };
                 let _ = response.send(result);

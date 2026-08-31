@@ -67,7 +67,7 @@ impl Gateway {
             ));
         }
         let written = bytes.len();
-        entry.handle.write_inferior(bytes).await?;
+        entry.handle.write_inferior(bytes, false).await?;
         entry
             .handle
             .record_event(DomainEvent::ControllerChanged {
@@ -79,9 +79,19 @@ impl Gateway {
 
     pub(super) async fn io_send_eof(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
+        // 2026-08-31: VEOF cannot wake a read already sleeping in raw mode.
+        // Require a debugger stop so resume restarts the read in canonical mode.
+        if entry.handle.with_state(|state| state.stop_id.is_none()) {
+            return Err(Error::new(
+                ErrorCode::TargetRunning,
+                "send_eof requires a stopped target; interrupt it first",
+            ));
+        }
         // 2026-08-28: Writing VEOF to a PTY never closes its file descriptor;
         // the old close_stdin result falsely claimed an OS-level half-close.
-        entry.handle.write_inferior(vec![0x04]).await?;
+        // 2026-08-31: One VEOF only releases pending input after raw mode;
+        // queue a second boundary so the inferior observes EOF as requested.
+        entry.handle.write_inferior(vec![0x04, 0x04], true).await?;
         entry
             .handle
             .record_event(DomainEvent::ControllerChanged {

@@ -898,11 +898,12 @@ impl SessionHandle {
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))
     }
 
-    pub async fn write_inferior(&self, bytes: Vec<u8>) -> Result<()> {
+    pub async fn write_inferior(&self, bytes: Vec<u8>, eof: bool) -> Result<()> {
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(WorkerRequest::WriteInferior {
                 bytes,
+                eof,
                 response: sender,
             })
             .await

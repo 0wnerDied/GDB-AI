@@ -2,6 +2,7 @@ use std::{path::PathBuf, process::Command};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_core::{
+    ErrorCode,
     config::{ArtifactConfig, Config, OutputEvidenceMode, PersistenceConfig},
     gateway::{Caller, Gateway},
     policy::Profile,
@@ -36,7 +37,7 @@ fn successful(response: ApiResponse) -> ApiResponse {
 }
 
 #[tokio::test]
-async fn preserves_binary_pty_input_in_an_owned_artifact() {
+async fn preserves_binary_pty_input_and_eof_in_an_owned_artifact() {
     if !support::require_commands(&["gdb", "cc"]) {
         return;
     }
@@ -94,7 +95,38 @@ async fn preserves_binary_pty_input_in_an_owned_artifact() {
                     json!({
                         "program": executable,
                         "lease_id": lease,
-                        "stop": "first_instruction",
+                        "stop": "none",
+                        "wait": {"until": "running", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let running_eof = gateway
+        .dispatch(
+            request(
+                "running-eof",
+                Some(&session_id),
+                "inferior_io.send_eof",
+                launched.revision,
+                json!({"lease_id": lease}),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(running_eof.error.unwrap().code, ErrorCode::TargetRunning);
+    let interrupted = successful(
+        gateway
+            .dispatch(
+                request(
+                    "interrupt",
+                    Some(&session_id),
+                    "execution.control",
+                    running_eof.revision,
+                    json!({
+                        "action": "interrupt",
+                        "lease_id": lease,
                         "wait": {"until": "snapshot", "timeout_ms": 5000}
                     }),
                 ),
@@ -102,7 +134,15 @@ async fn preserves_binary_pty_input_in_an_owned_artifact() {
             )
             .await,
     );
-    let stop_id = launched.state.as_ref().unwrap().stop_id.as_ref().unwrap();
+    let stop_id = interrupted
+        .state
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
     let input = successful(
         gateway
             .dispatch(
@@ -110,8 +150,22 @@ async fn preserves_binary_pty_input_in_an_owned_artifact() {
                     "input",
                     Some(&session_id),
                     "inferior_io.write",
-                    launched.revision,
+                    interrupted.revision,
                     json!({"lease_id": lease, "data_base64": "E0FCQw=="}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let eof = successful(
+        gateway
+            .dispatch(
+                request(
+                    "eof",
+                    Some(&session_id),
+                    "inferior_io.send_eof",
+                    input.revision,
+                    json!({"lease_id": lease}),
                 ),
                 &caller,
             )
@@ -124,7 +178,7 @@ async fn preserves_binary_pty_input_in_an_owned_artifact() {
                     "run",
                     Some(&session_id),
                     "execution.control",
-                    input.revision,
+                    eof.revision,
                     json!({
                         "action": "continue",
                         "lease_id": lease,
@@ -167,4 +221,5 @@ async fn preserves_binary_pty_input_in_an_owned_artifact() {
         .decode(artifact["data_base64"].as_str().unwrap())
         .unwrap();
     assert!(bytes.windows(4).any(|window| window == b"\x13ABC"));
+    assert!(bytes.windows(4).any(|window| window == b"EOF\n"));
 }
