@@ -1,7 +1,10 @@
 use super::*;
 use crate::tool_catalog::tool_names;
 use gdb_ai_core::{
-    domain::{BreakpointState, SessionId, SessionState},
+    domain::{
+        BreakpointState, FrameSummary, InferiorId, InferiorState, InferiorStatus, SessionId,
+        SessionState, StopId, ThreadId, ThreadState,
+    },
     protocol::ApiResponse,
 };
 
@@ -160,6 +163,36 @@ fn maps_tool_metadata_outside_canonical_parameters() {
 #[test]
 fn tool_results_keep_only_agent_coordination_state() {
     let mut state = SessionState::creating(SessionId::parse("sess_test").unwrap());
+    state.revision = 7;
+    state.stop_id = Some(StopId("stop_test".into()));
+    state.stopped_inferior_id = Some(InferiorId("inf_test".into()));
+    state.stopped_thread_id = Some(ThreadId("thread_test".into()));
+    state.inferiors.insert(
+        "1".into(),
+        InferiorState {
+            id: InferiorId("inf_test".into()),
+            backend_id: "1".into(),
+            pid: Some(7),
+            generation: 1,
+            status: InferiorStatus::Stopped,
+            exit_code: None,
+            threads: std::collections::BTreeMap::from([(
+                "1".into(),
+                ThreadState {
+                    id: ThreadId("thread_test".into()),
+                    backend_id: "1".into(),
+                    running: false,
+                    frame: Some(FrameSummary {
+                        level: 0,
+                        address: Some("0x1234".into()),
+                        function: Some("main".into()),
+                        source: Some("main.c".into()),
+                        line: Some(7),
+                    }),
+                },
+            )]),
+        },
+    );
     for index in 0..64 {
         let id = format!("bp_{index}");
         state.breakpoints.insert(
@@ -183,11 +216,10 @@ fn tool_results_keep_only_agent_coordination_state() {
         idempotency_key: None,
         parameters: json!({}),
     };
-    let nested_state = state.clone();
     let response = ApiResponse::success(
         &request,
-        Some(state),
-        json!({"status": "ready", "state": nested_state}),
+        Some(state.clone()),
+        serde_json::to_value(&state).unwrap(),
     );
     let canonical_bytes = serde_json::to_vec(&response).unwrap().len();
     let result = tool_result(response, CanonicalMethod::SessionGet);
@@ -197,13 +229,57 @@ fn tool_results_keep_only_agent_coordination_state() {
     let structured = &result["structuredContent"];
     assert_eq!(result["content"][0]["text"], "ok");
     assert_eq!(structured["state"]["lifecycle"], "CREATING");
-    assert_eq!(structured["result"]["status"], "ready");
-    assert!(structured["result"].get("state").is_none());
+    assert_eq!(structured["state"]["frame"]["function"], "main");
+    assert!(structured.get("result").is_none());
     assert!(structured["state"].get("breakpoints").is_none());
     assert!(structured["state"].get("limitations").is_none());
     assert!(structured.get("api_version").is_none());
     assert!(structured.get("request_id").is_none());
     assert!(compact_bytes * 4 < canonical_bytes);
+
+    let historical = tool_result(
+        ApiResponse::success(&request, None, serde_json::to_value(&state).unwrap()),
+        CanonicalMethod::SessionGet,
+    );
+    assert_eq!(historical["structuredContent"]["session_id"], "sess_test");
+    assert_eq!(historical["structuredContent"]["revision"], 7);
+    assert!(
+        historical["structuredContent"]["state"]
+            .get("breakpoints")
+            .is_none()
+    );
+
+    let target = tool_result(
+        ApiResponse::success(
+            &request,
+            Some(state.clone()),
+            serde_json::to_value(&state).unwrap(),
+        ),
+        CanonicalMethod::InspectionGet,
+    );
+    assert!(target["structuredContent"].get("result").is_none());
+
+    let listed = tool_result(
+        ApiResponse::success(
+            &ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "list".into(),
+                session_id: None,
+                method: CanonicalMethod::SessionList,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            None,
+            json!([state]),
+        ),
+        CanonicalMethod::SessionList,
+    );
+    let listed = &listed["structuredContent"]["result"][0];
+    assert_eq!(listed["session_id"], "sess_test");
+    assert_eq!(listed["revision"], 7);
+    assert!(listed["state"].get("breakpoints").is_none());
+    assert!(serde_json::to_vec(listed).unwrap().len() < 2 * 1024);
 }
 
 #[test]

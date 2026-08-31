@@ -8,6 +8,7 @@ use std::{
 };
 
 use gdb_ai_core::{
+    domain::SessionState,
     gateway::{Caller, Gateway},
     protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod},
 };
@@ -542,8 +543,8 @@ fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
 // unrelated to the operation. Detailed views remain available on demand.
 fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Value {
     let ApiResponse {
-        session_id,
-        revision,
+        mut session_id,
+        mut revision,
         mut state,
         mut result,
         warnings,
@@ -554,6 +555,34 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         error,
         ..
     } = response;
+    let mut serialized_state = None;
+    // 2026-08-31: Session status and target results contain SessionState at
+    // the result root, while session list contains an array. Compact those
+    // production shapes instead of only recognizing nested lifecycle state.
+    if matches!(
+        method,
+        CanonicalMethod::SessionGet | CanonicalMethod::InspectionGet
+    ) && let Some(value) = result.as_mut()
+        && let Some((result_session_id, result_revision)) = compact_serialized_session(value)
+    {
+        session_id.get_or_insert(result_session_id);
+        revision.get_or_insert(result_revision);
+        serialized_state = Some(value.take());
+        result = None;
+    }
+    if method == CanonicalMethod::SessionList
+        && let Some(Value::Array(sessions)) = result.as_mut()
+    {
+        for session in sessions {
+            if let Some((session_id, revision)) = compact_serialized_session(session) {
+                *session = json!({
+                    "session_id": session_id,
+                    "revision": revision,
+                    "state": session.take()
+                });
+            }
+        }
+    }
     if let Some(Value::Object(result)) = result.as_mut() {
         if result.get("state").is_some_and(|state| {
             state.get("session_id").is_some() && state.get("revision").is_some()
@@ -610,41 +639,10 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
     if let Some(revision) = revision {
         compact.insert("revision".into(), Value::from(revision));
     }
-    if let Some(state) = state {
-        let mut summary = json!({
-            "lifecycle": state.lifecycle,
-            "backend": state.backend,
-            "consistency": state.consistency,
-            "reconciliation_required": state.reconciliation_required,
-            "event_seq": state.event_seq,
-            "execution_epoch": state.execution_epoch,
-            "target_origin": state.target_origin
-        });
-        let summary = summary.as_object_mut().unwrap();
-        if !state.outcome_unknown_tokens.is_empty() {
-            summary.insert(
-                "outcome_unknown_tokens".into(),
-                json!(state.outcome_unknown_tokens),
-            );
-        }
-        if let Some(stop_id) = state.stop_id {
-            summary.insert("stop_id".into(), json!(stop_id));
-        }
-        if let Some(reason) = state.stop_reason_detail {
-            summary.insert("stop_reason".into(), json!(reason));
-        } else if let Some(reason) = state.stop_reason {
-            summary.insert("stop_reason".into(), Value::String(reason));
-        }
-        if let Some(inferior_id) = state.stopped_inferior_id {
-            summary.insert("inferior_id".into(), json!(inferior_id));
-        }
-        if let Some(thread_id) = state.stopped_thread_id {
-            summary.insert("thread_id".into(), json!(thread_id));
-        }
-        if let Some(snapshot) = state.snapshot {
-            summary.insert("snapshot".into(), json!(snapshot));
-        }
-        compact.insert("state".into(), Value::Object(std::mem::take(summary)));
+    if let Some(state) = state.as_ref() {
+        compact.insert("state".into(), session_coordination_state(state));
+    } else if let Some(state) = serialized_state {
+        compact.insert("state".into(), state);
     }
     if let Some(result) = result {
         compact.insert("result".into(), result);
@@ -668,6 +666,87 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         compact.insert("error".into(), json!(error));
     }
     Value::Object(compact)
+}
+
+fn session_coordination_state(state: &SessionState) -> Value {
+    let mut summary = json!({
+        "lifecycle": state.lifecycle,
+        "backend": state.backend,
+        "consistency": state.consistency,
+        "reconciliation_required": state.reconciliation_required,
+        "event_seq": state.event_seq,
+        "execution_epoch": state.execution_epoch,
+        "target_origin": state.target_origin
+    });
+    let summary = summary.as_object_mut().unwrap();
+    if !state.outcome_unknown_tokens.is_empty() {
+        summary.insert(
+            "outcome_unknown_tokens".into(),
+            json!(state.outcome_unknown_tokens),
+        );
+    }
+    if let Some(stop_id) = &state.stop_id {
+        summary.insert("stop_id".into(), json!(stop_id));
+    }
+    if let Some(reason) = &state.stop_reason_detail {
+        summary.insert("stop_reason".into(), json!(reason));
+    } else if let Some(reason) = &state.stop_reason {
+        summary.insert("stop_reason".into(), Value::String(reason.clone()));
+    }
+    if let Some(inferior_id) = &state.stopped_inferior_id {
+        summary.insert("inferior_id".into(), json!(inferior_id));
+    }
+    if let Some(thread_id) = &state.stopped_thread_id {
+        summary.insert("thread_id".into(), json!(thread_id));
+    }
+    // 2026-08-31: The compact stop state omitted an already captured frame,
+    // forcing Agents to spend another tool call on stop_context.
+    if let Some(frame) = state.stopped_frame() {
+        summary.insert("frame".into(), json!(frame));
+    }
+    if let Some(snapshot) = &state.snapshot {
+        summary.insert("snapshot".into(), json!(snapshot));
+    }
+    Value::Object(std::mem::take(summary))
+}
+
+fn compact_serialized_session(value: &mut Value) -> Option<(String, u64)> {
+    let state = value.as_object_mut()?;
+    let session_id = state.get("session_id")?.as_str()?.to_owned();
+    let revision = state.get("revision")?.as_u64()?;
+    if !state.contains_key("lifecycle")
+        || !state.contains_key("backend")
+        || !state.contains_key("consistency")
+    {
+        return None;
+    }
+    if let Some(reason) = state
+        .remove("stop_reason_detail")
+        .filter(|reason| !reason.is_null())
+    {
+        state.insert("stop_reason".into(), reason);
+    }
+    for (source, destination) in [
+        ("stopped_inferior_id", "inferior_id"),
+        ("stopped_thread_id", "thread_id"),
+    ] {
+        if let Some(id) = state.remove(source).filter(|id| !id.is_null()) {
+            state.insert(destination.into(), id);
+        }
+    }
+    state.retain(|field, value| match field.as_str() {
+        "lifecycle"
+        | "backend"
+        | "consistency"
+        | "reconciliation_required"
+        | "event_seq"
+        | "execution_epoch"
+        | "target_origin" => true,
+        "outcome_unknown_tokens" => value.as_array().is_none_or(|tokens| !tokens.is_empty()),
+        "stop_id" | "stop_reason" | "inferior_id" | "thread_id" | "snapshot" => !value.is_null(),
+        _ => false,
+    });
+    Some((session_id, revision))
 }
 
 fn canonical_request(
