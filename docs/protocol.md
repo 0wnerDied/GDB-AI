@@ -32,6 +32,10 @@ tracking, probe, and kernel projections; `--raw-admin` independently exposes
 the audited raw escape hatch. Hidden MCP projections do not remove methods
 from the canonical API.
 
+Projected mapping records retain start and end addresses, file offset,
+permissions, and path. Filesystem device, inode, and provider-source metadata
+remain available through the canonical API.
+
 Stdio and Unix stream clients may attach `_meta.progressToken` to a request.
 GDB/AI emits ordered `notifications/progress` records before and after the
 operation while continuing to accept cancellation and I/O requests.

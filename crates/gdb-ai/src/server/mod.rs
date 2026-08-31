@@ -699,6 +699,14 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                 result.insert("state".into(), matched);
             }
         }
+        if matches!(
+            method,
+            CanonicalMethod::InspectionGet | CanonicalMethod::InspectionBatch
+        ) {
+            for value in result.values_mut() {
+                compact_mapping_metadata(value);
+            }
+        }
         if result
             .get("stop_id")
             .is_some_and(|stop_id| !stop_id.is_null())
@@ -751,6 +759,33 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         compact.insert("error".into(), json!(error));
     }
     Value::Object(compact)
+}
+
+fn compact_mapping_metadata(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            // 2026-09-01: Repeating filesystem identity and provider names on
+            // every segment dominated mapping views without helping exploit
+            // address decisions. Canonical results retain that metadata.
+            if ["start", "end", "offset", "permissions", "path"]
+                .iter()
+                .all(|field| object.contains_key(*field))
+            {
+                object.remove("device");
+                object.remove("inode");
+                object.remove("source");
+            }
+            for child in object.values_mut() {
+                compact_mapping_metadata(child);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                compact_mapping_metadata(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn is_command_reply(value: &Value) -> bool {

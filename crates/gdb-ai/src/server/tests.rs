@@ -509,6 +509,41 @@ fn tool_results_omit_incidental_metadata_but_preserve_explicit_discovery() {
 }
 
 #[test]
+fn projected_mappings_keep_only_agent_address_semantics() {
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "mappings".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::InspectionGet,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let response = ApiResponse::success(
+        &request,
+        None,
+        json!({"mappings": [{
+            "start": "0x1000",
+            "end": "0x2000",
+            "offset": "0x0",
+            "permissions": "r-xp",
+            "path": "/target",
+            "device": "00:01",
+            "inode": 7,
+            "source": "linux-proc"
+        }]}),
+    );
+
+    let result = tool_result(response, CanonicalMethod::InspectionGet);
+    let mapping = &result["structuredContent"]["result"]["mappings"][0];
+    assert_eq!(mapping["start"], "0x1000");
+    assert_eq!(mapping["path"], "/target");
+    assert!(mapping.get("device").is_none());
+    assert!(mapping.get("inode").is_none());
+    assert!(mapping.get("source").is_none());
+}
+
+#[test]
 fn coalesced_events_preserve_the_complete_resynchronization_state() {
     let request = ApiRequest {
         api_version: API_VERSION.into(),

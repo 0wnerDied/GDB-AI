@@ -55,6 +55,8 @@ Complete these changes before the next comparison:
   and explicit event resources.
 - [x] Compact distinct execution-wait states and deduplicate them when their
   target semantics match the current state.
+- [x] Keep only address, offset, permission, and path semantics in projected
+  mapping records.
 - [x] Expose same-stop inspection batching without loading the unrelated
   advanced catalog.
 - [x] Make canonical Python and TypeScript `Session` clients retain rejected
