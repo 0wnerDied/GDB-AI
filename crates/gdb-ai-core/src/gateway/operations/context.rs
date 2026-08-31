@@ -107,7 +107,7 @@ impl WaitSpec {
         // command, so invalid input could resume or kill a target before erroring.
         if !matches!(
             self.until.as_str(),
-            "accepted" | "running" | "stopped" | "snapshot" | "exited"
+            "accepted" | "running" | "stopped" | "settled" | "snapshot" | "exited"
         ) {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
@@ -172,6 +172,7 @@ pub(super) async fn apply_wait_baseline(
         "accepted" => return Ok(handle.state()),
         "running" => WaitUntil::Running,
         "stopped" => WaitUntil::Stopped,
+        "settled" => WaitUntil::Settled,
         "snapshot" => WaitUntil::Snapshot,
         "exited" => WaitUntil::Exited,
         _ => {

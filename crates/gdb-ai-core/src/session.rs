@@ -154,6 +154,7 @@ pub struct PublishedEvent {
 pub enum WaitUntil {
     Running,
     Stopped,
+    Settled,
     Snapshot,
     Exited,
 }
@@ -990,15 +991,18 @@ fn wait_satisfied(state: &SessionState, until: WaitUntil, baseline: Option<&Wait
             },
             |baseline| state.execution_epoch > baseline.execution_epoch,
         ),
-        WaitUntil::Stopped => {
-            after_baseline
+        WaitUntil::Stopped | WaitUntil::Settled
+            if after_baseline
                 && state.stop_id.is_some()
                 && baseline.is_none_or(|baseline| state.stop_id != baseline.stop_id)
                 && state
                     .inferiors
                     .values()
-                    .any(|inferior| inferior.status == InferiorStatus::Stopped)
+                    .any(|inferior| inferior.status == InferiorStatus::Stopped) =>
+        {
+            true
         }
+        WaitUntil::Stopped => false,
         WaitUntil::Snapshot => state.snapshot.as_ref().is_some_and(|snapshot| {
             after_baseline
                 && snapshot.status == SnapshotStatus::Ready
@@ -1007,10 +1011,15 @@ fn wait_satisfied(state: &SessionState, until: WaitUntil, baseline: Option<&Wait
         }),
         // 2026-08-28: An inferior that was already terminal at the baseline
         // must not satisfy a new run-and-wait operation for another inferior.
-        WaitUntil::Exited => state.inferiors.iter().any(|(backend_id, inferior)| {
-            terminal(inferior.status)
-                && baseline.is_none_or(|baseline| !baseline.terminal_inferiors.contains(backend_id))
-        }),
+        // 2026-08-31: Snapshot waits ran to timeout after normal target exit.
+        // Settled observes either a new stop above or a new terminal inferior.
+        WaitUntil::Exited | WaitUntil::Settled => {
+            state.inferiors.iter().any(|(backend_id, inferior)| {
+                terminal(inferior.status)
+                    && baseline
+                        .is_none_or(|baseline| !baseline.terminal_inferiors.contains(backend_id))
+            })
+        }
     }
 }
 

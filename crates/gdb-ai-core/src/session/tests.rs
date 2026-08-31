@@ -107,6 +107,11 @@ fn exit_wait_ignores_an_already_terminal_inferior() {
         WaitUntil::Exited,
         Some(&baseline)
     ));
+    assert!(!wait_satisfied(
+        reducer.state(),
+        WaitUntil::Settled,
+        Some(&baseline)
+    ));
     reducer
         .apply(&JournaledEvent::for_replay(
             5,
@@ -120,6 +125,11 @@ fn exit_wait_ignores_an_already_terminal_inferior() {
     assert!(wait_satisfied(
         reducer.state(),
         WaitUntil::Exited,
+        Some(&baseline)
+    ));
+    assert!(wait_satisfied(
+        reducer.state(),
+        WaitUntil::Settled,
         Some(&baseline)
     ));
 }

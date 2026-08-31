@@ -199,7 +199,9 @@ const STRING_KIND: ParameterKind = ParameterKind::String;
 const WAIT_FIELDS: &[ParameterField] = &[
     required(
         "until",
-        ParameterKind::Enum(&["accepted", "running", "stopped", "snapshot", "exited"]),
+        ParameterKind::Enum(&[
+            "accepted", "running", "stopped", "settled", "snapshot", "exited",
+        ]),
     ),
     optional("timeout_ms", ParameterKind::Positive),
 ];
