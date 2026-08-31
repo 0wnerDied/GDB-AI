@@ -212,7 +212,10 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
         },
         ..Config::default()
     };
-    config.server.write_lease_ms = 1;
+    // 2026-09-01: A 1 ms recovered lease could expire again between the
+    // projected preflight and dispatch on a loaded CI runner. Keep expiry
+    // deliberate while leaving the mutation itself a bounded scheduling window.
+    config.server.write_lease_ms = 1_000;
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller::local("projected-coordination-test");
     let sequence = AtomicU64::new(1);
@@ -230,7 +233,7 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
     assert!(result.get("write_lease").is_none());
     let session_id = result["session_id"].as_str().unwrap();
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
     let closed = call_tool(
         &gateway,
         &caller,
