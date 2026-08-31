@@ -95,7 +95,10 @@ Read inferior output from stream=pty. Use each returned stop_id for stop-scoped 
 inspection; resuming invalidates old frames and values. For stripped PIEs, set \
 module-offset breakpoints with names shown by inspection mappings; a local \
 explicit-loader breakpoint rebinds when its executable mapping appears. Read large evidence through \
-gdbai:// resources. If HTTP returns an operation_id after waiter timeout, query \
+gdbai:// resources. For fast exploit loops, launch with stop=none, write \
+byte-exact PTY input (line protocols need a trailing LF), then use gdb_run \
+action=wait without operation_id and wait.until=settled; start crash triage with \
+profile=brief. If HTTP returns an operation_id after waiter timeout, query \
 it with gdb_session action=operation_status; use operation_cancel only when \
 the record reports ACTOR_SCOPED cancellation. Close the session when finished.";
 

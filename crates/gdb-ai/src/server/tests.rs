@@ -32,6 +32,10 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "stream=pty",
         "stop_id",
         "inspection mappings",
+        "trailing LF",
+        "without operation_id",
+        "wait.until=settled",
+        "profile=brief",
     ] {
         assert!(instructions.contains(required), "missing {required}");
     }
