@@ -226,19 +226,19 @@ impl ArtifactStore {
         }
 
         let fingerprint = ArtifactFingerprint::from(&metadata);
-        let verified = self
+        let mut verified = self
             .verified
             .lock()
-            .map_err(|_| Error::new(ErrorCode::Internal, "artifact verification cache poisoned"))?
-            .get(digest)
-            .copied()
-            == Some(fingerprint);
+            .map_err(|_| Error::new(ErrorCode::Internal, "artifact verification cache poisoned"))?;
         // 2026-08-29: Cached range verification fixed paging cost but exposed
         // no evidence that the cache was effective or repeatedly missing.
-        if verified {
+        if verified.get(digest).copied() == Some(fingerprint) {
             self.verification_hits.fetch_add(1, Ordering::Relaxed);
         } else {
             self.verification_misses.fetch_add(1, Ordering::Relaxed);
+            // 2026-08-31: Releasing this lock before a cold hash let concurrent
+            // range reads rescan the same artifact. Serialize only cache misses;
+            // range I/O resumes after the verified identity is published.
             // 2026-08-29: Rehashing the complete artifact for every range made
             // sequential paging O(n^2). Reuse verification while the file
             // identity and timestamps are unchanged.
@@ -259,8 +259,14 @@ impl ArtifactStore {
                     "artifact content does not match its digest",
                 ));
             }
-            self.remember_verified(digest, fingerprint)?;
+            // ponytail: Clear this small cache instead of adding an LRU. Add one
+            // only if more than 1024 concurrently paged artifacts matter.
+            if verified.len() >= 1024 {
+                verified.clear();
+            }
+            verified.insert(digest.to_owned(), fingerprint);
         }
+        drop(verified);
         file.seek(std::io::SeekFrom::Start(offset))?;
         let length = (metadata.len() - offset).min(max_bytes as u64) as usize;
         let mut bytes = vec![0; length];
@@ -458,6 +464,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn concurrent_cold_ranges_hash_an_artifact_once() {
+        let directory = tempdir().unwrap();
+        let publisher = ArtifactStore::new(directory.path()).unwrap();
+        let uri = publisher.put(&vec![b'a'; 8 * 1024 * 1024]).unwrap();
+        let reader = ArtifactStore::new(directory.path()).unwrap();
+        let start = Arc::new(std::sync::Barrier::new(17));
+        let readers = (0..16)
+            .map(|_| {
+                let reader = reader.clone();
+                let uri = uri.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    reader.get_range(&uri, 0, 16).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        start.wait();
+        for reader in readers {
+            assert_eq!(reader.join().unwrap().0, vec![b'a'; 16]);
+        }
+        assert_eq!(reader.verification_counts(), (15, 1));
     }
 
     #[test]
