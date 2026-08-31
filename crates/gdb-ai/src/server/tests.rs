@@ -158,6 +158,18 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     )
     .unwrap();
     assert_eq!(read.parameters["max_bytes"], DEFAULT_MCP_IO_READ_BYTES);
+    assert_eq!(
+        map_tool(
+            "gdb_session",
+            json!({"action": "create", "session_id": "sess_invented"}),
+            false,
+            false,
+            5,
+        )
+        .unwrap_err()
+        .code,
+        -32602
+    );
     assert!(!tool_names(false, false).contains(&"gdb_raw"));
     assert!(tool_names(false, true).contains(&"gdb_raw"));
     assert_eq!(

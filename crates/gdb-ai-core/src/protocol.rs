@@ -259,10 +259,12 @@ impl ApiResponse {
     pub fn success(request: &ApiRequest, state: Option<SessionState>, result: Value) -> Self {
         // 2026-08-28: session.create has no request session ID, so derive it
         // from returned state to keep the creation response routable.
-        let session_id = request
-            .session_id
-            .clone()
-            .or_else(|| state.as_ref().map(|state| state.session_id.0.clone()));
+        // 2026-08-31: A caller-supplied ID on a global method could otherwise
+        // mislabel the real session returned by typed state.
+        let session_id = state
+            .as_ref()
+            .map(|state| state.session_id.0.clone())
+            .or_else(|| request.session_id.clone());
         // 2026-08-28: Command evidence stayed buried in result objects and the
         // envelope often pointed at no raw MI record. Promote bounded journal
         // sequence references without traversing large byte arrays.
@@ -484,6 +486,24 @@ mod tests {
         let response = ApiResponse::success(&request, Some(state), json!({"status": "ready"}));
 
         assert!(response.evidence.is_empty());
+    }
+
+    #[test]
+    fn response_session_identity_follows_returned_state() {
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "create".into(),
+            session_id: Some("sess_caller".into()),
+            method: CanonicalMethod::SessionCreate,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({}),
+        };
+        let state = SessionState::creating(crate::domain::SessionId("sess_created".into()));
+
+        let response = ApiResponse::success(&request, Some(state), json!({}));
+
+        assert_eq!(response.session_id.as_deref(), Some("sess_created"));
     }
 
     #[test]

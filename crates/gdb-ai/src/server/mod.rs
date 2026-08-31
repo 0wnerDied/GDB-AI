@@ -487,6 +487,13 @@ fn map_tool(
                 }
             }
         })?;
+    // 2026-08-31: Global MCP actions advertised and accepted a session ID,
+    // allowing session.create responses to be labeled with an invented ID.
+    if session_id.is_some() && !method.requires_session() {
+        return Err(RpcFault::invalid(
+            "global action does not accept session_id",
+        ));
+    }
     match (name, method, action.as_deref()) {
         ("gdb_run", CanonicalMethod::ExecutionControl, Some(action)) => {
             parameters.insert("action".into(), Value::String(action.into()));

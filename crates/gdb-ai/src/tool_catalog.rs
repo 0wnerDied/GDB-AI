@@ -416,7 +416,10 @@ fn projected_method_schema(method: CanonicalMethod) -> Value {
         properties.remove("accept_latest_revision");
         properties.remove("lease_id");
     }
-    properties.insert("session_id".into(), json!({"type": "string"}));
+    if method.requires_session() {
+        properties.insert("session_id".into(), json!({"type": "string"}));
+        required.insert("session_id".into());
+    }
     if effect != Effect::Read {
         properties.insert(
             "expected_revision".into(),
@@ -433,9 +436,6 @@ fn projected_method_schema(method: CanonicalMethod) -> Value {
                 "enum": ["detach_waiter", "interrupt_target", "close_session"]
             }),
         );
-    }
-    if method.requires_session() {
-        required.insert("session_id".into());
     }
     if method == CanonicalMethod::InferiorIoRead {
         schema["properties"]["max_bytes"]["default"] = Value::from(DEFAULT_MCP_IO_READ_BYTES);
@@ -504,6 +504,17 @@ mod tests {
             read["properties"]["max_bytes"]["default"],
             DEFAULT_MCP_IO_READ_BYTES
         );
+        let session = tools
+            .iter()
+            .find(|tool| tool["name"] == "gdb_session")
+            .unwrap();
+        let create = session["inputSchema"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| branch["properties"]["action"]["const"] == "create")
+            .unwrap();
+        assert!(create["properties"].get("session_id").is_none());
     }
 
     #[test]
