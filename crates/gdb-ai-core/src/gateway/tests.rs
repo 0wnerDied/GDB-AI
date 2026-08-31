@@ -201,7 +201,7 @@ async fn lease_cleanup_failure_does_not_retain_a_closed_session() {
     }
     let directory = tempdir().unwrap();
     let sqlite = directory.path().join("state.sqlite");
-    let gateway = Gateway::new(Config {
+    let mut config = Config {
         artifacts: ArtifactConfig {
             path: directory.path().join("artifacts"),
         },
@@ -210,8 +210,9 @@ async fn lease_cleanup_failure_does_not_retain_a_closed_session() {
             sessions: directory.path().join("sessions"),
         },
         ..Config::default()
-    })
-    .unwrap();
+    };
+    config.server.max_sessions = 1;
+    let gateway = Gateway::new(config).unwrap();
     let caller = Caller::local("cleanup-test");
     let created = gateway
         .dispatch(
@@ -228,6 +229,7 @@ async fn lease_cleanup_failure_does_not_retain_a_closed_session() {
         )
         .await;
     let session_id = created.session_id.unwrap();
+    let retained = gateway.entry(&session_id).await.unwrap();
     rusqlite::Connection::open(sqlite)
         .unwrap()
         .execute_batch(
@@ -257,6 +259,23 @@ async fn lease_cleanup_failure_does_not_retain_a_closed_session() {
         "LEASE_CLEANUP_FAILED"
     );
     assert!(gateway.sessions.read().await.is_empty());
+    let replacement = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "replacement-after-cleanup".into(),
+                session_id: None,
+                method: crate::protocol::CanonicalMethod::SessionCreate,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    assert!(replacement.error.is_none(), "{:?}", replacement.error);
+    drop(retained);
+    gateway.shutdown().await;
 }
 
 #[tokio::test]

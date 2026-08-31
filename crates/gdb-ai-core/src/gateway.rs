@@ -47,7 +47,7 @@ impl Caller {
 
 struct SessionEntry {
     handle: SessionHandle,
-    _slot: OwnedSemaphorePermit,
+    slot: Mutex<Option<OwnedSemaphorePermit>>,
     owner: String,
     target_state: tokio::sync::RwLock<()>,
     mutation: Mutex<()>,
@@ -816,11 +816,22 @@ impl Gateway {
             .delete_lease(entry.handle.id())
             .err()
             .map(|error| error.to_string());
-        let live_sessions = {
+        let (retired, live_sessions) = {
             let mut sessions = self.sessions.write().await;
-            sessions.remove(session_id);
-            sessions.keys().cloned().collect()
+            let retired = sessions
+                .get(session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, entry));
+            if retired {
+                sessions.remove(session_id);
+            }
+            (retired, sessions.keys().cloned().collect())
         };
+        // 2026-08-31: In-flight requests can retain SessionEntry clones after
+        // retirement. Release capacity here instead of waiting for the last
+        // unrelated request to drop its Arc.
+        if retired {
+            entry.slot.lock().await.take();
+        }
         if let Err(error) = self.maintain_storage(&live_sessions) {
             tracing::warn!(%error, "closed session retention failed");
         }

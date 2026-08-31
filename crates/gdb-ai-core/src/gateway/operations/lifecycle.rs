@@ -85,7 +85,7 @@ impl Gateway {
         }
         let entry = Arc::new(SessionEntry {
             handle,
-            _slot: slot,
+            slot: tokio::sync::Mutex::new(Some(slot)),
             owner: caller.identity.clone(),
             target_state: tokio::sync::RwLock::new(()),
             mutation: tokio::sync::Mutex::new(()),
