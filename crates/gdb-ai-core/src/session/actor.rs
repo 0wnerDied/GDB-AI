@@ -157,7 +157,25 @@ struct PendingControl {
     escalate_at: tokio::time::Instant,
     escalated: bool,
     started: std::time::Instant,
-    response: oneshot::Sender<Result<CommandReply>>,
+    response: PendingControlResponse,
+}
+
+enum PendingControlResponse {
+    Interrupt(oneshot::Sender<Result<CommandReply>>),
+    Cancel(oneshot::Sender<Result<()>>),
+}
+
+impl PendingControlResponse {
+    fn send(self, result: Result<CommandReply>) {
+        match self {
+            Self::Interrupt(response) => {
+                let _ = response.send(result);
+            }
+            Self::Cancel(response) => {
+                let _ = response.send(result.map(drop));
+            }
+        }
+    }
 }
 
 // Owns both GDB input and reducer state. One ordinary MI command may be in
@@ -1049,7 +1067,26 @@ impl SessionWorker {
                 mode,
                 response,
             } => {
-                let result = self.cancel_operation(&operation_id, mode).await;
+                let result = match mode {
+                    // 2026-09-01: Signalling immediately after ^running could
+                    // abort GDB's startup command before *running, leaving the
+                    // inferior reported as running without a stop event. Once
+                    // the actor is idle, use MI's ordered interrupt path.
+                    OperationCancelMode::InterruptTarget => {
+                        match self.owned_interrupt_command(&operation_id) {
+                            Ok(command) => {
+                                self.execute(command, self.command_timeout).await.map(drop)
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    OperationCancelMode::CloseSession => {
+                        match self.require_active_resume(&operation_id) {
+                            Ok(()) => self.close().await,
+                            Err(error) => Err(error),
+                        }
+                    }
+                };
                 let closed = result.is_ok() && mode == OperationCancelMode::CloseSession;
                 let _ = response.send(result);
                 closed
@@ -1087,19 +1124,12 @@ impl SessionWorker {
         Ok(())
     }
 
-    async fn cancel_operation(
-        &mut self,
-        operation_id: &OperationId,
-        mode: OperationCancelMode,
-    ) -> Result<()> {
+    fn owned_interrupt_command(&self, operation_id: &OperationId) -> Result<MiCommand> {
         // 2026-08-29: A delayed cancellation used a generic interrupt and
         // could stop a later resume. Only the actor can atomically verify
         // which operation still owns the target before applying control.
         self.require_active_resume(operation_id)?;
-        match mode {
-            OperationCancelMode::InterruptTarget => self.backend.signal_interrupt(),
-            OperationCancelMode::CloseSession => self.close().await,
-        }
+        MiCommand::new("-exec-interrupt")
     }
 
     fn require_active_resume(&self, operation_id: &OperationId) -> Result<()> {
@@ -1507,12 +1537,59 @@ impl SessionWorker {
                     mode,
                     response,
                 })) => {
-                    let result = self.cancel_operation(&operation_id, mode).await;
-                    let closed = result.is_ok() && mode == OperationCancelMode::CloseSession;
-                    let _ = response.send(result);
-                    if closed {
-                        self.fatal = true;
-                        return Err(Error::new(ErrorCode::Cancelled, "operation closed session"));
+                    match mode {
+                        OperationCancelMode::CloseSession => {
+                            let result = match self.require_active_resume(&operation_id) {
+                                Ok(()) => self.close().await,
+                                Err(error) => Err(error),
+                            };
+                            let closed = result.is_ok();
+                            let _ = response.send(result);
+                            if closed {
+                                self.fatal = true;
+                                return Err(Error::new(
+                                    ErrorCode::Cancelled,
+                                    "operation closed session",
+                                ));
+                            }
+                        }
+                        OperationCancelMode::InterruptTarget => {
+                            if pending_control.is_some() {
+                                let _ = response.send(Err(Error::new(
+                                    ErrorCode::Conflict,
+                                    "an interrupt is already pending",
+                                )));
+                                continue;
+                            }
+                            let command = match self.owned_interrupt_command(&operation_id) {
+                                Ok(command) => command,
+                                Err(error) => {
+                                    let _ = response.send(Err(error));
+                                    continue;
+                                }
+                            };
+                            match self.begin_command(&command).await {
+                                Ok(control_token) => {
+                                    // 2026-09-01: Process-group SIGINT during
+                                    // inferior startup could abort the accepted
+                                    // resume and leave no stop event. Queue MI
+                                    // first; this timer retains the bounded
+                                    // signal fallback for an unresponsive GDB.
+                                    let now = tokio::time::Instant::now();
+                                    pending_control = Some(PendingControl {
+                                        token: control_token,
+                                        deadline: command_deadline(self.command_timeout),
+                                        escalate_at: now + Duration::from_millis(250),
+                                        escalated: false,
+                                        started: std::time::Instant::now(),
+                                        response: PendingControlResponse::Cancel(response),
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = response.send(Err(error));
+                                }
+                            }
+                        }
                     }
                 }
                 ExecutionInput::Control(Some(ControlRequest::Interrupt {
@@ -1541,7 +1618,7 @@ impl SessionWorker {
                                     escalate_at: now + Duration::from_millis(250),
                                     escalated: false,
                                     started: std::time::Instant::now(),
-                                    response,
+                                    response: PendingControlResponse::Interrupt(response),
                                 });
                             }
                             Err(error) => {
@@ -1560,7 +1637,7 @@ impl SessionWorker {
                         // -exec-interrupt. Escalate only after its MI grace period.
                         if let Err(error) = self.backend.signal_interrupt() {
                             let control = pending_control.take().unwrap();
-                            let _ = control.response.send(Err(error));
+                            control.response.send(Err(error));
                         } else if let Some(control) = &mut pending_control {
                             control.escalated = true;
                         }
@@ -1578,7 +1655,7 @@ impl SessionWorker {
                             control.started.elapsed().as_micros().min(u64::MAX as u128) as u64,
                             true,
                         );
-                        let _ = control.response.send(Err(command_timeout(control.token)));
+                        control.response.send(Err(command_timeout(control.token)));
                     }
                     if normal_result.is_none() && deadline <= now {
                         self.timed_out_tokens.insert(token);
@@ -1617,7 +1694,7 @@ impl SessionWorker {
                             control.started.elapsed().as_micros().min(u64::MAX as u128) as u64,
                             false,
                         );
-                        let _ = control.response.send(command_reply(
+                        control.response.send(command_reply(
                             control.token,
                             record,
                             evidence_seq,
