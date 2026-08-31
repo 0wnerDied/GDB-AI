@@ -571,6 +571,13 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         error,
         ..
     } = response;
+    let preserve_full_state = method == CanonicalMethod::EventsWait
+        && result
+            .as_ref()
+            .and_then(|result| result.get("coalesced"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        && state.is_some();
     // 2026-08-31: Root status, list, and target states are explicitly
     // requested data. Preserve them; only nested command state duplicates the
     // compact envelope and is safe to remove below.
@@ -580,21 +587,25 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         }) {
             result.remove("state");
         }
-        // 2026-08-30: Semantic MCP results repeated complete MI replies and
-        // capability tables already available through evidence and explicit
-        // discovery calls. Keep them only where they are the requested data.
+        // 2026-08-31: Removing these fields by name also stripped explicit
+        // capability discovery. Only serialized CommandReply values duplicate
+        // promoted evidence; capability maps and string inventories are data.
         if !matches!(
             method,
             CanonicalMethod::RawMi | CanonicalMethod::RawConsole | CanonicalMethod::KernelMonitor
         ) {
-            result.remove("command");
-            result.remove("commands");
-        }
-        if !matches!(
-            method,
-            CanonicalMethod::InspectionGet | CanonicalMethod::KernelInspect
-        ) {
-            result.remove("capabilities");
+            if result.get("command").is_some_and(is_command_reply) {
+                result.remove("command");
+            }
+            if result
+                .get("commands")
+                .and_then(Value::as_array)
+                .is_some_and(|commands| {
+                    !commands.is_empty() && commands.iter().all(is_command_reply)
+                })
+            {
+                result.remove("commands");
+            }
         }
         match method {
             CanonicalMethod::BreakpointCreate | CanonicalMethod::BreakpointUpdate
@@ -631,7 +642,14 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         compact.insert("revision".into(), Value::from(revision));
     }
     if let Some(state) = state.as_ref() {
-        compact.insert("state".into(), session_coordination_state(state));
+        compact.insert(
+            "state".into(),
+            if preserve_full_state {
+                json!(state)
+            } else {
+                session_coordination_state(state)
+            },
+        );
     }
     if let Some(result) = result {
         compact.insert("result".into(), result);
@@ -655,6 +673,12 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         compact.insert("error".into(), json!(error));
     }
     Value::Object(compact)
+}
+
+fn is_command_reply(value: &Value) -> bool {
+    value.get("record").is_some_and(Value::is_object)
+        && value.get("stream_records").is_some_and(Value::is_array)
+        && value.get("evidence_seq").is_some_and(Value::is_u64)
 }
 
 fn session_coordination_state(state: &SessionState) -> Value {

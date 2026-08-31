@@ -343,7 +343,7 @@ fn tool_results_preserve_requested_state_and_compact_repeated_state() {
 }
 
 #[test]
-fn tool_results_omit_on_demand_evidence_and_repeated_stop_state() {
+fn tool_results_omit_mi_evidence_but_preserve_explicit_discovery() {
     let request = ApiRequest {
         api_version: API_VERSION.into(),
         request_id: "test".into(),
@@ -360,7 +360,11 @@ fn tool_results_omit_on_demand_evidence_and_repeated_stop_state() {
         )),
         json!({
             "stop_id": "stop_test",
-            "command": {"record": "raw MI"},
+            "command": {
+                "record": {},
+                "stream_records": [],
+                "evidence_seq": 9
+            },
             "capabilities": {"unused": true},
             "frames": []
         }),
@@ -369,7 +373,7 @@ fn tool_results_omit_on_demand_evidence_and_repeated_stop_state() {
     let structured = &result["structuredContent"];
     assert!(structured.get("state").is_none());
     assert!(structured["result"].get("command").is_none());
-    assert!(structured["result"].get("capabilities").is_none());
+    assert!(structured["result"].get("capabilities").is_some());
 
     let running = ApiResponse::success(
         &request,
@@ -384,14 +388,65 @@ fn tool_results_omit_on_demand_evidence_and_repeated_stop_state() {
     let capabilities = ApiResponse::success(
         &request,
         None,
-        json!({"capabilities": {"memory.read": {"status": "supported"}}}),
+        json!({
+            "commands": ["-data-read-memory-bytes"],
+            "capabilities": {"memory.read": {"status": "supported"}}
+        }),
     );
     let capabilities = tool_result(capabilities, CanonicalMethod::InspectionGet);
     assert!(capabilities["structuredContent"]["result"]["capabilities"].is_object());
+    assert_eq!(
+        capabilities["structuredContent"]["result"]["commands"][0],
+        "-data-read-memory-bytes"
+    );
+
+    let session_capabilities = ApiResponse::success(
+        &request,
+        None,
+        json!({
+            "commands": ["-exec-run"],
+            "capabilities": {"execution": {"status": "supported"}}
+        }),
+    );
+    let session_capabilities =
+        tool_result(session_capabilities, CanonicalMethod::SessionCapabilities);
+    assert!(session_capabilities["structuredContent"]["result"]["capabilities"].is_object());
+    assert_eq!(
+        session_capabilities["structuredContent"]["result"]["commands"][0],
+        "-exec-run"
+    );
 
     let raw = ApiResponse::success(&request, None, json!({"command": {"record": "raw MI"}}));
     let raw = tool_result(raw, CanonicalMethod::RawMi);
     assert!(raw["structuredContent"]["result"].get("command").is_some());
+}
+
+#[test]
+fn coalesced_events_preserve_the_complete_resynchronization_state() {
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "events".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::EventsWait,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let mut state = SessionState::creating(SessionId::parse("sess_test").unwrap());
+    state.limitations.push("resynchronization detail".into());
+    let response = ApiResponse::success(
+        &request,
+        Some(state.clone()),
+        json!({"coalesced": true, "state": state}),
+    );
+
+    let result = tool_result(response, CanonicalMethod::EventsWait);
+
+    assert_eq!(
+        result["structuredContent"]["state"]["limitations"][0],
+        "resynchronization detail"
+    );
+    assert!(result["structuredContent"]["result"].get("state").is_none());
 }
 
 #[test]
