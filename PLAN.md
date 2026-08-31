@@ -89,6 +89,29 @@ the native transcript while matching or improving verified exploit progress;
 stable success remains the strongest evidence. Otherwise use the recorded call
 trace for one more bounded change rather than adding a general pwn subsystem.
 
+The blind `SU_evbuffer` comparison reached the same controlled-callback proof
+on five fresh ASLR processes in both groups, but failed the context gate. Native
+GDB used 23,746 transcript bytes and 12m43s; the projected interface used 63
+tool calls, 48,094 response bytes, and 20m34s. Even with one ideal discovery
+instead of the harness's four reconnects, its 15,468-byte catalog plus responses
+was larger than the native transcript. Median projected-call latency was only
+2.118ms, so reduce avoidable calls and misleading schema choices rather than
+optimizing transport latency.
+
+Complete only the issues demonstrated by that trace before another blind task:
+
+- [x] Do not advertise a selectable projected session profile when the server
+  owns that choice, and distinguish inspection profiles in Agent instructions.
+- [x] Require `stop_id` in projected stop-scoped reads while retaining the
+  canonical API's explicit `accept_current_stop` escape hatch.
+- [x] Compact projected status polls to target coordination and the event cursor;
+  keep complete target registries behind their explicit inspection view.
+- [x] Preserve logical module-offset breakpoints across ASLR relaunches without
+  attempting to insert the previous process's absolute address.
+- [x] Replay the failed calls against the release binary and exclude harness
+  reconnect behavior from debugger output.
+- [ ] Use a new blind target for the next post-fix comparative claim.
+
 ## Optional post-North-star work
 
 Non-stop per-thread execution, record/replay providers, fuller multi-inferior
