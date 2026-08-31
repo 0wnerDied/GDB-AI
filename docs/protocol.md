@@ -76,6 +76,8 @@ Canonical I/O and transcript reads return exactly one lossless representation:
 `text` for valid UTF-8 or `data_base64` for binary bytes. This avoids charging
 an Agent context for the same evidence twice. MCP session resource ranges use
 `text` for UTF-8 and a base64 `blob` for binary bytes, never both.
+The inferior PTY starts in raw mode, so `data_base64` input reaches the target
+without terminal flow-control, signal, newline, or echo transformations.
 The `output.evidence` setting selects an `ephemeral_ring`, a retained
 `bounded_spool`, or an `artifact` finalized when the session closes. I/O reads
 and close responses report captured, spooled, dropped, completeness, digest,

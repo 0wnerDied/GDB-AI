@@ -1,5 +1,6 @@
 use std::{path::PathBuf, process::Command};
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_core::{
     config::{ArtifactConfig, Config, OutputEvidenceMode, PersistenceConfig},
     gateway::{Caller, Gateway},
@@ -35,13 +36,13 @@ fn successful(response: ApiResponse) -> ApiResponse {
 }
 
 #[tokio::test]
-async fn finalizes_inferior_output_as_an_owned_artifact() {
+async fn preserves_binary_pty_input_in_an_owned_artifact() {
     if !support::require_commands(&["gdb", "cc"]) {
         return;
     }
     let directory = tempdir().unwrap();
     let executable = directory.path().join("output-target");
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/io.c");
     assert!(
         Command::new("cc")
             .args(["-g", "-O0"])
@@ -110,7 +111,7 @@ async fn finalizes_inferior_output_as_an_owned_artifact() {
                     Some(&session_id),
                     "inferior_io.write",
                     launched.revision,
-                    json!({"lease_id": lease, "text": "x\n"}),
+                    json!({"lease_id": lease, "data_base64": "E0FCQw=="}),
                 ),
                 &caller,
             )
@@ -161,5 +162,9 @@ async fn finalizes_inferior_output_as_an_owned_artifact() {
             )
             .await,
     );
-    assert!(artifact.result.unwrap()["size"].as_u64().unwrap() > 0);
+    let artifact = artifact.result.unwrap();
+    let bytes = BASE64
+        .decode(artifact["data_base64"].as_str().unwrap())
+        .unwrap();
+    assert!(bytes.windows(4).any(|window| window == b"\x13ABC"));
 }

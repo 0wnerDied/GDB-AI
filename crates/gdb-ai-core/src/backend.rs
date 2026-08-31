@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use gdb_ai_mi::{MiFramer, MiLimits, MiRecord, parse_record, quote_c_string};
 use nix::{
     pty::openpty,
-    sys::resource::{Resource, setrlimit},
+    sys::{
+        resource::{Resource, setrlimit},
+        termios::{self, SetArg},
+    },
     unistd::ttyname,
 };
 use serde::Serialize;
@@ -629,6 +632,22 @@ impl GdbBackend {
         std::fs::create_dir_all(session_dir)?;
         let pty = openpty(None, None).map_err(|error| {
             Error::new(ErrorCode::Internal, format!("cannot allocate PTY: {error}"))
+        })?;
+        // 2026-08-31: The default line discipline consumed control bytes such
+        // as XOFF before a stopped inferior could read binary exploit input.
+        // Start the inferior PTY raw so every accepted byte reaches the target.
+        let mut settings = termios::tcgetattr(&pty.slave).map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("cannot read inferior PTY settings: {error}"),
+            )
+        })?;
+        termios::cfmakeraw(&mut settings);
+        termios::tcsetattr(&pty.slave, SetArg::TCSANOW, &settings).map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("cannot configure inferior PTY: {error}"),
+            )
         })?;
         let pty_path = ttyname(&pty.slave).map_err(|error| {
             Error::new(
