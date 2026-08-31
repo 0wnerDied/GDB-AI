@@ -87,12 +87,14 @@ impl RpcFault {
 
 // 2026-08-31: An accepted continue can precede the running notification, so
 // immediate PTY input must request a running-state fence instead of racing it.
+// 2026-09-01: A bare profile=brief was mistaken for a session security
+// profile. Name the inspection tool and view that own this triage profile.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once, keep session_id, then launch; \
 argv excludes the program path. MCP manages leases and revisions. Returned stop_id scopes \
 inspection and expires on resume. For exploit loops use stop=none, byte-exact PTY input \
 (include required LF), then wait until settled; request running before PTY input after \
 continue. Reuse the session with restart, batch deterministic input, and prefer gdb_batch \
-or gdb_agent probe. Start crash triage with profile=brief. PTY mutation needs a server \
+or gdb_agent probe. Triage crashes with gdb_inspect view=crash profile=brief. PTY mutation needs a server \
 configured for lab_mutation. Query a returned operation_id with operation_status. Close \
 the session when done.";
 
@@ -593,9 +595,8 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
             .and_then(Value::as_bool)
             == Some(true)
         && state.is_some();
-    // 2026-08-31: Root status, list, and target states are explicitly
-    // requested data. Preserve them; only nested command state duplicates the
-    // compact envelope and is safe to remove below.
+    // 2026-08-31: Remove only byte-identical nested command state here;
+    // field-name removal also stripped explicitly requested target data.
     if let Some(Value::Object(result)) = result.as_mut() {
         // 2026-08-31: Removing nested state by field name discarded the exact
         // state that satisfied execution.wait when the envelope had already
@@ -662,6 +663,21 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                 // the Agent had a target. Keep only launch-relevant identity.
                 result.retain(|field, _| matches!(field.as_str(), "session_id" | "profile"));
                 state = None;
+            }
+            CanonicalMethod::SessionGet => {
+                // 2026-09-01: Projected status repeated every registry on each
+                // poll, although full target state has its own inspection view.
+                // Keep only target coordination plus the event-wait cursor.
+                if let Ok(status) =
+                    serde_json::from_value::<SessionState>(Value::Object(result.clone()))
+                {
+                    let Value::Object(mut summary) = session_coordination_state(&status) else {
+                        unreachable!();
+                    };
+                    summary.insert("event_seq".into(), Value::from(status.event_seq));
+                    *result = summary;
+                    state = None;
+                }
             }
             CanonicalMethod::BreakpointCreate | CanonicalMethod::BreakpointUpdate
                 if result.get("breakpoint").is_some_and(Value::is_object) =>

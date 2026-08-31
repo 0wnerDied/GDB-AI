@@ -34,7 +34,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "wait until settled",
         "restart",
         "gdb_batch",
-        "profile=brief",
+        "gdb_inspect view=crash profile=brief",
     ] {
         assert!(instructions.contains(required), "missing {required}");
     }
@@ -253,9 +253,10 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
 }
 
 #[test]
-fn tool_results_preserve_requested_state_and_compact_repeated_state() {
+fn tool_results_compact_status_and_preserve_explicit_target_state() {
     let mut state = SessionState::creating(SessionId::parse("sess_test").unwrap());
     state.revision = 7;
+    state.event_seq = 19;
     state.stop_id = Some(StopId("stop_test".into()));
     state.stopped_inferior_id = Some(InferiorId("inf_test".into()));
     state.stopped_thread_id = Some(ThreadId("thread_test".into()));
@@ -321,18 +322,12 @@ fn tool_results_preserve_requested_state_and_compact_repeated_state() {
     let structured = &result["structuredContent"];
     assert_eq!(result["content"][0]["text"], "ok");
     assert!(structured.get("state").is_none());
-    assert_eq!(
-        structured["result"]["breakpoints"]
-            .as_object()
-            .unwrap()
-            .len(),
-        64
-    );
-    assert_eq!(
-        structured["result"]["limitations"][0],
-        "large repeated diagnostic"
-    );
-    assert_eq!(structured["result"]["inferiors"]["1"]["pid"], 7);
+    assert_eq!(structured["result"]["event_seq"], 19);
+    assert_eq!(structured["result"]["pid"], 7);
+    assert_eq!(structured["result"]["frame"]["function"], "main");
+    assert!(structured["result"].get("breakpoints").is_none());
+    assert!(structured["result"].get("limitations").is_none());
+    assert!(structured["result"].get("inferiors").is_none());
     assert!(structured.get("api_version").is_none());
     assert!(structured.get("request_id").is_none());
     assert!(compact_bytes < canonical_bytes);
@@ -342,13 +337,11 @@ fn tool_results_preserve_requested_state_and_compact_repeated_state() {
         CanonicalMethod::SessionGet,
     );
     assert!(historical["structuredContent"].get("session_id").is_none());
-    assert_eq!(historical["structuredContent"]["result"]["revision"], 7);
-    assert_eq!(
-        historical["structuredContent"]["result"]["breakpoints"]
-            .as_object()
-            .unwrap()
-            .len(),
-        64
+    assert_eq!(historical["structuredContent"]["result"]["event_seq"], 19);
+    assert!(
+        historical["structuredContent"]["result"]
+            .get("breakpoints")
+            .is_none()
     );
 
     let target = tool_result(

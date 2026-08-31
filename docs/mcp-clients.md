@@ -178,7 +178,7 @@ For the shortest reliable local crash-or-exit loop:
 
 The result reports `settled_by: "stopped"` with the crash `stop_id` and frame,
 or `settled_by: "exited"` after normal termination. Start bounded crash
-capture with `gdb_inspect` action `crash` and `profile: "brief"`. When an
+capture with `gdb_inspect` view `crash` and `profile: "brief"`. When an
 already-stopped inferior must receive PTY input immediately after continue,
 put `wait: {"until": "running"}` on that continue request. An MCP `gdb_io`
 read with no `max_bytes` returns at most 4096 bytes; request a larger bound only

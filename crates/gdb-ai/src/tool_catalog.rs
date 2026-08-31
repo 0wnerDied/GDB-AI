@@ -161,7 +161,9 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_breakpoints",
-        description: "Create and manage bounded, structured breakpoints and watchpoints.",
+        // 2026-09-01: Agents mistook the executable mapping start for the PIE
+        // base. State the load-bias invariant once instead of in every branch.
+        description: "Manage bounded breakpoints/watchpoints; module_offset = load bias + ELF vaddr.",
         discriminator: Some("action"),
         actions: BREAKPOINT_ACTIONS,
         read_only: false,
@@ -331,7 +333,7 @@ pub fn tools(include_advanced: bool, include_raw: bool) -> Vec<Value> {
             json!({
                 "name": tool.name,
                 "description": tool.description,
-                "inputSchema": projected_schema(tool, include_advanced),
+                "inputSchema": projected_schema(tool, include_advanced, include_raw),
                 "annotations": {
                     "readOnlyHint": tool.read_only
                         || (!include_advanced && tool.name == "gdb_memory"),
@@ -358,7 +360,7 @@ fn available_tools(
         .filter(move |tool| (include_advanced || !tool.advanced) && (include_raw || !tool.raw))
 }
 
-fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
+fn projected_schema(tool: &ToolProjection, include_advanced: bool, admin: bool) -> Value {
     // 2026-08-30: Expanding equivalent canonical parameter contracts once
     // per MCP action repeated schema. Group them before adding the action.
     let mut groups: Vec<(Value, Vec<&str>)> = Vec::new();
@@ -367,7 +369,7 @@ fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
         .iter()
         .filter(|action| include_advanced || !action.advanced)
     {
-        let schema = projected_method_schema(action.method);
+        let schema = projected_method_schema(action.method, admin);
         if let Some((_, names)) = groups
             .iter_mut()
             .find(|(candidate, _)| *candidate == schema)
@@ -395,7 +397,7 @@ fn projected_schema(tool: &ToolProjection, include_advanced: bool) -> Value {
 
 // 2026-08-28: Handwritten MCP fields drifted from canonical validation.
 // Project transport metadata around the same per-method parameter schema.
-fn projected_method_schema(method: CanonicalMethod) -> Value {
+fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
     let mut schema = method.parameter_schema();
     let mut required = schema["required"]
         .as_array()
@@ -418,9 +420,36 @@ fn projected_method_schema(method: CanonicalMethod) -> Value {
     ] {
         properties.remove(field);
     }
+    // 2026-09-01: Ordinary MCP callers cannot select a non-default session
+    // profile. Do not advertise an argument that can only produce a denial.
+    if method == CanonicalMethod::SessionCreate && !admin {
+        properties.remove("profile");
+    }
+    // 2026-09-01: Projected stop-scoped actions advertised an optional stop_id
+    // but rejected omission at runtime. Require explicit attribution while the
+    // canonical envelope retains accept_current_stop for compatibility use.
+    let stop_scoped = properties.remove("accept_current_stop").is_some()
+        && !matches!(
+            method,
+            CanonicalMethod::ExecutionControl | CanonicalMethod::InspectionGet
+        );
+    if stop_scoped {
+        required.insert("stop_id".into());
+    }
     if method.requires_session() {
         properties.insert("session_id".into(), json!({"type": "string"}));
         required.insert("session_id".into());
+    }
+    if method == CanonicalMethod::InspectionGet {
+        // 2026-09-01: State-only views intentionally recover context while
+        // running; only views that always enter the GDB stop fence require it.
+        schema["allOf"] = json!([{
+            "if": {"properties": {"view": {"enum": [
+                "crash", "threads", "stack", "frame", "locals", "arguments",
+                "registers", "modules"
+            ]}}},
+            "then": {"required": ["stop_id"]}
+        }]);
     }
     if method == CanonicalMethod::InferiorIoRead {
         schema["properties"]["max_bytes"]["default"] = Value::from(DEFAULT_MCP_IO_READ_BYTES);
@@ -559,6 +588,54 @@ mod tests {
     }
 
     #[test]
+    fn projects_only_actionable_profile_and_stop_context() {
+        assert!(
+            projected_method_schema(CanonicalMethod::SessionCreate, false)["properties"]
+                .get("profile")
+                .is_none()
+        );
+        assert!(
+            projected_method_schema(CanonicalMethod::SessionCreate, true)["properties"]
+                .get("profile")
+                .is_some()
+        );
+
+        for method in [
+            CanonicalMethod::InspectionBatch,
+            CanonicalMethod::ValueEvaluate,
+            CanonicalMethod::MemoryRead,
+            CanonicalMethod::DisassemblyRead,
+        ] {
+            let schema = projected_method_schema(method, false);
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("stop_id")),
+                "{method} must require stop_id"
+            );
+        }
+        let inspection = projected_method_schema(CanonicalMethod::InspectionGet, false);
+        let stop_views = inspection["allOf"][0]["if"]["properties"]["view"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(stop_views.contains(&json!("crash")));
+        assert!(!stop_views.contains(&json!("stop_context")));
+        assert!(!stop_views.contains(&json!("source")));
+        assert_eq!(
+            inspection["allOf"][0]["then"]["required"],
+            json!(["stop_id"])
+        );
+        assert!(
+            inspection["properties"]
+                .get("accept_current_stop")
+                .is_none()
+        );
+        let canonical = CanonicalMethod::MemoryRead.parameter_schema();
+        assert!(canonical["properties"].get("accept_current_stop").is_some());
+    }
+
+    #[test]
     fn groups_actions_that_share_a_parameter_contract() {
         let tools = tools(false, false);
         let run = tools.iter().find(|tool| tool["name"] == "gdb_run").unwrap();
@@ -603,6 +680,7 @@ mod tests {
             "expected_revision",
             "idempotency_key",
             "cancel_mode",
+            "accept_current_stop",
         ] {
             assert!(!encoded.contains(&format!("\"{field}\"")));
         }
