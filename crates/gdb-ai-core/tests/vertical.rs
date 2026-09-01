@@ -1217,6 +1217,61 @@ async fn local_debugging_vertical_slice() {
     let output = output["text"].as_str().unwrap();
     assert!(output.contains("marker reached"));
     assert!(output.contains("environment: preserved"), "{output:?}");
+    let deleted = successful(
+        gateway
+            .dispatch(
+                request(
+                    "delete-before-restart",
+                    Some(&session_id),
+                    "breakpoint.delete",
+                    changed.revision,
+                    json!({"lease_id": lease_id, "breakpoint_id": breakpoint_id}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let queued = successful(
+        gateway
+            .dispatch(
+                request(
+                    "queue-stale-input",
+                    Some(&session_id),
+                    "inferior_io.write",
+                    deleted.revision,
+                    json!({"lease_id": lease_id, "text": "stale"}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let restarted = successful(
+        gateway
+            .dispatch(
+                request(
+                    "restart-with-stale-input",
+                    Some(&session_id),
+                    "target.restart",
+                    queued.revision,
+                    json!({
+                        "lease_id": lease_id,
+                        "stop": "main",
+                        "wait": {"until": "snapshot", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let restarted_stop = restarted
+        .state
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
     let exited = successful(
         gateway
             .dispatch(
@@ -1224,11 +1279,11 @@ async fn local_debugging_vertical_slice() {
                     "exit",
                     Some(&session_id),
                     "execution.control",
-                    changed.revision,
+                    restarted.revision,
                     json!({
                         "action": "continue",
                         "lease_id": lease_id,
-                        "stop_id": third_stop,
+                        "stop_id": restarted_stop,
                         "input": {"text": "x"},
                         "wait": {"until": "exited", "timeout_ms": 5000}
                     }),
@@ -1239,6 +1294,26 @@ async fn local_debugging_vertical_slice() {
     );
     assert!(exited.state.as_ref().unwrap().stop_id.is_none());
     assert!(exited.result.as_ref().unwrap().get("input").is_none());
+    let output = successful(
+        gateway
+            .dispatch(
+                request(
+                    "output-after-restart",
+                    Some(&session_id),
+                    "inferior_io.read",
+                    None,
+                    json!({"stream": "pty", "after_offset": 0, "max_bytes": 4096}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(
+        output.result.as_ref().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("input received: x")
+    );
 
     successful(
         gateway

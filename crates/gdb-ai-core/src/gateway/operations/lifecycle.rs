@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    context::{WaitSpec, apply_wait, wait_if_requested, wait_spec},
+    context::{WaitSpec, apply_wait, apply_wait_baseline, wait_if_requested, wait_spec},
     encoding::byte_content,
     mi::frame_summary,
     request::{parameters, required_session, string, unsigned},
@@ -17,7 +17,7 @@ use super::{
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{DomainEvent, LeaseId, SessionId, StopReason, TargetOrigin, WriteLease},
+    domain::{DomainEvent, LeaseId, SessionId, StopReason, TargetOrigin, WaitBaseline, WriteLease},
     gateway::{Caller, Gateway, SessionEntry, now_unix_ms, same_principal},
     policy::Profile,
     protocol::ApiRequest,
@@ -803,8 +803,15 @@ impl Gateway {
             .unwrap_or_else(|| start_policy.default_wait(self.config.server.wait_timeout_ms));
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
+        let wait_baseline = WaitBaseline::from(&baseline);
         let reply = entry.handle.command(start_policy.command()?).await?;
-        let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
+        let state = apply_wait_baseline(
+            &entry.handle,
+            wait,
+            Some(&wait_baseline),
+            Some(baseline.execution_epoch + 1),
+        )
+        .await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
         Ok(json!({
             "command": reply,

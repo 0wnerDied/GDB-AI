@@ -823,10 +823,12 @@ impl SessionHandle {
                 {
                     return Ok(current);
                 }
-                // 2026-09-01: A target that exited before a requested running
-                // or stopped state left Agents waiting for a timeout, then
-                // making a second status call to discover the known outcome.
-                if !matches!(until, WaitUntil::Settled | WaitUntil::Exited)
+                // 2026-09-01: Report impossible waits immediately, but only
+                // after the requested execution epoch starts. A restart first
+                // exits the old inferior; that transition cannot fail the new run.
+                if expected_execution_epoch
+                    .is_none_or(|expected| current.execution_epoch == expected)
+                    && !matches!(until, WaitUntil::Settled | WaitUntil::Exited)
                     && let Some(inferior) = terminal_after(&current, baseline.as_ref())
                 {
                     let code = if inferior.status == InferiorStatus::Exited {

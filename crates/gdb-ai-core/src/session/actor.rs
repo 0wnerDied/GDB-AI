@@ -1827,6 +1827,12 @@ impl SessionWorker {
         if let Some(operation) = &operation {
             operation.require_active()?;
         }
+        if command_starts_fresh_inferior(&command) {
+            // 2026-09-01: Unconsumed PTY input survived an aborted inferior and
+            // was executed by its replacement. Input never crosses a fresh-run
+            // generation boundary; Agents send new input after GDB accepts run.
+            self.backend.flush_inferior_input()?;
+        }
         let resumes_target = command_resumes_target(&command);
         let operation_id = operation.as_ref().map(|operation| operation.id().clone());
         if resumes_target {

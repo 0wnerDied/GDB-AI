@@ -646,6 +646,7 @@ pub trait DebugBackend: Send {
         eof: bool,
         deadline: tokio::time::Instant,
     ) -> Result<usize>;
+    fn flush_inferior_input(&mut self) -> Result<()>;
     async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()>;
     fn inferior_output(&self) -> Arc<PtyOutput>;
     fn signal_interrupt(&mut self) -> Result<()>;
@@ -928,6 +929,19 @@ impl GdbBackend {
         Ok(written)
     }
 
+    pub fn flush_inferior_input(&mut self) -> Result<()> {
+        let slave = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.descriptor.pty)?;
+        termios::tcflush(&slave, termios::FlushArg::TCIFLUSH).map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("cannot flush inferior PTY input: {error}"),
+            )
+        })
+    }
+
     pub async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()> {
         let winsize = libc::winsize {
             ws_row: rows,
@@ -1042,6 +1056,10 @@ impl DebugBackend for GdbBackend {
         deadline: tokio::time::Instant,
     ) -> Result<usize> {
         self.write_inferior(bytes, eof, deadline).await
+    }
+
+    fn flush_inferior_input(&mut self) -> Result<()> {
+        self.flush_inferior_input()
     }
 
     async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()> {
