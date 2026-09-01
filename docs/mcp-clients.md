@@ -184,6 +184,8 @@ cleans up its temporary breakpoint in the same call.
 The result reports bounded `output` produced during the call, plus
 `settled_by: "stopped"`, one `stop_id`, and requested observations, or
 `settled_by: "exited"` after normal termination. Use
+`gdb_memory` action `artifact` with the returned URI and `next_offset` to page
+large results without repeating the debugger read. Use
 `gdb_run` action `wait` with `input` when execution is already asynchronous,
 and reserve `gdb_io` for open-ended interaction. An MCP `gdb_io` read with no
 `max_bytes` returns at most 4096 bytes; request a larger bound only when the

@@ -112,6 +112,9 @@ const VALUE_ACTIONS: &[ToolAction] = &[
 ];
 const MEMORY_ACTIONS: &[ToolAction] = &[
     action!("read", MemoryRead),
+    // 2026-09-01: Large reads returned an artifact URI that default MCP
+    // tools could not resolve, forcing Agents to repeat the read in windows.
+    action!("artifact", ArtifactGet),
     advanced_action!("write", MemoryWrite),
     advanced_action!("search", MemorySearch),
     advanced_action!("compare", MemoryCompare),
@@ -202,7 +205,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_memory",
-        description: "Read memory; advanced: write/search/compare.",
+        description: "Read memory or page a returned artifact; advanced: write/search/compare.",
         discriminator: Some("action"),
         actions: MEMORY_ACTIONS,
         read_only: false,
@@ -543,9 +546,25 @@ mod tests {
                 .unwrap()
                 .contains(&Value::String("address".into()))
         );
+        let artifact = memory["inputSchema"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| branch["properties"]["action"]["const"] == "artifact")
+            .unwrap();
+        assert!(
+            artifact["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("uri"))
+        );
         assert_eq!(
             method_for_tool("gdb_memory", Some("read"), false, false),
             Some(CanonicalMethod::MemoryRead)
+        );
+        assert_eq!(
+            method_for_tool("gdb_memory", Some("artifact"), false, false),
+            Some(CanonicalMethod::ArtifactGet)
         );
         assert_eq!(
             method_for_tool("gdb_run", Some("probe"), false, false),
@@ -707,11 +726,12 @@ mod tests {
         let default_bytes = serde_json::to_vec(&tools).unwrap().len();
         // 2026-09-01: Counted probe input adds one compact catalog shape but
         // removes a separate breakpoint, run, and input round trip per probe.
-        assert!(default_bytes < 17_600, "{default_bytes}");
+        // Artifact paging adds 267 bytes and replaces repeated window reads.
+        assert!(default_bytes < 17_900, "{default_bytes}");
         let advanced_bytes = serde_json::to_vec(&super::tools(true, false))
             .unwrap()
             .len();
-        assert!(advanced_bytes < 29_000, "{advanced_bytes}");
+        assert!(advanced_bytes < 29_200, "{advanced_bytes}");
     }
 
     #[test]

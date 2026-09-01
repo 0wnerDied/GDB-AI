@@ -229,6 +229,8 @@ A standalone `gdb_batch` accepts explicit names when the same view is needed
 more than once.
 Action `probe` combines a temporary breakpoint, optional byte-exact input,
 `ignore_count`, continue, bounded capture and output, and cleanup in one call.
+`gdb_memory` action `artifact` pages bytes from an artifact URI returned by a
+large result; use `next_offset` until `truncated` is false.
 If consistency is unknown or lost, the owner can attempt
 recovery or use `gdb_session` action `force_abort` to terminate resources
 without claiming a clean shutdown.
