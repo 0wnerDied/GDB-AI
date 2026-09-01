@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use gdb_ai_core::protocol::CanonicalMethod;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 pub(crate) const DEFAULT_MCP_IO_READ_BYTES: u64 = 4 * 1024;
 
@@ -338,17 +338,25 @@ pub fn tool_exists(tool_name: &str, include_advanced: bool, include_raw: bool) -
 pub fn tools(include_advanced: bool, include_raw: bool) -> Vec<Value> {
     available_tools(include_advanced, include_raw)
         .map(|tool| {
-            json!({
+            let mut projected = json!({
                 "name": tool.name,
                 "description": tool.description,
-                "inputSchema": projected_schema(tool, include_advanced, include_raw),
-                "annotations": {
-                    "readOnlyHint": tool.read_only
-                        || (!include_advanced && tool.name == "gdb_memory"),
-                    "destructiveHint": tool.raw,
-                    "openWorldHint": false
-                }
-            })
+                "inputSchema": projected_schema(tool, include_advanced, include_raw)
+            });
+            // 2026-09-01: Repeating false optional MCP hints on every tool
+            // consumed discovery context and implied certainty where none was
+            // needed. Preserve only positive scheduling and mutation signals.
+            let mut annotations = Map::new();
+            if tool.read_only || (!include_advanced && tool.name == "gdb_memory") {
+                annotations.insert("readOnlyHint".into(), Value::Bool(true));
+            }
+            if tool.raw {
+                annotations.insert("destructiveHint".into(), Value::Bool(true));
+            }
+            if !annotations.is_empty() {
+                projected["annotations"] = Value::Object(annotations);
+            }
+            projected
         })
         .collect()
 }
@@ -449,12 +457,19 @@ fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
         input.insert("maxProperties".into(), Value::from(1));
     }
     if method == CanonicalMethod::AgentProbe {
-        // 2026-09-01: The projected probe repeated every location selector
-        // inside `location` and exposed backend budget knobs with useful
-        // defaults. Keep the shorter top-level GDB selectors Agent-facing.
-        for field in ["budget", "location", "frame_id", "frame_level"] {
+        // 2026-09-01: The projected probe exposed backend budget knobs with
+        // useful defaults. Keep the shorter GDB selectors Agent-facing.
+        for field in ["budget", "frame_id", "frame_level"] {
             properties.remove(field);
         }
+    }
+    if matches!(
+        method,
+        CanonicalMethod::AgentProbe | CanonicalMethod::BreakpointCreate
+    ) {
+        // 2026-09-01: Canonical compatibility accepts both top-level location
+        // selectors and an equivalent wrapper. Project only the shorter form.
+        properties.remove("location");
     }
     if matches!(
         method,
@@ -491,7 +506,10 @@ fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
         values.retain(|value| value != "entry");
     }
     schema["required"] = Value::Array(required.into_iter().map(Value::String).collect());
-    if method == CanonicalMethod::AgentProbe {
+    if matches!(
+        method,
+        CanonicalMethod::AgentProbe | CanonicalMethod::BreakpointCreate
+    ) {
         schema["allOf"][0]["oneOf"]
             .as_array_mut()
             .unwrap()
@@ -652,6 +670,21 @@ mod tests {
                 .unwrap()["annotations"]["readOnlyHint"],
             true
         );
+        assert!(
+            tools(false, false)
+                .into_iter()
+                .find(|tool| tool["name"] == "gdb_run")
+                .unwrap()
+                .get("annotations")
+                .is_none()
+        );
+        assert_eq!(
+            tools(true, true)
+                .into_iter()
+                .find(|tool| tool["name"] == "gdb_raw")
+                .unwrap()["annotations"]["destructiveHint"],
+            true
+        );
         assert!(method_for_tool("gdb_io", Some("close_stdin"), true, false).is_none());
         assert!(method_for_tool("gdb_agent", Some("experiment"), true, false).is_none());
         assert!(method_for_tool("gdb_session", Some("acquire_write_lease"), true, false).is_none());
@@ -704,6 +737,15 @@ mod tests {
                 .is_none()
         );
         assert!(projected["properties"].get("volatile").is_none());
+        let breakpoint = projected_method_schema(CanonicalMethod::BreakpointCreate, false);
+        assert!(breakpoint["properties"].get("location").is_none());
+        assert!(
+            breakpoint["allOf"][0]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|branch| branch["required"][0] != "location")
+        );
     }
 
     #[test]
