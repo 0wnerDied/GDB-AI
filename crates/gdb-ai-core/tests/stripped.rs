@@ -1,7 +1,6 @@
 use std::process::Command;
 
 use gdb_ai_core::{
-    ErrorCode,
     config::{ArtifactConfig, Config, PersistenceConfig},
     domain::SessionId,
     gateway::{Caller, Gateway},
@@ -38,7 +37,7 @@ async fn call(gateway: &Gateway, caller: &Caller, request: ApiRequest) -> ApiRes
 }
 
 #[tokio::test]
-async fn rebinds_module_offset_after_explicit_loader_exec() {
+async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
     if !support::require_commands(&["gdb", "cc", "nm", "readelf", "strip"]) {
         return;
     }
@@ -143,10 +142,10 @@ async fn rebinds_module_offset_after_explicit_loader_exec() {
     assert!(launched.error.is_none(), "{:?}", launched.error);
     let state = launched.state.as_ref().unwrap();
     let stop_id = state.stop_id.as_ref().unwrap().clone();
-    let unresolved_probe = gateway
+    let probed = gateway
         .dispatch(
             request(
-                "unresolved-probe",
+                "pending-probe",
                 Some(&session_id),
                 "agent.probe",
                 launched.revision,
@@ -162,10 +161,32 @@ async fn rebinds_module_offset_after_explicit_loader_exec() {
             &caller,
         )
         .await;
-    assert_eq!(
-        unresolved_probe.error.unwrap().code,
-        ErrorCode::InvalidState
+    assert!(probed.error.is_none(), "{:?}", probed.error);
+    assert_eq!(probed.result.as_ref().unwrap()["capture_count"], 1);
+    assert!(
+        probed.state.as_ref().unwrap().breakpoints.is_empty(),
+        "{:?}",
+        probed.state.as_ref().unwrap().breakpoints
     );
+    let launched = gateway
+        .dispatch(
+            request(
+                "restart-after-probe",
+                Some(&session_id),
+                "target.restart",
+                probed.revision,
+                json!({
+                    "lease_id": lease_id,
+                    "stop": "first_instruction",
+                    "wait": {"until": "snapshot", "timeout_ms": 5000}
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(launched.error.is_none(), "{:?}", launched.error);
+    let state = launched.state.as_ref().unwrap();
+    let stop_id = state.stop_id.as_ref().unwrap().clone();
     let breakpoint = gateway
         .dispatch(
             request(

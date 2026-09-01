@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use gdb_ai_mi::{MiResult, MiValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -8,17 +9,21 @@ use super::{
     evaluation::{safe_evaluate_command, validate_expression},
     execution::{append_turn_output, feed_inferior, turn_input},
     mi::{normalized_frames, result_text},
+    reconciliation::synchronize_breakpoint,
     request::{required_session, string},
 };
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{OperationId, OperationRecord, OperationStatus, StopReason, WaitBaseline},
+    domain::{
+        BreakpointId, DomainEvent, OperationId, OperationRecord, OperationStatus, StopReason,
+        WaitBaseline,
+    },
     gateway::{Gateway, SessionEntry},
     normalize::breakpoint_number as inserted_breakpoint_number,
     persistence::Store,
     protocol::ApiRequest,
-    session::{SessionHandle, WaitUntil},
+    session::{PendingModuleBreakpoint, SessionHandle, WaitUntil},
 };
 
 #[derive(Clone, Deserialize)]
@@ -177,17 +182,46 @@ struct ProbeBreakpoint {
     handle: SessionHandle,
     store: Arc<Store>,
     operation_id: OperationId,
+    breakpoint_id: Option<BreakpointId>,
     backend_number: Option<String>,
 }
 
+// 2026-09-01: GDB can omit the deletion notification for a rebound probe,
+// leaving its temporary breakpoint in the managed registry after successful
+// cleanup. Publish the confirmed deletion once so later turns see no residue.
+async fn delete_probe_breakpoint(handle: &SessionHandle, backend_number: String) -> Result<()> {
+    handle
+        .cleanup_command(MiCommand::new("-break-delete")?.bare(backend_number.clone())?)
+        .await?;
+    if handle.state().breakpoints.contains_key(&backend_number) {
+        handle
+            .record_event(DomainEvent::BreakpointDeleted { backend_number })
+            .await?;
+    }
+    Ok(())
+}
+
 impl ProbeBreakpoint {
+    fn current_backend_number(&self) -> Option<String> {
+        self.breakpoint_id
+            .as_ref()
+            .and_then(|id| {
+                self.handle.with_state(|state| {
+                    state
+                        .breakpoints
+                        .values()
+                        .find(|breakpoint| &breakpoint.id == id)
+                        .map(|breakpoint| breakpoint.backend_number.clone())
+                })
+            })
+            .or_else(|| self.backend_number.clone())
+    }
+
     async fn remove(&mut self) -> Result<()> {
-        let Some(backend_number) = self.backend_number.clone() else {
+        let Some(backend_number) = self.current_backend_number() else {
             return Ok(());
         };
-        self.handle
-            .cleanup_command(MiCommand::new("-break-delete")?.bare(backend_number)?)
-            .await?;
+        delete_probe_breakpoint(&self.handle, backend_number).await?;
         // 2026-08-28: Taking the number before GDB confirmed deletion made a
         // failed cleanup impossible to retry from Drop.
         self.backend_number = None;
@@ -197,22 +231,17 @@ impl ProbeBreakpoint {
 
 impl Drop for ProbeBreakpoint {
     fn drop(&mut self) {
-        let Some(backend_number) = self.backend_number.take() else {
+        let Some(backend_number) = self.current_backend_number() else {
             return;
         };
+        self.backend_number = None;
         let handle = self.handle.clone();
         let store = self.store.clone();
         let operation_id = self.operation_id.clone();
         // 2026-08-28: Dropping a cancelled probe skipped its trailing delete
         // and leaked a temporary breakpoint into later Agent operations.
         tokio::spawn(async move {
-            let cleanup = async {
-                handle
-                    .cleanup_command(MiCommand::new("-break-delete")?.bare(backend_number)?)
-                    .await?;
-                Result::<()>::Ok(())
-            }
-            .await;
+            let cleanup = delete_probe_breakpoint(&handle, backend_number).await;
             if let Ok(Some(mut operation)) = store.get_operation(&operation_id.0) {
                 // 2026-08-28: Drop also retries failed explicit cleanup. Only
                 // an in-flight operation represents cancellation; preserve any
@@ -316,18 +345,9 @@ impl Gateway {
         {
             insert = insert.bare("-i")?.bare(ignore.to_string())?;
         }
-        let (location, unresolved_module) =
-            self.breakpoint_location(&request.parameters, &initial)?;
-        // 2026-08-28: Probe hit attribution is bound to one backend number,
-        // so an unresolved module breakpoint cannot be transparently rebound.
-        // Require the existing mappings precondition instead of misreporting a
-        // later replacement breakpoint as an unrelated stop.
-        if unresolved_module.is_some() {
-            return Err(Error::new(
-                ErrorCode::InvalidState,
-                "agent.probe module_offset requires the module to be mapped",
-            ));
-        }
+        let (location, module_offset) = self.breakpoint_location(&request.parameters, &initial)?;
+        let pending_module = module_offset.filter(|_| !location.starts_with('*'));
+        let rebind_command = pending_module.as_ref().map(|_| insert.clone());
         insert = insert.string(location);
         let inserted = entry.handle.command(insert).await?;
         let backend_number = inserted_breakpoint_number(&inserted.record)?;
@@ -349,8 +369,41 @@ impl Gateway {
             handle: entry.handle.clone(),
             store: self.store.clone(),
             operation_id: operation.operation_id.clone(),
+            breakpoint_id: None,
             backend_number: Some(backend_number.clone()),
         };
+        if let Some(fields) =
+            MiResult::find(inserted.record.results(), "bkpt").and_then(MiValue::results)
+        {
+            synchronize_breakpoint(&entry.handle, fields).await?;
+        }
+        breakpoint.breakpoint_id = entry
+            .handle
+            .state()
+            .breakpoints
+            .get(&backend_number)
+            .map(|state| state.id.clone());
+        // 2026-09-01: Probes rejected stripped PIE offsets before their module
+        // mapped, forcing Agents to create and drive a second breakpoint. Use
+        // the existing stable-ID rebind path so attribution and cleanup follow
+        // the materialized breakpoint inside the same probe turn.
+        if let (Some((module, offset)), Some(command), Some(id)) = (
+            pending_module,
+            rebind_command,
+            breakpoint.breakpoint_id.clone(),
+        ) {
+            entry
+                .handle
+                .register_pending_module_breakpoint(PendingModuleBreakpoint {
+                    id,
+                    backend_number: backend_number.clone(),
+                    module,
+                    offset,
+                    enabled: true,
+                    command,
+                })
+                .await?;
+        }
         self.store.upsert_operation(&operation)?;
         let started = tokio::time::Instant::now();
         let mut captures = Vec::new();
@@ -391,7 +444,16 @@ impl Gateway {
                         .handle
                         .wait_after(WaitUntil::Snapshot, remaining, &baseline)
                         .await?;
-                    require_probe_hit(&request.parameters, &baseline, &stopped, &backend_number)?;
+                    let expected_breakpoint =
+                        breakpoint.current_backend_number().ok_or_else(|| {
+                            Error::new(ErrorCode::InvalidState, "probe breakpoint disappeared")
+                        })?;
+                    require_probe_hit(
+                        &request.parameters,
+                        &baseline,
+                        &stopped,
+                        &expected_breakpoint,
+                    )?;
                     let capture = self
                         .capture_probe_observation(request, &entry, &stopped, &budget, &mut calls)
                         .await?;
