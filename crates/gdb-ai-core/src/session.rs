@@ -306,6 +306,10 @@ impl SessionHandle {
         self.inferior_output.evidence_status()
     }
 
+    pub(crate) fn inferior_output_position(&self) -> u64 {
+        self.inferior_output.position().0
+    }
+
     pub async fn command(&self, command: MiCommand) -> Result<CommandReply> {
         self.command_with_timeout(command, self.command_timeout)
             .await

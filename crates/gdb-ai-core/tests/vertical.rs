@@ -1294,22 +1294,8 @@ async fn local_debugging_vertical_slice() {
     );
     assert!(exited.state.as_ref().unwrap().stop_id.is_none());
     assert!(exited.result.as_ref().unwrap().get("input").is_none());
-    let output = successful(
-        gateway
-            .dispatch(
-                request(
-                    "output-after-restart",
-                    Some(&session_id),
-                    "inferior_io.read",
-                    None,
-                    json!({"stream": "pty", "after_offset": 0, "max_bytes": 4096}),
-                ),
-                &caller,
-            )
-            .await,
-    );
     assert!(
-        output.result.as_ref().unwrap()["text"]
+        exited.result.as_ref().unwrap()["output"]["text"]
             .as_str()
             .unwrap()
             .contains("input received: x")

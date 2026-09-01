@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::{
     context::{WaitSpec, apply_wait, apply_wait_baseline, context_options, wait_spec},
-    encoding::{MAX_INFERIOR_INPUT_BYTES, input_bytes},
+    encoding::{MAX_INFERIOR_INPUT_BYTES, byte_content, input_bytes},
     reconciliation::{reconcile_breakpoints, synchronize_breakpoint},
     request::{bool_value, required_session, string},
 };
@@ -80,6 +80,35 @@ fn append_input(result: &mut Value, input: Option<&Value>) {
         result["input"] = input.clone();
     }
 }
+
+// 2026-09-01: Synchronous execution discarded PTY bytes produced in the same
+// turn, forcing Agents into a second schema lookup and read. Return only bytes
+// after the pre-execution cursor, bounded to the ordinary inline read limit.
+async fn append_turn_output(
+    entry: &SessionEntry,
+    offset: u64,
+    result: &mut Value,
+) -> Result<()> {
+    let read = entry
+        .handle
+        .read_output(OutputRing::Inferior, offset, 4 * 1024)
+        .await?;
+    if read.bytes.is_empty() {
+        return Ok(());
+    }
+    let end = entry.handle.inferior_output_position();
+    let mut output = Value::Object(byte_content(read.bytes));
+    if read.gap {
+        output["gap"] = Value::Bool(true);
+        output["available_from"] = Value::from(read.available_from);
+    }
+    if read.next_offset < end {
+        output["truncated"] = Value::Bool(true);
+        output["next_offset"] = Value::from(read.next_offset);
+    }
+    result["output"] = output;
+    Ok(())
+}
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
@@ -89,7 +118,7 @@ use crate::{
     gateway::{Gateway, SessionEntry},
     normalize::breakpoint_number as inserted_breakpoint_number,
     protocol::{ApiRequest, CanonicalMethod},
-    session::{CommandReply, PendingModuleBreakpoint, settled_by},
+    session::{CommandReply, OutputRing, PendingModuleBreakpoint, settled_by},
 };
 
 pub(super) fn breakpoint_location(parameters: &Value) -> Result<String> {
@@ -215,6 +244,7 @@ impl Gateway {
             ));
         }
         let entry = self.entry(required_session(request)?).await?;
+        let output_offset = entry.handle.inferior_output_position();
         let state = entry.handle.state();
         let mut operation = OperationRecord {
             operation_id: OperationId::new(),
@@ -306,6 +336,7 @@ impl Gateway {
                         );
                     }
                     append_input(&mut result, input.as_ref());
+                    append_turn_output(&entry, output_offset, &mut result).await?;
                     self.append_stop_observations(request, &state, &mut result)
                         .await;
                     Ok(result)
@@ -323,6 +354,7 @@ impl Gateway {
                         "command": reply
                     });
                     append_input(&mut result, input.as_ref());
+                    append_turn_output(&entry, output_offset, &mut result).await?;
                     Ok(result)
                 }
                 Err(error) => {
@@ -352,6 +384,7 @@ impl Gateway {
     pub(super) async fn execution_wait(&self, request: &ApiRequest) -> Result<Value> {
         let input = turn_input(&request.parameters)?;
         let entry = self.entry(required_session(request)?).await?;
+        let output_offset = entry.handle.inferior_output_position();
         let mut operation = request
             .parameters
             .get("operation_id")
@@ -420,6 +453,7 @@ impl Gateway {
         }
         let mut result = json!({ "operation": operation, "state": state });
         append_input(&mut result, input.as_ref());
+        append_turn_output(&entry, output_offset, &mut result).await?;
         if let Some(settled_by) = settled_by {
             result["settled_by"] = Value::String(settled_by.into());
         }

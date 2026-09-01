@@ -155,7 +155,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_run",
-        description: "Input, run to a stop, inspect, or probe.",
+        description: "Input, run to a stop, and return bounded output/inspection; or probe.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,

@@ -176,8 +176,9 @@ For the shortest reliable local crash-or-exit loop:
 4. Use `gdb_session` action `restart` for the next attempt instead of creating
    another session. Batch deterministic commands into one PTY write.
 
-The result reports `settled_by: "stopped"`, one `stop_id`, and the requested
-observations, or `settled_by: "exited"` after normal termination. Use
+The result reports bounded `output` produced during the call, plus
+`settled_by: "stopped"`, one `stop_id`, and requested observations, or
+`settled_by: "exited"` after normal termination. Use
 `gdb_run` action `wait` with `input` when execution is already asynchronous,
 and reserve `gdb_io` for open-ended interaction. An MCP `gdb_io` read with no
 `max_bytes` returns at most 4096 bytes; request a larger bound only when the
