@@ -431,11 +431,13 @@ fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
     }
     if matches!(
         method,
-        CanonicalMethod::ExecutionControl | CanonicalMethod::ExecutionWait
+        CanonicalMethod::ExecutionControl
+            | CanonicalMethod::ExecutionWait
+            | CanonicalMethod::AgentProbe
     ) && let Some(input) = properties.get_mut("input").and_then(Value::as_object_mut)
     {
-        // 2026-09-01: Two repeated required-field branches pushed the default
-        // tool catalog over its prompt budget. A closed two-field object with
+        // 2026-09-01: Repeating required-field branches for inline input
+        // inflated each projected tool. A closed two-field object with
         // min/max one preserves the same exactly-one input contract.
         input.remove("oneOf");
         input.insert("minProperties".into(), Value::from(1));
@@ -691,12 +693,25 @@ mod tests {
             1
         );
         assert!(control["properties"]["inspect"].is_object());
+        let probe = run["inputSchema"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| branch["properties"]["action"]["const"] == "probe")
+            .unwrap();
+        assert!(probe["properties"]["input"].is_object());
+        assert_eq!(probe["properties"]["input"]["minProperties"], 1);
+        assert_eq!(probe["properties"]["input"]["maxProperties"], 1);
+        assert!(probe["properties"]["input"].get("oneOf").is_none());
+        assert!(probe["properties"]["ignore_count"].is_object());
         let default_bytes = serde_json::to_vec(&tools).unwrap().len();
-        assert!(default_bytes < 17_500, "{default_bytes}");
+        // 2026-09-01: Counted probe input adds one compact catalog shape but
+        // removes a separate breakpoint, run, and input round trip per probe.
+        assert!(default_bytes < 17_600, "{default_bytes}");
         let advanced_bytes = serde_json::to_vec(&super::tools(true, false))
             .unwrap()
             .len();
-        assert!(advanced_bytes < 28_700, "{advanced_bytes}");
+        assert!(advanced_bytes < 29_000, "{advanced_bytes}");
     }
 
     #[test]

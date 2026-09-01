@@ -61,7 +61,12 @@ async fn probe_and_experiment_capture_and_clean_up() {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
     assert!(
         Command::new("cc")
-            .args(["-g", "-O0", "-fno-omit-frame-pointer"])
+            .args([
+                "-g",
+                "-O0",
+                "-fno-omit-frame-pointer",
+                "-DGDB_AI_REPEAT_MARKER",
+            ])
             .arg(source)
             .arg("-o")
             .arg(&executable)
@@ -124,6 +129,8 @@ async fn probe_and_experiment_capture_and_clean_up() {
                 "lease_id": lease_id,
                 "stop_id": stop_id(&launched),
                 "location": {"function": "marker"},
+                "ignore_count": 1,
+                "input": {"text": "x"},
                 "capture": [{"expression": "global_value"}],
                 "budget": {
                     "max_calls": 8,
@@ -141,7 +148,31 @@ async fn probe_and_experiment_capture_and_clean_up() {
     );
     assert_eq!(
         probe.result.as_ref().unwrap()["captures"][0]["observation"]["observations"][0]["value"],
-        "7"
+        "8"
+    );
+
+    let exited = call(
+        &gateway,
+        &caller,
+        request(
+            "continue-after-probe",
+            Some(&session_id),
+            "execution.control",
+            probe.revision,
+            json!({
+                "action": "continue",
+                "lease_id": lease_id,
+                "stop_id": stop_id(&probe),
+                "wait": {"until": "exited", "timeout_ms": 5000}
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        exited.result.as_ref().unwrap()["output"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("input received: x")
     );
 
     let restarted = call(
@@ -151,7 +182,7 @@ async fn probe_and_experiment_capture_and_clean_up() {
             "restart",
             Some(&session_id),
             "target.restart",
-            probe.revision,
+            exited.revision,
             json!({
                 "lease_id": lease_id,
                 "stop": "first_instruction"

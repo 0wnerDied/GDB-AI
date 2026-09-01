@@ -227,8 +227,9 @@ result key. Successful input adds no echo; a stalled write reports exact
 `gdb_io` for open-ended interaction.
 A standalone `gdb_batch` accepts explicit names when the same view is needed
 more than once.
-Action `probe` combines a temporary breakpoint, continue, bounded capture, and
-cleanup in one call. If consistency is unknown or lost, the owner can attempt
+Action `probe` combines a temporary breakpoint, optional byte-exact input,
+`ignore_count`, continue, bounded capture and output, and cleanup in one call.
+If consistency is unknown or lost, the owner can attempt
 recovery or use `gdb_session` action `force_abort` to terminate resources
 without claiming a clean shutdown.
 

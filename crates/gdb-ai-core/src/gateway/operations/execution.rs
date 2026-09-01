@@ -10,7 +10,7 @@ use super::{
     request::{bool_value, required_session, string},
 };
 
-fn turn_input(parameters: &Value) -> Result<Option<Vec<u8>>> {
+pub(super) fn turn_input(parameters: &Value) -> Result<Option<Vec<u8>>> {
     let Some(input) = parameters.get("input") else {
         return Ok(None);
     };
@@ -24,7 +24,7 @@ fn turn_input(parameters: &Value) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-async fn feed_inferior(
+pub(super) async fn feed_inferior(
     entry: &SessionEntry,
     input: Option<Vec<u8>>,
     timeout: Duration,
@@ -84,7 +84,7 @@ fn append_input(result: &mut Value, input: Option<&Value>) {
 // 2026-09-01: Synchronous execution discarded PTY bytes produced in the same
 // turn, forcing Agents into a second schema lookup and read. Return only bytes
 // after the pre-execution cursor, bounded to the ordinary inline read limit.
-async fn append_turn_output(
+pub(super) async fn append_turn_output(
     entry: &SessionEntry,
     offset: u64,
     result: &mut Value,

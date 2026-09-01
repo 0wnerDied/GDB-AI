@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::{
     context::{context_options, require_stopped_context},
     evaluation::{safe_evaluate_command, validate_expression},
+    execution::{append_turn_output, feed_inferior, turn_input},
     mi::{normalized_frames, result_text},
     request::{required_session, string},
 };
@@ -272,7 +273,9 @@ impl Gateway {
     }
 
     pub(super) async fn agent_probe(&self, request: &ApiRequest) -> Result<Value> {
+        let input = turn_input(&request.parameters)?;
         let entry = self.entry(required_session(request)?).await?;
+        let output_offset = entry.handle.inferior_output_position();
         let initial = entry.handle.state();
         require_stopped_context(&request.parameters, &initial)?;
         let budget: ObservationBudget = request
@@ -305,6 +308,13 @@ impl Gateway {
         if let Some(condition) = request.parameters.get("condition").and_then(Value::as_str) {
             validate_expression(condition)?;
             insert = insert.bare("-c")?.string(condition);
+        }
+        if let Some(ignore) = request
+            .parameters
+            .get("ignore_count")
+            .and_then(Value::as_u64)
+        {
+            insert = insert.bare("-i")?.bare(ignore.to_string())?;
         }
         let (location, unresolved_module) =
             self.breakpoint_location(&request.parameters, &initial)?;
@@ -349,6 +359,8 @@ impl Gateway {
         // commands exceed it repeatedly. Bound the complete experiment body.
         let run_result: Result<Value> =
             match tokio::time::timeout(Duration::from_millis(budget.wall_time_ms), async {
+                let mut input = input;
+                let mut input_result = None;
                 for hit in 1..=max_hits {
                     if calls >= budget.max_calls {
                         return Err(Error::new(
@@ -362,6 +374,15 @@ impl Gateway {
                         .command(MiCommand::new("-exec-continue")?)
                         .await?;
                     calls += 1;
+                    if hit == 1 {
+                        // 2026-09-01: Counted breakpoint probes previously
+                        // required a separate run call to feed menu input.
+                        // Feed once after GDB accepts the first resume.
+                        let remaining = Duration::from_millis(budget.wall_time_ms)
+                            .checked_sub(started.elapsed())
+                            .ok_or_else(|| Error::new(ErrorCode::Timeout, "probe timed out"))?;
+                        input_result = feed_inferior(&entry, input.take(), remaining).await?;
+                    }
                     let elapsed = started.elapsed();
                     let remaining = Duration::from_millis(budget.wall_time_ms)
                         .checked_sub(elapsed)
@@ -386,18 +407,26 @@ impl Gateway {
                         &serialized,
                         "probe-observations",
                     )?;
-                    Ok(json!({
+                    let mut result = json!({
                         "captures": [],
                         "artifact": uri,
                         "capture_count": captures.len(),
                         "truncated": true
-                    }))
+                    });
+                    if let Some(input) = input_result {
+                        result["input"] = input;
+                    }
+                    Ok(result)
                 } else {
-                    Ok(json!({
+                    let mut result = json!({
                         "captures": captures,
                         "capture_count": captures.len(),
                         "truncated": false
-                    }))
+                    });
+                    if let Some(input) = input_result {
+                        result["input"] = input;
+                    }
+                    Ok(result)
                 }
             })
             .await
@@ -440,6 +469,7 @@ impl Gateway {
                 self.store.upsert_operation(&operation)?;
                 result["operation"] = serde_json::to_value(operation)?;
                 result["breakpoint"] = Value::String(backend_number);
+                append_turn_output(&entry, output_offset, &mut result).await?;
                 if let Some(error) = cleanup_error {
                     result["cleanup_warning"] = Value::String(error.to_string());
                     result["partial"] = Value::Bool(true);

@@ -22,6 +22,10 @@ int main(void)
   alarm(300);
   printf("environment: %s\n", environment ? environment : "unset");
   marker();
+#ifdef GDB_AI_REPEAT_MARKER
+  global_value = 8;
+  marker();
+#endif
   input = getchar();
   printf("input received: %c\n", input);
   return global_value == 42 ? 0 : 1;

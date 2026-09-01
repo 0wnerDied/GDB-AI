@@ -940,6 +940,22 @@ fn classifies_linux_memory_ranges_without_client_input() {
 }
 
 #[test]
+fn inline_probe_input_is_a_target_mutation() {
+    let mut request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "probe-effect".into(),
+        session_id: Some("sess_effect".into()),
+        method: crate::protocol::CanonicalMethod::AgentProbe,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    assert_eq!(effect_for_request(&request), Effect::Control);
+    request.parameters = json!({"input": {"text": "x"}});
+    assert_eq!(effect_for_request(&request), Effect::TargetMutation);
+}
+
+#[test]
 fn every_session_method_rejects_a_missing_session_id() {
     let directory = tempdir().unwrap();
     let gateway = Gateway::new(Config {

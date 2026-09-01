@@ -832,6 +832,8 @@ impl CanonicalMethod {
                 optional("source", SOURCE_KIND),
                 optional("module_offset", MODULE_OFFSET_KIND),
                 optional("condition", String),
+                optional("ignore_count", Unsigned),
+                optional("input", INFERIOR_INPUT_KIND),
                 optional("capture", CAPTURE_KIND),
                 optional("max_hits", Unsigned),
                 optional(

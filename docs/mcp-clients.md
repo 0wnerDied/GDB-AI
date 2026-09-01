@@ -176,6 +176,10 @@ For the shortest reliable local crash-or-exit loop:
 4. Use `gdb_session` action `restart` for the next attempt instead of creating
    another session. Batch deterministic commands into one PTY write.
 
+For a counted one-shot breakpoint, use `gdb_run` action `probe` with `input`,
+`ignore_count`, and bounded expression or stack captures. It inserts and
+cleans up its temporary breakpoint in the same call.
+
 The result reports bounded `output` produced during the call, plus
 `settled_by: "stopped"`, one `stop_id`, and requested observations, or
 `settled_by: "exited"` after normal termination. Use

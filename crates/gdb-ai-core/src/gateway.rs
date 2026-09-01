@@ -78,12 +78,15 @@ struct RateWindow {
 }
 
 fn effect_for_request(request: &ApiRequest) -> Effect {
-    // 2026-09-01: Inline input made execution.wait state-changing while MCP
-    // lease preparation still classified it as a read. Derive admission,
-    // coordination, policy, and audit from the same request-level effect.
+    // 2026-09-01: Inline input retained the method's read/control effect, so
+    // lease preparation and policy missed its target mutation. Derive all
+    // admission, coordination, and audit from the same request-level effect.
     if matches!(
         request.method,
-        CanonicalMethod::ExecutionControl | CanonicalMethod::ExecutionWait
+        CanonicalMethod::ExecutionControl
+            | CanonicalMethod::ExecutionWait
+            | CanonicalMethod::AgentProbe
+            | CanonicalMethod::AgentExperiment
     ) && request.parameters.get("input").is_some()
     {
         Effect::TargetMutation

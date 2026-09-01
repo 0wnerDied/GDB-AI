@@ -88,14 +88,13 @@ impl RpcFault {
 // 2026-09-01: Keep coordination implicit for the common path: projected run
 // waits for stop/exit and projected reads bind the current stop. Explicit
 // running and stop pins remain for PTY races and cross-call evidence.
-const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once, keep session_id, then launch; \
-argv excludes the program path. MCP manages leases and revisions. Returned stop_id scopes \
-follow-up evidence but may be omitted for a current-stop read. gdb_run waits for stop/exit \
-by default; add bounded input and inspect views to feed byte-exact PTY data and return \
-same-stop evidence in that call. Request accepted/running only for deliberate asynchronous \
-I/O. Reuse the session with restart, use gdb_run action=probe for one-call breakpoint \
-capture, gdb_batch for current-stop views, and gdb_inspect view=crash profile=brief for \
-triage. Query a returned operation_id after timeout. Close when done.";
+const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; launch; argv \
+excludes program. MCP manages leases and revisions. stop_id pins later evidence; omit it for \
+current-stop reads. gdb_run waits for stop/exit; input feeds byte-exact PTY data and inspect \
+returns same-stop views. Use accepted/running only for async I/O. Reuse the session with \
+restart; use gdb_run action=probe with input and ignore_count for \
+one-call counted capture. Use gdb_batch for current-stop views and gdb_inspect view=crash \
+profile=brief for triage. Query a returned operation_id after timeout. Close when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {
