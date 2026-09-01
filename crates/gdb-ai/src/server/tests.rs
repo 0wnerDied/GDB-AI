@@ -32,7 +32,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "MCP manages leases and revisions",
         "stop_id",
         "byte-exact PTY",
-        "waits for stop/exit",
+        "waits for stop/exit when wait is omitted",
         "restart",
         "gdb_batch",
         "gdb_run action=probe",

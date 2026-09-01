@@ -158,9 +158,9 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_run",
-        // 2026-09-01: A blind Agent treated probe as non-interactive and
-        // rebuilt its counted input and memory workflow from separate calls.
-        description: "Run with exact input/output; probe skips hits and captures expressions, stack, or memory.",
+        // 2026-09-01: Blind Agents rebuilt probe workflows or selected an
+        // exit-only wait even though one default turn already handles both.
+        description: "Run with exact input/output; omit wait for stop-or-exit. Probe skips hits and captures expressions, stack, or memory.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,
