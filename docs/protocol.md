@@ -94,6 +94,10 @@ Canonical I/O and transcript reads return exactly one lossless representation:
 or `data_base64` otherwise. This avoids both JSON control-byte expansion and
 charging an Agent for the same evidence twice. MCP session resource ranges use
 `text` for UTF-8 and a base64 `blob` for binary bytes, never both.
+Projected successful tools leave MCP text content empty because the structured
+result is authoritative. Their compact current state omits healthy/active
+defaults, null frame fields, and a complete ready snapshot that repeats the
+same `stop_id`; abnormal values remain explicit.
 The inferior PTY starts in raw mode, so `data_base64` input reaches the target
 without terminal flow-control, signal, newline, or echo transformations.
 `send_eof` requires a stopped inferior, switches to canonical mode, and queues

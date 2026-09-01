@@ -8,7 +8,9 @@ use std::{
 };
 
 use gdb_ai_core::{
-    domain::{Consistency, SessionState, TargetOrigin},
+    domain::{
+        BackendHealth, Consistency, SessionLifecycle, SessionState, SnapshotStatus, TargetOrigin,
+    },
     gateway::{Caller, Gateway},
     protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod},
 };
@@ -584,16 +586,15 @@ fn binds_current_stop(method: CanonicalMethod) -> bool {
 
 fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
     let is_error = response.error.is_some();
-    let mut summary = match &response.error {
-        Some(error) => format!("{}: {}", error.code.code_name(), error.message),
-        // 2026-08-30: The structured result already carries the revision.
-        // Repeating it in successful text content costs tokens on every Agent
-        // call without adding information.
-        None => "ok".into(),
-    };
+    let mut summary = response
+        .error
+        .as_ref()
+        .map(|error| format!("{}: {}", error.code.code_name(), error.message));
     // 2026-08-31: MCP text duplicated potentially large structured errors.
     // Keep a short compatibility summary and preserve the full error below.
-    if summary.len() > MAX_TOOL_SUMMARY_BYTES {
+    if let Some(summary) = &mut summary
+        && summary.len() > MAX_TOOL_SUMMARY_BYTES
+    {
         let mut end = MAX_TOOL_SUMMARY_BYTES - 3;
         while !summary.is_char_boundary(end) {
             end -= 1;
@@ -602,8 +603,15 @@ fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
         summary.push_str("...");
     }
     let structured = compact_tool_response(response, method);
+    // 2026-09-01: A blind trace paid a redundant `ok` text block on every
+    // successful structured result. MCP permits an empty content array; keep
+    // text only for errors that need a compatibility summary.
+    let content = summary
+        .map(|text| json!({"type": "text", "text": text}))
+        .into_iter()
+        .collect::<Vec<_>>();
     json!({
-        "content": [{"type": "text", "text": summary}],
+        "content": content,
         "structuredContent": structured,
         "isError": is_error
     })
@@ -914,11 +922,17 @@ fn is_command_reply(value: &Value) -> bool {
 }
 
 fn session_coordination_state(state: &SessionState) -> Value {
-    let mut summary = json!({
-        "lifecycle": state.lifecycle,
-        "backend": state.backend
-    });
+    let mut summary = json!({});
     let summary = summary.as_object_mut().unwrap();
+    // 2026-09-01: Healthy active state repeated on every successful stopped
+    // turn in the blind trace. Absence means the ordinary case; exceptional
+    // lifecycle and backend values remain explicit.
+    if state.lifecycle != SessionLifecycle::Active {
+        summary.insert("lifecycle".into(), json!(state.lifecycle));
+    }
+    if state.backend != BackendHealth::Healthy {
+        summary.insert("backend".into(), json!(state.backend));
+    }
     if state.consistency != Consistency::Clean {
         summary.insert("consistency".into(), json!(state.consistency));
     }
@@ -969,10 +983,32 @@ fn session_coordination_state(state: &SessionState) -> Value {
     // 2026-08-31: The compact stop state omitted an already captured frame,
     // forcing Agents to spend another tool call on stop_context.
     if let Some(frame) = state.stopped_frame() {
-        summary.insert("frame".into(), json!(frame));
+        let mut frame = json!(frame);
+        if let Some(frame) = frame.as_object_mut() {
+            frame.retain(|_, value| !value.is_null());
+            if frame.get("function").and_then(Value::as_str) == Some("??") {
+                frame.remove("function");
+            }
+        }
+        summary.insert("frame".into(), frame);
     }
-    if let Some(snapshot) = &state.snapshot {
+    if let Some(snapshot) = &state.snapshot
+        && (snapshot.partial
+            || snapshot.status != SnapshotStatus::Ready
+            || state.stop_id.as_ref() != Some(&snapshot.stop_id))
+    {
+        // A ready, complete snapshot for this stop repeats stop_id and adds no
+        // next-action semantics. Preserve every incomplete or mismatched case.
         summary.insert("snapshot".into(), json!(snapshot));
+    }
+    if let Some(reason) = summary
+        .get_mut("stop_reason")
+        .and_then(Value::as_object_mut)
+    {
+        reason.retain(|_, value| !value.is_null());
+        if reason.get("disposition").and_then(Value::as_str) == Some("keep") {
+            reason.remove("disposition");
+        }
     }
     Value::Object(std::mem::take(summary))
 }

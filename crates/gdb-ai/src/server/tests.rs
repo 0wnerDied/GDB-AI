@@ -3,8 +3,9 @@ use crate::tool_catalog::tool_names;
 use gdb_ai_core::{
     config::{ArtifactConfig, Config, PersistenceConfig},
     domain::{
-        BreakpointState, FrameSummary, InferiorId, InferiorState, InferiorStatus, SessionId,
-        SessionState, SnapshotRef, SnapshotStatus, StopId, ThreadId, ThreadState,
+        BackendHealth, BreakpointState, FrameSummary, InferiorId, InferiorState, InferiorStatus,
+        SessionId, SessionLifecycle, SessionState, SnapshotRef, SnapshotStatus, StopId, StopReason,
+        TargetOrigin, ThreadId, ThreadState,
     },
     protocol::ApiResponse,
 };
@@ -415,7 +416,14 @@ fn tool_results_compact_status_and_preserve_explicit_target_state() {
     let mut state = SessionState::creating(SessionId::parse("sess_test").unwrap());
     state.revision = 7;
     state.event_seq = 19;
+    state.lifecycle = SessionLifecycle::Active;
+    state.backend = BackendHealth::Healthy;
+    state.target_origin = TargetOrigin::Local;
     state.stop_id = Some(StopId("stop_test".into()));
+    state.stop_reason_detail = Some(StopReason::Breakpoint {
+        backend_number: Some("1".into()),
+        disposition: Some("keep".into()),
+    });
     state.stopped_inferior_id = Some(InferiorId("inf_test".into()));
     state.stopped_thread_id = Some(ThreadId("thread_test".into()));
     state.inferiors.insert(
@@ -458,6 +466,12 @@ fn tool_results_compact_status_and_preserve_explicit_target_state() {
         );
     }
     state.limitations.push("large repeated diagnostic".into());
+    state.snapshot = Some(SnapshotRef {
+        snapshot_id: "snapshot_test".into(),
+        stop_id: StopId("stop_test".into()),
+        status: SnapshotStatus::Ready,
+        partial: false,
+    });
     let request = ApiRequest {
         api_version: API_VERSION.into(),
         request_id: "test".into(),
@@ -478,7 +492,7 @@ fn tool_results_compact_status_and_preserve_explicit_target_state() {
         .unwrap()
         .len();
     let structured = &result["structuredContent"];
-    assert_eq!(result["content"][0]["text"], "ok");
+    assert!(result["content"].as_array().unwrap().is_empty());
     assert!(structured.get("state").is_none());
     assert_eq!(structured["result"]["event_seq"], 19);
     assert_eq!(structured["result"]["pid"], 7);
@@ -534,6 +548,26 @@ fn tool_results_compact_status_and_preserve_explicit_target_state() {
     assert_eq!(
         launch["structuredContent"]["state"]["frame"]["function"],
         "main"
+    );
+    assert!(
+        launch["structuredContent"]["state"]
+            .get("lifecycle")
+            .is_none()
+    );
+    assert!(
+        launch["structuredContent"]["state"]
+            .get("backend")
+            .is_none()
+    );
+    assert!(
+        launch["structuredContent"]["state"]
+            .get("snapshot")
+            .is_none()
+    );
+    assert!(
+        launch["structuredContent"]["state"]["stop_reason"]
+            .get("disposition")
+            .is_none()
     );
     assert!(
         launch["structuredContent"]["state"]
