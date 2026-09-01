@@ -341,7 +341,7 @@ const INSPECTION_VIEWS: &[&str] = &[
 // 2026-08-29: The last generic object and array contracts let malformed
 // batch, signal, and raw MI children pass the shared protocol boundary.
 const INSPECTION_BATCH_ITEM_FIELDS: &[ParameterField] = &[
-    required("name", ParameterKind::String),
+    optional("name", ParameterKind::String),
     required("view", ParameterKind::Enum(INSPECTION_VIEWS)),
     optional("inferior_id", ParameterKind::String),
     optional("thread_id", ParameterKind::String),
@@ -368,6 +368,23 @@ const INSPECTION_BATCH_ITEM_OBJECT: ObjectContract =
 const INSPECTION_BATCH_ITEM_KIND: ParameterKind =
     ParameterKind::Shape(&INSPECTION_BATCH_ITEM_OBJECT);
 const INSPECTION_BATCH_KIND: ParameterKind = ParameterKind::ArrayOf(&INSPECTION_BATCH_ITEM_KIND);
+
+// 2026-09-01: Repeating the complete batch-item contract in both run branches
+// charged every Agent turn for rarely used cross-thread and source selectors.
+// Keep the high-value stop-turn controls here; gdb_batch retains the full set.
+const TURN_INSPECTION_ITEM_FIELDS: &[ParameterField] = &[
+    required("view", ParameterKind::Enum(INSPECTION_VIEWS)),
+    optional("limit", ParameterKind::Unsigned),
+    optional("roles", ParameterKind::StringArray),
+    optional(
+        "profile",
+        ParameterKind::Enum(&["minimal", "brief", "standard", "deep"]),
+    ),
+];
+const TURN_INSPECTION_ITEM_OBJECT: ObjectContract =
+    ObjectContract::new(TURN_INSPECTION_ITEM_FIELDS, 0, &[]);
+const TURN_INSPECTION_ITEM_KIND: ParameterKind = ParameterKind::Shape(&TURN_INSPECTION_ITEM_OBJECT);
+const TURN_INSPECTION_KIND: ParameterKind = ParameterKind::ArrayOf(&TURN_INSPECTION_ITEM_KIND);
 
 const SIGNAL_POLICY_FIELDS: &[ParameterField] = &[
     required("stop", ParameterKind::Boolean),
@@ -615,10 +632,12 @@ impl CanonicalMethod {
                 ),
                 optional("location", String),
                 optional("wait", WAIT_KIND),
+                optional("inspect", TURN_INSPECTION_KIND),
             ]),
             ExecutionWait => MethodContract::plain(vec![
                 optional("operation_id", String),
                 required("wait", WAIT_KIND),
+                optional("inspect", TURN_INSPECTION_KIND),
             ]),
             BreakpointCreate => MethodContract::plain(vec![
                 optional(
@@ -953,6 +972,10 @@ mod tests {
                 json!({"requests": [{"name": "stack", "view": "stack", "extra": true}]}),
             ),
             (
+                CanonicalMethod::ExecutionControl,
+                json!({"action": "continue", "inspect": [{"view": "stack", "extra": true}]}),
+            ),
+            (
                 CanonicalMethod::SignalUpdate,
                 json!({"signals": {"SIGUSR1": {"stop": true, "print": true}}}),
             ),
@@ -974,9 +997,22 @@ mod tests {
         CanonicalMethod::InspectionBatch
             .validate_parameters(&json!({
                 "requests": [
-                    {"name": "stack", "view": "stack", "limit": 4},
-                    {"name": "registers", "view": "registers", "roles": ["pc", "sp"]}
+                    {"view": "stack", "limit": 4},
+                    {"view": "registers", "roles": ["pc", "sp"]}
                 ]
+            }))
+            .unwrap();
+        CanonicalMethod::ExecutionControl
+            .validate_parameters(&json!({
+                "action": "continue",
+                "wait": {"until": "settled"},
+                "inspect": [{"view": "registers", "roles": ["pc", "sp"]}]
+            }))
+            .unwrap();
+        CanonicalMethod::ExecutionWait
+            .validate_parameters(&json!({
+                "wait": {"until": "settled"},
+                "inspect": [{"view": "stack", "limit": 4}]
             }))
             .unwrap();
         CanonicalMethod::SignalUpdate

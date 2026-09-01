@@ -39,6 +39,12 @@ number or quality of useful debugging turns. Preserve precise stop, frame,
 memory, register, and crash evidence; remove transport bookkeeping, duplicated
 state, and low-value prose from the Agent surface.
 
+GDB/AI is a semantic compressor over GDB, not a decomposition of GDB commands
+into transport steps. Strip prompts, terminal formatting, control bytes, and
+duplicate state while preserving exact debugger facts. One projected call
+should perform an operation that GDB can complete atomically; coordination IDs
+are returned evidence and optional cross-call pins, not required preflight.
+
 Complete these changes before the next comparison:
 
 - [x] Remove lease, revision, idempotency, and cancellation bookkeeping from
@@ -89,8 +95,8 @@ the native transcript while matching or improving verified exploit progress;
 stable success remains the strongest evidence. Otherwise use the recorded call
 trace for one more bounded change rather than adding a general pwn subsystem.
 
-The blind `SU_evbuffer` comparison reached the same controlled-callback proof
-on five fresh ASLR processes in both groups, but failed the context gate. Native
+The blind exploit comparison reached the same controlled-callback proof on five
+fresh ASLR processes in both groups, but failed the context gate. Native
 GDB used 23,746 transcript bytes and 12m43s; the projected interface used 63
 tool calls, 48,094 response bytes, and 20m34s. Even with one ideal discovery
 instead of the harness's four reconnects, its 15,468-byte catalog plus responses
@@ -102,8 +108,14 @@ Complete only the issues demonstrated by that trace before another blind task:
 
 - [x] Do not advertise a selectable projected session profile when the server
   owns that choice, and distinguish inspection profiles in Agent instructions.
-- [x] Require `stop_id` in projected stop-scoped reads while retaining the
-  canonical API's explicit `accept_current_stop` escape hatch.
+- [x] Bind omitted projected reads to the current stop while retaining explicit
+  `stop_id` pins for cross-call evidence.
+- [x] Make projected continue and step wait for stop or exit by default while
+  preserving explicit asynchronous waits for interactive input.
+- [x] Reuse the existing breakpoint-run-capture probe through `gdb_run` instead
+  of making Agents reconstruct it from several tools.
+- [x] Let `gdb_run` control and wait actions return selected views from their
+  resulting stop so one debugger turn does not require a follow-up batch call.
 - [x] Compact projected status polls to target coordination and the event cursor;
   keep complete target registries behind their explicit inspection view.
 - [x] Preserve logical module-offset breakpoints across ASLR relaunches without

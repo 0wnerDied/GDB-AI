@@ -85,18 +85,18 @@ impl RpcFault {
     }
 }
 
-// 2026-08-31: An accepted continue can precede the running notification, so
-// immediate PTY input must request a running-state fence instead of racing it.
-// 2026-09-01: A bare profile=brief was mistaken for a session security
-// profile. Name the inspection tool and view that own this triage profile.
+// 2026-09-01: Keep coordination implicit for the common path: projected run
+// waits for stop/exit and projected reads bind the current stop. Explicit
+// running and stop pins remain for PTY races and cross-call evidence.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once, keep session_id, then launch; \
 argv excludes the program path. MCP manages leases and revisions. Returned stop_id scopes \
-inspection and expires on resume. For exploit loops use stop=none, byte-exact PTY input \
-(include required LF), then wait until settled; request running before PTY input after \
-continue. Reuse the session with restart, batch deterministic input, and prefer gdb_batch \
-or gdb_agent probe. Triage crashes with gdb_inspect view=crash profile=brief. PTY mutation needs a server \
-configured for lab_mutation. Query a returned operation_id with operation_status. Close \
-the session when done.";
+follow-up evidence but may be omitted for a current-stop read. gdb_run waits for stop/exit \
+by default; request running before byte-exact PTY input (include required LF). Reuse the \
+session with restart and batch deterministic input. Add inspect views to gdb_run for the \
+same resulting stop, use gdb_run action=probe for one-call breakpoint capture, and \
+gdb_batch for the current stop alone. Triage crashes with gdb_inspect view=crash \
+profile=brief. PTY writes require lab_mutation. Query a returned operation_id after \
+timeout. Close when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {
@@ -514,6 +514,12 @@ fn map_tool(
     match (name, method, action.as_deref()) {
         ("gdb_run", CanonicalMethod::ExecutionControl, Some(action)) => {
             parameters.insert("action".into(), Value::String(action.into()));
+            // 2026-09-01: Returning immediately after MI acceptance made the
+            // ordinary GDB continue/step workflow require a separate wait or
+            // status call. Explicit accepted/running waits stay asynchronous.
+            parameters
+                .entry("wait")
+                .or_insert_with(|| json!({"until": "settled"}));
         }
         ("gdb_breakpoints", CanonicalMethod::BreakpointUpdate, Some("enable" | "disable")) => {
             parameters.insert(
@@ -533,6 +539,12 @@ fn map_tool(
         }
         _ => {}
     }
+    if binds_current_stop(method) && !parameters.contains_key("stop_id") {
+        // 2026-09-01: Projected reads used to reject the exact current stop
+        // unless the Agent first fetched its ID. Bind it inside this request;
+        // explicit IDs still reject stale cross-call context in the core.
+        parameters.insert("accept_current_stop".into(), Value::Bool(true));
+    }
     Ok(ApiRequest {
         api_version: API_VERSION.into(),
         request_id: format!("mcp_{sequence}"),
@@ -542,6 +554,32 @@ fn map_tool(
         idempotency_key,
         parameters: Value::Object(parameters),
     })
+}
+
+fn binds_current_stop(method: CanonicalMethod) -> bool {
+    use CanonicalMethod::*;
+    matches!(
+        method,
+        InspectionGet
+            | InspectionSnapshot
+            | InspectionBatch
+            | ValueEvaluate
+            | ValueCreate
+            | ValueChildren
+            | ValueUpdate
+            | ValueRelease
+            | MemoryRead
+            | MemoryWrite
+            | MemorySearch
+            | MemoryCompare
+            | RegisterRead
+            | RegisterWrite
+            | DisassemblyRead
+            | AgentHypothesisCheck
+            | AgentProbe
+            | AgentExperiment
+            | KernelInspect
+    )
 }
 
 fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
@@ -627,6 +665,13 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
             {
                 result.remove("commands");
             }
+            // 2026-09-01: Successful projected responses discarded evidence
+            // URIs but left their MI journal counters throughout the payload.
+            // Remove the orphaned transport metadata; raw tools retain it.
+            result.remove("evidence_seq");
+            for value in result.values_mut() {
+                remove_evidence_sequences(value);
+            }
         }
         if matches!(
             method,
@@ -679,6 +724,34 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                     state = None;
                 }
             }
+            CanonicalMethod::ExecutionControl
+                if result.get("wait_status").and_then(Value::as_str) == Some("COMPLETED") =>
+            {
+                // 2026-09-01: A synchronous run returned an operation handle
+                // and completion label even though no follow-up was possible
+                // or needed. Preserve handles only for async/timeout recovery.
+                result.remove("operation_id");
+                result.remove("wait_status");
+                remove_batched_stop_ids(result, "observations");
+            }
+            CanonicalMethod::InspectionBatch => {
+                // 2026-09-01: Batch revision is transport coordination, while
+                // stop_id already attributes every observation Agents consume.
+                result.remove("revision");
+                remove_batched_stop_ids(result, "results");
+            }
+            CanonicalMethod::ExecutionWait => {
+                // 2026-09-01: A completed projected wait returned its full
+                // operation record even though only a timeout needs a handle.
+                result.remove("operation");
+                remove_batched_stop_ids(result, "observations");
+            }
+            CanonicalMethod::AgentProbe | CanonicalMethod::AgentExperiment => {
+                // 2026-09-01: Successful probes embedded their full persisted
+                // operation record. Captures and cleanup status are sufficient;
+                // failed operations retain their error evidence in the envelope.
+                result.remove("operation");
+            }
             CanonicalMethod::BreakpointCreate | CanonicalMethod::BreakpointUpdate
                 if result.get("breakpoint").is_some_and(Value::is_object) =>
             {
@@ -717,7 +790,10 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         }
         if matches!(
             method,
-            CanonicalMethod::InspectionGet | CanonicalMethod::InspectionBatch
+            CanonicalMethod::InspectionGet
+                | CanonicalMethod::InspectionBatch
+                | CanonicalMethod::ExecutionControl
+                | CanonicalMethod::ExecutionWait
         ) {
             for value in result.values_mut() {
                 compact_mapping_metadata(value);
@@ -775,6 +851,33 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         compact.insert("error".into(), json!(error));
     }
     Value::Object(compact)
+}
+
+fn remove_evidence_sequences(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("evidence_seq");
+            for child in object.values_mut() {
+                remove_evidence_sequences(child);
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(remove_evidence_sequences),
+        _ => {}
+    }
+}
+
+fn remove_batched_stop_ids(result: &mut Map<String, Value>, field: &str) {
+    if result.get("stop_id").is_none_or(Value::is_null) {
+        return;
+    }
+    // 2026-09-01: Every batch item repeated the outer stop ID. The batch is
+    // already executed under one stable-stop fence, so one attribution is
+    // both smaller and equally precise.
+    if let Some(items) = result.get_mut(field).and_then(Value::as_object_mut) {
+        for item in items.values_mut().filter_map(Value::as_object_mut) {
+            item.remove("stop_id");
+        }
+    }
 }
 
 fn compact_mapping_metadata(value: &mut Value) {

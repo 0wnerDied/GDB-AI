@@ -4,7 +4,7 @@ use gdb_ai_mi::{MiResult, MiValue};
 use serde_json::{Value, json};
 
 use super::{
-    context::{apply_wait, apply_wait_baseline, context_options, wait_spec},
+    context::{WaitSpec, apply_wait, apply_wait_baseline, context_options, wait_spec},
     reconciliation::{reconcile_breakpoints, synchronize_breakpoint},
     request::{bool_value, required_session, string},
 };
@@ -16,7 +16,7 @@ use crate::{
     },
     gateway::{Gateway, SessionEntry},
     normalize::breakpoint_number as inserted_breakpoint_number,
-    protocol::ApiRequest,
+    protocol::{ApiRequest, CanonicalMethod},
     session::{CommandReply, PendingModuleBreakpoint, settled_by},
 };
 
@@ -80,6 +80,22 @@ pub(super) fn breakpoint_scope(
     Ok(command)
 }
 
+fn validate_inspection_wait(parameters: &Value, wait: Option<&WaitSpec>) -> Result<()> {
+    if parameters.get("inspect").is_some()
+        && wait
+            .is_none_or(|wait| !matches!(wait.until.as_str(), "stopped" | "settled" | "snapshot"))
+    {
+        // 2026-09-01: Observing after an accepted/running fence raced the
+        // inferior and could not describe the stop caused by this action.
+        // Reject before execution; stop-producing waits remain one turn.
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "inspect requires a stopped, settled, or snapshot wait",
+        ));
+    }
+    Ok(())
+}
+
 fn catchpoint_command(kind: &str) -> Result<MiCommand> {
     match kind {
         "throw" => MiCommand::new("-catch-throw"),
@@ -118,6 +134,7 @@ impl Gateway {
     pub(super) async fn execution_control(&self, request: &ApiRequest) -> Result<Value> {
         let action = string(&request.parameters, "action")?;
         let wait = wait_spec(&request.parameters)?;
+        validate_inspection_wait(&request.parameters, wait.as_ref())?;
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         let mut operation = OperationRecord {
@@ -197,6 +214,8 @@ impl Gateway {
                                 .into(),
                         );
                     }
+                    self.append_stop_observations(request, &state, &mut result)
+                        .await;
                     Ok(result)
                 }
                 Err(error) if error.code == ErrorCode::Timeout => {
@@ -258,6 +277,7 @@ impl Gateway {
         let wait = wait_spec(&request.parameters)?.ok_or_else(|| {
             Error::new(ErrorCode::InvalidArgument, "wait parameters are required")
         })?;
+        validate_inspection_wait(&request.parameters, Some(&wait))?;
         let report_settled_by = wait.until == "settled";
         // 2026-08-28: Waiting without the operation's creation baseline let
         // an unrelated current or future state complete the wrong operation.
@@ -304,7 +324,49 @@ impl Gateway {
         if let Some(settled_by) = settled_by {
             result["settled_by"] = Value::String(settled_by.into());
         }
+        self.append_stop_observations(request, &state, &mut result)
+            .await;
         Ok(result)
+    }
+
+    async fn append_stop_observations(
+        &self,
+        request: &ApiRequest,
+        state: &crate::domain::SessionState,
+        result: &mut Value,
+    ) {
+        let Some(requests) = request.parameters.get("inspect") else {
+            return;
+        };
+        if state.stop_id.is_none() {
+            return;
+        }
+        let observation_request = ApiRequest {
+            api_version: request.api_version.clone(),
+            request_id: format!("{}:inspect", request.request_id),
+            session_id: request.session_id.clone(),
+            method: CanonicalMethod::InspectionBatch,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({
+                "stop_id": state.stop_id,
+                "requests": requests
+            }),
+        };
+        result["stop_id"] = json!(state.stop_id);
+        match self.inspection_batch(&observation_request).await {
+            Ok(batch) => result["observations"] = batch["results"].clone(),
+            Err(error) => {
+                // 2026-09-01: A post-stop observation failure must not
+                // disguise successful execution and invite a second resume.
+                result["observation_error"] = json!({
+                    "code": error.code,
+                    "message": error.message,
+                    "retryable": error.retryable,
+                    "details": error.details
+                });
+            }
+        }
     }
 
     pub(super) async fn breakpoint_create(&self, request: &ApiRequest) -> Result<Value> {

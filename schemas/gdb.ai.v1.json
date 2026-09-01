@@ -947,6 +947,58 @@
               "inferior_id": {
                 "type": "string"
               },
+              "inspect": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "limit": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "profile": {
+                      "enum": [
+                        "minimal",
+                        "brief",
+                        "standard",
+                        "deep"
+                      ],
+                      "type": "string"
+                    },
+                    "roles": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "view": {
+                      "enum": [
+                        "stop_context",
+                        "target",
+                        "capabilities",
+                        "providers",
+                        "crash",
+                        "threads",
+                        "stack",
+                        "frame",
+                        "locals",
+                        "arguments",
+                        "registers",
+                        "modules",
+                        "breakpoints",
+                        "source",
+                        "mappings",
+                        "signals"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "view"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "lease_id": {
                 "type": "string"
               },
@@ -1010,6 +1062,58 @@
             "properties": {
               "accept_latest_revision": {
                 "type": "boolean"
+              },
+              "inspect": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "limit": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "profile": {
+                      "enum": [
+                        "minimal",
+                        "brief",
+                        "standard",
+                        "deep"
+                      ],
+                      "type": "string"
+                    },
+                    "roles": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "view": {
+                      "enum": [
+                        "stop_context",
+                        "target",
+                        "capabilities",
+                        "providers",
+                        "crash",
+                        "threads",
+                        "stack",
+                        "frame",
+                        "locals",
+                        "arguments",
+                        "registers",
+                        "modules",
+                        "breakpoints",
+                        "source",
+                        "mappings",
+                        "signals"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "view"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               },
               "lease_id": {
                 "type": "string"
@@ -1847,7 +1951,6 @@
                     }
                   },
                   "required": [
-                    "name",
                     "view"
                   ],
                   "type": "object"

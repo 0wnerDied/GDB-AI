@@ -31,6 +31,9 @@ GDB/AI does not define or replace GDB/MI. GDB/MI is part of GNU GDB in the
 binutils-gdb project and serves only as GDB/AI's backend protocol. Each GDB/AI
 session runs one dedicated GDB process, separates inferior PTY traffic from
 MI control traffic, and reduces asynchronous records into explicit state.
+Projected results omit GDB prompts, terminal formatting, control sequences,
+echoed command records, and MI journal counters; `gdb_io` preserves inferior
+bytes exactly.
 
 ## How it works
 
@@ -191,10 +194,10 @@ modes without claiming legacy HTTP+SSE.
 | Tool | Purpose |
 | --- | --- |
 | `gdb_session` | Sessions, leases, local launch, lifecycle, and capabilities |
-| `gdb_run` | Continue, interrupt, source/instruction stepping, and waits |
+| `gdb_run` | Blocking run-to-stop with same-stop views, asynchronous waits, and breakpoint probes |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
-| `gdb_batch` | Multiple bounded inspection views attributed to one stop |
+| `gdb_batch` | Multiple bounded inspection views at the current or named stop |
 | `gdb_evaluate` | Side-effect-denied one-shot expression evaluation |
 | `gdb_memory` | Bounded stop-consistent memory reads |
 | `gdb_disassemble` | Normalized bounded instructions with source and bytes |
@@ -210,11 +213,19 @@ aliases remain canonical-only. `gdb_raw` is registered separately only with
 
 Canonical mutations require the current revision and write lease. Valid owner
 mutations refresh the lease near half-life. Projected MCP tools keep that
-transport coordination server-side: Agents send the `session_id` and any
-schema-required `stop_id`, but no lease or revision. Starting execution
-invalidates previous frame and value handles. If consistency is unknown or
-lost, the owner can attempt recovery or use `gdb_session` action `force_abort`
-to terminate resources without claiming a clean shutdown.
+transport coordination server-side: Agents send the `session_id`, but no lease
+or revision. A stop-scoped call without `stop_id` binds to the current stop;
+provide a returned `stop_id` only when later calls must reject a newer stop.
+Projected continue and step actions wait for the next stop or exit by default;
+request `accepted` or `running` only for asynchronous interaction. Starting
+execution invalidates previous frame and value handles. Add an `inspect` array
+to a control or wait action to return bounded views from its resulting stop in
+the same `gdb_run` call; each view is its result key. A standalone `gdb_batch`
+accepts explicit names when the same view is needed more than once.
+Action `probe` combines a temporary breakpoint, continue, bounded capture, and
+cleanup in one call. If consistency is unknown or lost, the owner can attempt
+recovery or use `gdb_session` action `force_abort` to terminate resources
+without claiming a clean shutdown.
 
 ## Configuration and SDKs
 

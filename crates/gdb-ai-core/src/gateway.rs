@@ -18,7 +18,7 @@ use crate::{
     metrics::Metrics,
     persistence::{ArtifactLimits, StorageLock, Store, prune_retained_sessions},
     policy::{Effect, Profile, effect_for_method},
-    protocol::{API_VERSION, ApiRequest, ApiResponse, Warning},
+    protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod, Warning},
     session::SessionHandle,
 };
 
@@ -451,7 +451,7 @@ impl Gateway {
         // commands, allowing continue to mix multiple stops in one response.
         // Normal mutations exclude stable observations; control remains preemptive.
         let stable_observation =
-            effect == Effect::Read && requires_stable_target(&request.method) && !out_of_band;
+            effect == Effect::Read && requires_stable_target(request) && !out_of_band;
         let _target_observation_guard = match &entry {
             Some(entry) if stable_observation => Some(entry.target_state.read().await),
             _ => None,
@@ -475,7 +475,10 @@ impl Gateway {
         // this point without a registry entry and panicked before returning
         // NOT_FOUND. Only capture a baseline when a live entry exists.
         let observation_baseline = match (&entry, stable_observation) {
-            (Some(entry), true) => {
+            // 2026-09-01: execution.wait intentionally changes from its
+            // admission state before inspecting the resulting stop. Its
+            // nested stable observation validates that new stop instead.
+            (Some(entry), true) if request.method != CanonicalMethod::ExecutionWait => {
                 let state = entry.handle.state();
                 Some((state.stop_id, state.execution_epoch))
             }
@@ -1102,9 +1105,11 @@ fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
         && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"))
 }
 
-fn requires_stable_target(method: &str) -> bool {
+// 2026-09-01: Waiting and then observing without one target-state guard let a
+// second resume invalidate the newly reached stop between the two operations.
+fn requires_stable_target(request: &ApiRequest) -> bool {
     matches!(
-        method,
+        request.method.as_str(),
         "inspection.get"
             | "inspection.snapshot"
             | "inspection.batch"
@@ -1119,7 +1124,7 @@ fn requires_stable_target(method: &str) -> bool {
             | "disassembly.read"
             | "agent.hypothesis_check"
             | "kernel.inspect"
-    )
+    ) || (request.method == "execution.wait" && request.parameters.get("inspect").is_some())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

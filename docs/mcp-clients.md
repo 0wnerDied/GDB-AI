@@ -154,13 +154,14 @@ advertises these bounded tools:
 ```text
 gdb_session       gdb_run          gdb_breakpoints
 gdb_inspect       gdb_evaluate     gdb_memory
-gdb_disassemble   gdb_io           gdb_events
+gdb_disassemble   gdb_io           gdb_batch
+gdb_events
 ```
 
 The initialization response also teaches the Agent the stateful workflow:
 create a session, retain its `session_id`, launch a target, use the current
-`stop_id` for inspection, reuse the session across attempts, and close it when
-finished.
+stop for inspection, reuse the session across attempts, and close it when
+finished. Supply `stop_id` only when a later read must reject a newer stop.
 
 ## Fast exploit loop
 
@@ -172,22 +173,21 @@ For the shortest reliable local crash-or-exit loop:
 3. Write byte-exact input with `gdb_io`. Include the trailing LF required by a
    line-oriented target.
 4. Call `gdb_run` action `wait` without an `operation_id`, using
-   `wait: {"until": "settled"}`.
+   `wait: {"until": "settled"}`. Add
+   `inspect: [{"view": "crash", "profile": "brief"}]` when stopped crash
+   context is needed in the same call.
 5. Use `gdb_session` action `restart` for the next attempt instead of creating
    another session. Batch deterministic commands into one PTY write.
 
-The result reports `settled_by: "stopped"` with the crash `stop_id` and frame,
-or `settled_by: "exited"` after normal termination. Start bounded crash
-capture with `gdb_inspect` view `crash` and `profile: "brief"`. When an
+The result reports `settled_by: "stopped"`, one `stop_id`, and the requested
+observations, or `settled_by: "exited"` after normal termination. When an
 already-stopped inferior must receive PTY input immediately after continue,
 put `wait: {"until": "running"}` on that continue request. An MCP `gdb_io`
 read with no `max_bytes` returns at most 4096 bytes; request a larger bound only
-when the additional output is needed.
-Projected tools do not expose lease or revision fields. Pass the returned
-`stop_id` wherever the schema requires it; the server rejects stale target
-context while handling transport coordination itself.
+when the additional output is needed. Projected tools do not expose lease or
+revision fields and bind omitted reads to the current stop.
 
-Advanced targets, mutations, variable objects, probes, and kernel operations
+Advanced targets, mutations, variable objects, tracking, and kernel operations
 appear only when the server is started with `--advanced-tools`. Raw GDB access
 appears only with `--raw-admin`; do not enable either flag by default.
 

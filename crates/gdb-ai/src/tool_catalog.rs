@@ -71,6 +71,9 @@ const RUN_ACTIONS: &[ToolAction] = &[
     action!("next_instruction", ExecutionControl),
     action!("until", ExecutionControl),
     action!("wait", ExecutionWait),
+    // 2026-09-01: Keeping the existing stop-and-capture operation behind the
+    // advanced catalog forced Agents to recreate it with several core calls.
+    action!("probe", AgentProbe),
 ];
 const BREAKPOINT_ACTIONS: &[ToolAction] = &[
     action!("create", BreakpointCreate),
@@ -152,7 +155,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_run",
-        description: "Continue, interrupt, step, or wait for explicit target state.",
+        description: "Run through the next stop and optionally return same-stop views, or probe one breakpoint.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,
@@ -172,7 +175,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_inspect",
-        description: "Read one bounded debugger view with explicit stop context.",
+        description: "Read one bounded debugger view at the current or named stop.",
         discriminator: Some("view"),
         actions: INSPECTION_ACTIONS,
         read_only: true,
@@ -425,31 +428,21 @@ fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
     if method == CanonicalMethod::SessionCreate && !admin {
         properties.remove("profile");
     }
-    // 2026-09-01: Projected stop-scoped actions advertised an optional stop_id
-    // but rejected omission at runtime. Require explicit attribution while the
-    // canonical envelope retains accept_current_stop for compatibility use.
-    let stop_scoped = properties.remove("accept_current_stop").is_some()
-        && !matches!(
-            method,
-            CanonicalMethod::ExecutionControl | CanonicalMethod::InspectionGet
-        );
-    if stop_scoped {
-        required.insert("stop_id".into());
+    if method == CanonicalMethod::AgentProbe {
+        // 2026-09-01: The projected probe repeated every location selector
+        // inside `location` and exposed backend budget knobs with useful
+        // defaults. Keep the shorter top-level GDB selectors Agent-facing.
+        for field in ["budget", "location", "frame_id", "frame_level"] {
+            properties.remove(field);
+        }
     }
+    // 2026-09-01: Requiring an Agent to fetch and echo the current stop split
+    // one inspection into two calls. MCP binds an omitted stop_id internally;
+    // an explicit stop_id remains available for cross-call attribution.
+    properties.remove("accept_current_stop");
     if method.requires_session() {
         properties.insert("session_id".into(), json!({"type": "string"}));
         required.insert("session_id".into());
-    }
-    if method == CanonicalMethod::InspectionGet {
-        // 2026-09-01: State-only views intentionally recover context while
-        // running; only views that always enter the GDB stop fence require it.
-        schema["allOf"] = json!([{
-            "if": {"properties": {"view": {"enum": [
-                "crash", "threads", "stack", "frame", "locals", "arguments",
-                "registers", "modules"
-            ]}}},
-            "then": {"required": ["stop_id"]}
-        }]);
     }
     if method == CanonicalMethod::InferiorIoRead {
         schema["properties"]["max_bytes"]["default"] = Value::from(DEFAULT_MCP_IO_READ_BYTES);
@@ -466,6 +459,12 @@ fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
         values.retain(|value| value != "entry");
     }
     schema["required"] = Value::Array(required.into_iter().map(Value::String).collect());
+    if method == CanonicalMethod::AgentProbe {
+        schema["allOf"][0]["oneOf"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|branch| branch["required"][0] != "location");
+    }
     schema
 }
 
@@ -513,6 +512,10 @@ mod tests {
         assert_eq!(
             method_for_tool("gdb_memory", Some("read"), false, false),
             Some(CanonicalMethod::MemoryRead)
+        );
+        assert_eq!(
+            method_for_tool("gdb_run", Some("probe"), false, false),
+            Some(CanonicalMethod::AgentProbe)
         );
         assert_eq!(
             method_for_tool("gdb_io", Some("send_eof"), false, false),
@@ -588,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_only_actionable_profile_and_stop_context() {
+    fn projects_current_stop_as_an_optional_pin() {
         assert!(
             projected_method_schema(CanonicalMethod::SessionCreate, false)["properties"]
                 .get("profile")
@@ -607,29 +610,23 @@ mod tests {
             CanonicalMethod::DisassemblyRead,
         ] {
             let schema = projected_method_schema(method, false);
+            assert!(schema["properties"].get("stop_id").is_some());
             assert!(
-                schema["required"]
+                !schema["required"]
                     .as_array()
                     .unwrap()
-                    .contains(&json!("stop_id")),
-                "{method} must require stop_id"
+                    .contains(&json!("stop_id"))
             );
+            assert!(schema["properties"].get("accept_current_stop").is_none());
         }
         let inspection = projected_method_schema(CanonicalMethod::InspectionGet, false);
-        let stop_views = inspection["allOf"][0]["if"]["properties"]["view"]["enum"]
-            .as_array()
-            .unwrap();
-        assert!(stop_views.contains(&json!("crash")));
-        assert!(!stop_views.contains(&json!("stop_context")));
-        assert!(!stop_views.contains(&json!("source")));
-        assert_eq!(
-            inspection["allOf"][0]["then"]["required"],
-            json!(["stop_id"])
-        );
+        assert!(inspection.get("allOf").is_none());
+        assert!(inspection["properties"].get("stop_id").is_some());
         assert!(
-            inspection["properties"]
-                .get("accept_current_stop")
-                .is_none()
+            !inspection["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("stop_id"))
         );
         let canonical = CanonicalMethod::MemoryRead.parameter_schema();
         assert!(canonical["properties"].get("accept_current_stop").is_some());
@@ -661,13 +658,13 @@ mod tests {
                 .count(),
             1
         );
-        assert!(serde_json::to_vec(&tools).unwrap().len() < 16_000);
-        assert!(
-            serde_json::to_vec(&super::tools(true, false))
-                .unwrap()
-                .len()
-                < 29_000
-        );
+        assert!(control["properties"]["inspect"].is_object());
+        let default_bytes = serde_json::to_vec(&tools).unwrap().len();
+        assert!(default_bytes < 17_500, "{default_bytes}");
+        let advanced_bytes = serde_json::to_vec(&super::tools(true, false))
+            .unwrap()
+            .len();
+        assert!(advanced_bytes < 28_700, "{advanced_bytes}");
     }
 
     #[test]

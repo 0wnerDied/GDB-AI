@@ -498,7 +498,15 @@ impl Gateway {
                 Box::pin(async {
                     let mut results = BTreeMap::new();
                     for item in requests {
-                        let name = string(item, "name")?;
+                        let view = string(item, "view")?;
+                        // 2026-09-01: Requiring a name identical to every view
+                        // repeated request tokens. Use the view as its result
+                        // key; names remain available for duplicate views.
+                        let name = item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&view)
+                            .to_owned();
                         if results.contains_key(&name) {
                             return Err(Error::new(
                                 ErrorCode::Conflict,

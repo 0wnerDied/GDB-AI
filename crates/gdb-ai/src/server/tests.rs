@@ -31,9 +31,10 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "MCP manages leases and revisions",
         "stop_id",
         "byte-exact PTY",
-        "wait until settled",
+        "waits for stop/exit",
         "restart",
         "gdb_batch",
+        "gdb_run action=probe",
         "gdb_inspect view=crash profile=brief",
     ] {
         assert!(instructions.contains(required), "missing {required}");
@@ -147,6 +148,68 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     assert_eq!(request.parameters["action"], "continue");
     assert!(request.parameters.get("session_id").is_none());
     assert!(request.parameters.get("cancel_mode").is_none());
+    assert_eq!(request.parameters["wait"]["until"], "snapshot");
+
+    let blocking_run = map_tool(
+        "gdb_run",
+        json!({
+            "action": "next",
+            "session_id": "sess_test",
+            "inspect": [{"view": "registers", "roles": ["pc", "sp"]}]
+        }),
+        false,
+        false,
+        4,
+    )
+    .unwrap();
+    assert_eq!(blocking_run.parameters["wait"]["until"], "settled");
+    assert_eq!(blocking_run.parameters["inspect"][0]["view"], "registers");
+
+    let observed_wait = map_tool(
+        "gdb_run",
+        json!({
+            "action": "wait",
+            "session_id": "sess_test",
+            "wait": {"until": "settled"},
+            "inspect": [{"view": "stack", "limit": 4}]
+        }),
+        false,
+        false,
+        5,
+    )
+    .unwrap();
+    assert_eq!(observed_wait.method, CanonicalMethod::ExecutionWait);
+    assert_eq!(observed_wait.parameters["inspect"][0]["view"], "stack");
+
+    let current_probe = map_tool(
+        "gdb_run",
+        json!({
+            "action": "probe",
+            "session_id": "sess_test",
+            "function": "malloc"
+        }),
+        false,
+        false,
+        6,
+    )
+    .unwrap();
+    assert_eq!(current_probe.method, CanonicalMethod::AgentProbe);
+    assert_eq!(current_probe.parameters["accept_current_stop"], true);
+    assert!(current_probe.parameters.get("action").is_none());
+
+    let pinned_batch = map_tool(
+        "gdb_batch",
+        json!({
+            "session_id": "sess_test",
+            "stop_id": "stop_test",
+            "requests": [{"name": "regs", "view": "registers"}]
+        }),
+        false,
+        false,
+        7,
+    )
+    .unwrap();
+    assert!(pinned_batch.parameters.get("accept_current_stop").is_none());
     let cancellation = request_cancellation(
         "tools/call",
         &json!({
@@ -192,6 +255,17 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     assert!(!valid_request_id(&Value::String("x".repeat(129))));
 }
 
+#[test]
+fn current_stop_binding_matches_canonical_context() {
+    for method in CanonicalMethod::ALL {
+        let contextual = method.parameter_schema()["properties"]
+            .get("accept_current_stop")
+            .is_some()
+            && *method != CanonicalMethod::ExecutionControl;
+        assert_eq!(binds_current_stop(*method), contextual, "{method}");
+    }
+}
+
 #[tokio::test]
 async fn projected_tools_hide_and_recover_mutation_coordination() {
     if std::process::Command::new("gdb")
@@ -212,6 +286,7 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
         },
         ..Config::default()
     };
+    config.security.workspace_roots = vec![std::path::PathBuf::from("/")];
     // 2026-09-01: A 1 ms recovered lease could expire again between the
     // projected preflight and dispatch on a loaded CI runner. Keep expiry
     // deliberate while leaving the mutation itself a bounded scheduling window.
@@ -232,6 +307,89 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
     assert_eq!(result.len(), 2);
     assert!(result.get("write_lease").is_none());
     let session_id = result["session_id"].as_str().unwrap();
+
+    let launched = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({
+            "name": "gdb_session",
+            "arguments": {
+                "action": "launch",
+                "session_id": session_id,
+                "program": "/bin/true",
+                "stop": "first_instruction"
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(launched["isError"], false);
+    let observed = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({
+            "name": "gdb_batch",
+            "arguments": {
+                "session_id": session_id,
+                "requests": [{"name": "context", "view": "stop_context"}]
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(observed["isError"], false);
+    assert!(
+        observed["structuredContent"]["result"]["stop_id"]
+            .as_str()
+            .is_some()
+    );
+    let turned = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({
+            "name": "gdb_run",
+            "arguments": {
+                "action": "step_instruction",
+                "session_id": session_id,
+                "inspect": [{"view": "registers", "roles": ["pc", "sp"]}]
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(turned["isError"], false);
+    let result = &turned["structuredContent"]["result"];
+    assert!(result["stop_id"].as_str().is_some());
+    assert!(result["observations"]["registers"].is_object());
+    assert!(result["observations"]["registers"].get("stop_id").is_none());
+    assert!(result.get("operation_id").is_none());
+    let waited = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({
+            "name": "gdb_run",
+            "arguments": {
+                "action": "wait",
+                "session_id": session_id,
+                "wait": {"until": "settled"},
+                "inspect": [{"view": "stack", "limit": 1}]
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(waited["isError"], false);
+    let result = &waited["structuredContent"]["result"];
+    assert!(result["observations"]["stack"].is_object());
+    assert!(result.get("operation").is_none());
 
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     let closed = call_tool(
@@ -430,7 +588,8 @@ fn tool_results_omit_incidental_metadata_but_preserve_explicit_discovery() {
                 "evidence_seq": 9
             },
             "capabilities": {"unused": true},
-            "frames": []
+            "frames": [{"function": "main", "evidence_seq": 8}],
+            "evidence_seq": 9
         }),
     );
     let result = tool_result(response, CanonicalMethod::TargetLaunch);
@@ -438,6 +597,12 @@ fn tool_results_omit_incidental_metadata_but_preserve_explicit_discovery() {
     assert!(structured.get("state").is_none());
     assert!(structured["result"].get("command").is_none());
     assert!(structured["result"].get("capabilities").is_none());
+    assert!(structured["result"].get("evidence_seq").is_none());
+    assert!(
+        structured["result"]["frames"][0]
+            .get("evidence_seq")
+            .is_none()
+    );
     assert!(structured.get("evidence").is_none());
 
     let lifecycle = ApiResponse::success(
@@ -502,6 +667,112 @@ fn tool_results_omit_incidental_metadata_but_preserve_explicit_discovery() {
     let raw = ApiResponse::success(&request, None, json!({"command": {"record": "raw MI"}}));
     let raw = tool_result(raw, CanonicalMethod::RawMi);
     assert!(raw["structuredContent"]["result"].get("command").is_some());
+}
+
+#[test]
+fn completed_agent_operations_omit_recovery_bookkeeping() {
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "compact".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::ExecutionControl,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let completed = tool_result(
+        ApiResponse::success(
+            &request,
+            None,
+            json!({
+                "operation_id": "op_done",
+                "wait_status": "COMPLETED",
+                "settled_by": "stop",
+                "stop_id": "stop_test",
+                "observations": {
+                    "stack": {"stop_id": "stop_test", "frames": []}
+                }
+            }),
+        ),
+        CanonicalMethod::ExecutionControl,
+    );
+    let result = &completed["structuredContent"]["result"];
+    assert_eq!(result["settled_by"], "stop");
+    assert!(result.get("operation_id").is_none());
+    assert!(result.get("wait_status").is_none());
+    assert!(result["observations"]["stack"].get("stop_id").is_none());
+
+    let asynchronous = tool_result(
+        ApiResponse::success(
+            &request,
+            None,
+            json!({"operation_id": "op_live", "wait_status": "ACCEPTED"}),
+        ),
+        CanonicalMethod::ExecutionControl,
+    );
+    assert_eq!(
+        asynchronous["structuredContent"]["result"]["operation_id"],
+        "op_live"
+    );
+
+    let waited = tool_result(
+        ApiResponse::success(
+            &request,
+            None,
+            json!({
+                "operation": {"operation_id": "op_done", "status": "COMPLETED"},
+                "stop_id": "stop_test",
+                "observations": {"stack": {"stop_id": "stop_test", "frames": []}}
+            }),
+        ),
+        CanonicalMethod::ExecutionWait,
+    );
+    let waited = &waited["structuredContent"]["result"];
+    assert!(waited.get("operation").is_none());
+    assert!(waited["observations"]["stack"].get("stop_id").is_none());
+
+    let batch = tool_result(
+        ApiResponse::success(
+            &request,
+            None,
+            json!({
+                "stop_id": "stop_test",
+                "revision": 9,
+                "results": {"registers": {"stop_id": "stop_test", "values": []}}
+            }),
+        ),
+        CanonicalMethod::InspectionBatch,
+    );
+    assert_eq!(batch["structuredContent"]["result"]["stop_id"], "stop_test");
+    assert!(
+        batch["structuredContent"]["result"]
+            .get("revision")
+            .is_none()
+    );
+    assert!(
+        batch["structuredContent"]["result"]["results"]["registers"]
+            .get("stop_id")
+            .is_none()
+    );
+
+    let probe = tool_result(
+        ApiResponse::success(
+            &request,
+            None,
+            json!({
+                "captures": [],
+                "capture_count": 0,
+                "operation": {"operation_id": "op_probe", "status": "COMPLETED"}
+            }),
+        ),
+        CanonicalMethod::AgentProbe,
+    );
+    assert_eq!(probe["structuredContent"]["result"]["capture_count"], 0);
+    assert!(
+        probe["structuredContent"]["result"]
+            .get("operation")
+            .is_none()
+    );
 }
 
 #[test]

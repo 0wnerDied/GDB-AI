@@ -6,10 +6,11 @@ compatibility rules, while [`compatibility.md`](compatibility.md) records
 which target matrices have actually run. Requests carry a request ID,
 optional session ID, method, expected revision, idempotency key, and
 parameters. Mutations require the current revision and write lease.
-Stop-sensitive reads require the current `stop_id`.
+Stop-sensitive canonical reads require the current `stop_id` or an explicit
+`accept_current_stop` binding.
 Projected MCP tools manage revisions, write leases, retry metadata, and waiter
-cancellation outside their Agent-visible schemas. Stop-scoped operations still
-require `stop_id`; the canonical API keeps all coordination fields explicit.
+cancellation outside their Agent-visible schemas. An omitted projected
+`stop_id` binds the current stop; a supplied ID remains a stale-stop pin.
 
 Session recovery authority is separate from a business write lease. The owner
 or an administrator may call `session.attempt_recovery` or
@@ -28,9 +29,9 @@ second wire format inside tool calls.
 MCP discovery defaults to ten bounded tools for ordinary Agent debugging,
 including same-stop inspection batching. Starting the server with
 `--advanced-tools` exposes the existing advanced target, mutation, value,
-tracking, probe, and kernel projections; `--raw-admin` independently exposes
-the audited raw escape hatch. Hidden MCP projections do not remove methods
-from the canonical API.
+tracking, and kernel projections; `--raw-admin` independently exposes the
+audited raw escape hatch. Hidden MCP projections do not remove methods from
+the canonical API.
 
 Projected mapping records retain start and end addresses, file offset,
 permissions, and path. Filesystem device, inode, and provider-source metadata
@@ -48,7 +49,12 @@ and `exited`. `settled` completes at the first attributable stop or terminal
 inferior state and reports that branch in `settled_by`. An omitted launch or
 restart wait observes `running` for `stop: "none"`, and the selected stop plus
 its snapshot for other start policies; an explicit `accepted` remains
-non-blocking. Execution control without a wait is also accepted immediately.
+non-blocking. Canonical execution control without a wait is accepted
+immediately; projected `gdb_run` control waits until settled by default.
+Execution control and wait requests may include bounded `inspect` views. A
+stopped result returns them from that same stop; an exited result returns no
+observations. Turn items expose `view` plus the high-frequency `limit`, `roles`,
+and `profile` selectors; `inspection.batch` retains the complete selector set.
 
 Streamable HTTP supports two version-specific request paths over the same
 endpoint and canonical dispatcher. MCP `2025-11-25` stores the negotiated

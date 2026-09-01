@@ -451,7 +451,33 @@ async fn local_debugging_vertical_slice() {
         first_stop
     );
     assert_eq!(invalid_wait.revision, breakpoint.revision);
-    let continued = successful(
+    let racing_inspection = gateway
+        .dispatch(
+            request(
+                "racing-inspection",
+                Some(&session_id),
+                "execution.control",
+                breakpoint.revision,
+                json!({
+                    "action": "continue",
+                    "lease_id": lease_id,
+                    "stop_id": first_stop,
+                    "wait": {"until": "running", "timeout_ms": 5000},
+                    "inspect": [{"view": "stack", "limit": 2}]
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(
+        racing_inspection.error.unwrap().code,
+        gdb_ai_core::ErrorCode::InvalidArgument
+    );
+    assert_eq!(
+        racing_inspection.state.unwrap().stop_id.unwrap().0,
+        first_stop
+    );
+    let accepted = successful(
         gateway
             .dispatch(
                 request(
@@ -463,7 +489,32 @@ async fn local_debugging_vertical_slice() {
                         "action": "continue",
                         "lease_id": lease_id,
                         "stop_id": first_stop,
-                        "wait": {"until": "snapshot", "timeout_ms": 5000}
+                        "wait": {"until": "accepted", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let continued_operation = accepted.result.as_ref().unwrap()["operation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let continued = successful(
+        gateway
+            .dispatch(
+                request(
+                    "continue-wait",
+                    Some(&session_id),
+                    "execution.wait",
+                    None,
+                    json!({
+                        "operation_id": continued_operation,
+                        "wait": {"until": "snapshot", "timeout_ms": 5000},
+                        "inspect": [
+                            {"view": "stack", "limit": 2},
+                            {"view": "registers", "roles": ["pc", "sp"]}
+                        ]
                     }),
                 ),
                 &caller,
@@ -477,10 +528,9 @@ async fn local_debugging_vertical_slice() {
         .unwrap()
         .0
         .clone();
-    let continued_operation = continued.result.as_ref().unwrap()["operation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    assert_eq!(continued.result.as_ref().unwrap()["stop_id"], second_stop);
+    assert!(continued.result.as_ref().unwrap()["observations"]["stack"].is_object());
+    assert!(continued.result.as_ref().unwrap()["observations"]["registers"].is_object());
     assert_ne!(first_stop, second_stop);
     let invalid_snapshot = gateway
         .dispatch(
