@@ -626,7 +626,7 @@ async fn stale_value_cleanup_does_not_consume_the_business_deadline() {
         return;
     }
     let directory = tempdir().unwrap();
-    let mut config = Config {
+    let config = Config {
         artifacts: ArtifactConfig {
             path: directory.path().join("artifacts"),
         },
@@ -636,7 +636,6 @@ async fn stale_value_cleanup_does_not_consume_the_business_deadline() {
         },
         ..Config::default()
     };
-    config.server.command_timeout_ms = 200;
     let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
     let session = SessionHandle::start(
         Arc::new(config),
@@ -692,8 +691,14 @@ async fn stale_value_cleanup_does_not_consume_the_business_deadline() {
         .await
         .unwrap();
 
+    // 2026-09-01: Reusing this 200 ms business deadline for GDB startup made
+    // the CI scheduler fail unrelated setup. Scope it to the command whose
+    // stale-value maintenance ordering the test actually verifies.
     session
-        .command(MiCommand::new("-gdb-version").unwrap())
+        .command_with_timeout(
+            MiCommand::new("-gdb-version").unwrap(),
+            Duration::from_millis(200),
+        )
         .await
         .unwrap();
     session.close().await.unwrap();
