@@ -91,12 +91,11 @@ impl RpcFault {
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once, keep session_id, then launch; \
 argv excludes the program path. MCP manages leases and revisions. Returned stop_id scopes \
 follow-up evidence but may be omitted for a current-stop read. gdb_run waits for stop/exit \
-by default; request running before byte-exact PTY input (include required LF). Reuse the \
-session with restart and batch deterministic input. Add inspect views to gdb_run for the \
-same resulting stop, use gdb_run action=probe for one-call breakpoint capture, and \
-gdb_batch for the current stop alone. Triage crashes with gdb_inspect view=crash \
-profile=brief. PTY writes require lab_mutation. Query a returned operation_id after \
-timeout. Close when done.";
+by default; add bounded input and inspect views to feed byte-exact PTY data and return \
+same-stop evidence in that call. Request accepted/running only for deliberate asynchronous \
+I/O. Reuse the session with restart, use gdb_run action=probe for one-call breakpoint \
+capture, gdb_batch for current-stop views, and gdb_inspect view=crash profile=brief for \
+triage. Query a returned operation_id after timeout. Close when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {

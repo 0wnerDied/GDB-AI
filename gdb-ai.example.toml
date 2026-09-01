@@ -59,7 +59,7 @@ sqlite = ".gdb-ai/gdb-ai.sqlite"
 sessions = ".gdb-ai/sessions"
 
 [security]
-default_profile = "debug_control"
+default_profile = "lab_mutation"
 workspace_roots = ["."]
 remote_allowlist = []
 attach_allowlist = []

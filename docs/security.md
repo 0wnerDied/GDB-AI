@@ -13,6 +13,11 @@ operator-enabled transport. Raw console uses an explicit host-safe verb
 allowlist, and raw MI cannot bypass workspace, attach, remote endpoint,
 inferior TTY, startup-setting, or process-lifecycle policy.
 
+The default local profile is `lab_mutation`, which permits ordinary inferior
+input and debugger mutations needed by exploit Agents. Operators may configure
+`debug_control`, `live_observer`, or `offline_core` when a read/control-only
+deployment is required; `raw_admin` remains explicit.
+
 Memory reads are classified by the server. Core and proven ordinary local
 mappings remain read effects; remote, unknown, and local device mappings
 require `acknowledge_target_effects=true` and the `lab_mutation` profile.

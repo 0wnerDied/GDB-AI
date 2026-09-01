@@ -292,6 +292,85 @@ async fn timeout_fences_late_result() {
 }
 
 #[tokio::test]
+async fn stalled_inferior_write_times_out_without_wedging_worker() {
+    if !crate::test_support::require_commands(&["gdb", "cc"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let executable = directory.path().join("stalled-input");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
+    assert!(
+        std::process::Command::new("cc")
+            .args(["-g", "-O0"])
+            .arg(source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+    let session = SessionHandle::start(
+        Arc::new(config),
+        Profile::RawAdmin,
+        store,
+        Arc::new(Metrics::default()),
+    )
+    .await
+    .unwrap();
+    session
+        .command(
+            MiCommand::new("-file-exec-and-symbols")
+                .unwrap()
+                .string(executable.as_os_str().as_encoded_bytes()),
+        )
+        .await
+        .unwrap();
+    let baseline = session.state();
+    session
+        .command(
+            MiCommand::new("-exec-run")
+                .unwrap()
+                .bare("--start")
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    session
+        .wait_after(WaitUntil::Stopped, Duration::from_secs(5), &baseline)
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let error = session
+        .write_inferior_with_timeout(vec![b'A'; 64 * 1024], false, Duration::from_millis(100))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Timeout);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let details = error.details.unwrap();
+    assert_eq!(
+        details["written"].as_u64().unwrap() + details["remaining"].as_u64().unwrap(),
+        64 * 1024
+    );
+    session
+        .command(MiCommand::new("-gdb-version").unwrap())
+        .await
+        .unwrap();
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn late_execution_error_requires_reconciliation() {
     if !crate::test_support::require_commands(&["gdb", "cc"]) {
         return;
@@ -392,6 +471,36 @@ async fn state_wait_returns_when_gdb_exits() {
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::GdbExited);
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn stopped_wait_returns_target_exit_without_timing_out() {
+    let Some(session) = control_test_session().await else {
+        return;
+    };
+    session
+        .command(
+            MiCommand::new("-file-exec-and-symbols")
+                .unwrap()
+                .string("/bin/false"),
+        )
+        .await
+        .unwrap();
+    let baseline = session.state();
+    session
+        .command(MiCommand::new("-exec-run").unwrap())
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let error = session
+        .wait_after(WaitUntil::Stopped, Duration::from_secs(5), &baseline)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetExited);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(error.details.unwrap()["exit_code"], "01");
+    session.close().await.unwrap();
 }
 
 #[tokio::test]

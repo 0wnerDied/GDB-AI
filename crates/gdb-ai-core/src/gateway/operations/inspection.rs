@@ -320,6 +320,10 @@ impl Gateway {
         .map(serde_json::to_value)
         .transpose()?
         .unwrap_or(Value::Null);
+        // 2026-09-01: GDB's stack-list-variables already includes top-frame
+        // arguments, so brief snapshots repeated those values in a second
+        // multi-frame argument list. Keep the variables superset; deeper
+        // profiles retain arguments from every frame.
         let locals = if profile == "minimal" {
             Value::Null
         } else {
@@ -340,7 +344,7 @@ impl Gateway {
             .transpose()?
             .unwrap_or(Value::Null)
         };
-        let arguments = if profile == "minimal" {
+        let arguments = if matches!(profile, "minimal" | "brief") {
             Value::Null
         } else {
             optional_command(
@@ -377,7 +381,24 @@ impl Gateway {
             }
         };
         let disassembly = if matches!(profile, "brief" | "standard" | "deep") {
-            match self.disassembly_read(request).await {
+            let mut disassembly_request = request.clone();
+            if profile == "brief" {
+                let parameters = disassembly_request.parameters.as_object_mut().unwrap();
+                if !parameters.contains_key("around") && !parameters.contains_key("range") {
+                    parameters.insert(
+                        "around".into(),
+                        json!({
+                            "expression": "$pc",
+                            "before_instructions": 4,
+                            "after_instructions": 7
+                        }),
+                    );
+                }
+                parameters
+                    .entry("include_source")
+                    .or_insert(Value::Bool(false));
+            }
+            match self.disassembly_read(&disassembly_request).await {
                 Ok(disassembly) => disassembly,
                 Err(error) => {
                     warnings.push(json!({

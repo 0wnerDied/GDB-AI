@@ -168,24 +168,21 @@ finished. Supply `stop_id` only when a later read must reject a newer stop.
 For the shortest reliable local crash-or-exit loop:
 
 1. Create a session and retain its `session_id`.
-2. Launch with `stop: "none"`; an omitted launch wait returns after the
-   inferior is observed running.
-3. Write byte-exact input with `gdb_io`. Include the trailing LF required by a
-   line-oriented target.
-4. Call `gdb_run` action `wait` without an `operation_id`, using
-   `wait: {"until": "settled"}`. Add
+2. Launch at the first useful stop or set a breakpoint.
+3. Call `gdb_run` action `continue` with byte-exact `input` and its trailing LF
+   when required. The default wait runs through the next stop or exit. Add
    `inspect: [{"view": "crash", "profile": "brief"}]` when stopped crash
    context is needed in the same call.
-5. Use `gdb_session` action `restart` for the next attempt instead of creating
+4. Use `gdb_session` action `restart` for the next attempt instead of creating
    another session. Batch deterministic commands into one PTY write.
 
 The result reports `settled_by: "stopped"`, one `stop_id`, and the requested
-observations, or `settled_by: "exited"` after normal termination. When an
-already-stopped inferior must receive PTY input immediately after continue,
-put `wait: {"until": "running"}` on that continue request. An MCP `gdb_io`
-read with no `max_bytes` returns at most 4096 bytes; request a larger bound only
-when the additional output is needed. Projected tools do not expose lease or
-revision fields and bind omitted reads to the current stop.
+observations, or `settled_by: "exited"` after normal termination. Use
+`gdb_run` action `wait` with `input` when execution is already asynchronous,
+and reserve `gdb_io` for open-ended interaction. An MCP `gdb_io` read with no
+`max_bytes` returns at most 4096 bytes; request a larger bound only when the
+additional output is needed. Projected tools do not expose lease or revision
+fields and bind omitted reads to the current stop.
 
 Advanced targets, mutations, variable objects, tracking, and kernel operations
 appear only when the server is started with `--advanced-tools`. Raw GDB access

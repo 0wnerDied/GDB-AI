@@ -340,7 +340,10 @@ pub struct SourceMap {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            default_profile: Profile::DebugControl,
+            // 2026-09-01: The prior default rejected ordinary inferior input,
+            // forcing every exploit Agent through an administrative setup
+            // retry. Local sessions must be useful without privilege plumbing.
+            default_profile: Profile::LabMutation,
             workspace_roots: vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))],
             remote_allowlist: Vec::new(),
             attach_allowlist: Vec::new(),
@@ -381,6 +384,10 @@ mod tests {
 
     #[test]
     fn defaults_state_below_xdg_or_home() {
+        assert_eq!(
+            Config::default().security.default_profile,
+            Profile::LabMutation
+        );
         assert_eq!(
             default_state_directory(Some("/state".into()), Some("/home/user".into())),
             PathBuf::from("/state/gdb-ai")

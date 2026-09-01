@@ -77,6 +77,21 @@ struct RateWindow {
     requests: u64,
 }
 
+fn effect_for_request(request: &ApiRequest) -> Effect {
+    // 2026-09-01: Inline input made execution.wait state-changing while MCP
+    // lease preparation still classified it as a read. Derive admission,
+    // coordination, policy, and audit from the same request-level effect.
+    if matches!(
+        request.method,
+        CanonicalMethod::ExecutionControl | CanonicalMethod::ExecutionWait
+    ) && request.parameters.get("input").is_some()
+    {
+        Effect::TargetMutation
+    } else {
+        effect_for_method(request.method)
+    }
+}
+
 impl Gateway {
     pub fn new(config: Config) -> Result<Self> {
         config.validate()?;
@@ -308,7 +323,7 @@ impl Gateway {
         }
         self.check_rate(&caller.identity).await?;
 
-        let mut effect = effect_for_method(request.method);
+        let mut effect = effect_for_request(request);
         let entry = self.entry_for_request(request).await;
         if let Some(session_id) = request
             .session_id
@@ -832,7 +847,7 @@ impl Gateway {
         request: &mut ApiRequest,
         caller: &Caller,
     ) -> Result<()> {
-        if effect_for_method(request.method) == Effect::Read || !request.method.requires_session() {
+        if effect_for_request(request) == Effect::Read || !request.method.requires_session() {
             return Ok(());
         }
         request.expected_revision = None;

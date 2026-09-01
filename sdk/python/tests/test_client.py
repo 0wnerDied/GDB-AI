@@ -21,6 +21,24 @@ class Response(io.BytesIO):
 
 
 class ClientTest(unittest.TestCase):
+    def test_session_uses_mutation_capable_default(self) -> None:
+        calls = []
+
+        class FakeClient:
+            def call(self, method, parameters):
+                calls.append((method, parameters))
+                return {
+                    "revision": 1,
+                    "result": {
+                        "session_id": "sess_test",
+                        "write_lease": {"lease_id": "lease_test"},
+                    },
+                }
+
+        Session.create(FakeClient())
+
+        self.assertEqual(calls, [("session.create", {"profile": "lab_mutation"})])
+
     def test_projected_tool_call_returns_only_structured_content(self) -> None:
         client = Client("http://127.0.0.1:8080")
         with patch.object(

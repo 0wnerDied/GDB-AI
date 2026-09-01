@@ -122,7 +122,38 @@ Complete only the issues demonstrated by that trace before another blind task:
   attempting to insert the previous process's absolute address.
 - [x] Replay the failed calls against the release binary and exclude harness
   reconnect behavior from debugger output.
-- [ ] Use a new blind target for the next post-fix comparative claim.
+- [x] Use a new blind target for the next post-fix comparative claim.
+
+The three-round post-fix comparison confirmed that same-stop observations are
+correct and that warm replay is fast, but the cold trace exposed a larger turn
+amplifier. One structured run made 1,890 tool calls; 1,573 were PTY writes
+replaying deterministic input around stops. A stopped 17 KiB write also blocked
+for more than 37 seconds. The comparison additionally paid setup retries because
+the default session denied ordinary inferior input, and a brief loader crash
+returned 10,081 bytes of duplicated arguments, locals, source, and disassembly.
+
+Complete only these trace-backed changes before the next comparison:
+
+- [x] Let `gdb_run` feed bounded byte-exact input while it controls or waits for
+  the target, then return requested same-stop observations in that one call.
+- [x] Give PTY writes a deadline and an exact partial-write count so a stopped
+  or non-reading inferior cannot wedge its session worker.
+- [x] Make the default local Agent session mutation-capable; keep read-only and
+  raw profiles available only when explicitly configured.
+- [x] Keep `crash=brief` focused on the top-frame values, compact disassembly,
+  registers, and a short stack; retain complete detail in deeper profiles.
+- [x] Return an immediate terminal-state error when a running/stopped wait is
+  made impossible by target exit instead of consuming the full wait timeout.
+- [ ] Repeat matched cold-start measurements and require fewer Agent-visible
+  bytes and calls without losing the verified primitive or stop attribution.
+
+Focused regression evidence now replaces a three-call input/EOF/continue path
+with one run turn, bounds a stalled 64 KiB PTY write near its 100 ms deadline,
+and keeps the worker responsive afterward. Reprojecting the recorded 10,081-byte
+brief crash response yields 4,852 bytes while retaining top-frame variables.
+The stateful default tool-discovery response is 17,346 bytes versus 17,374 bytes
+before inline input, so the one-call capability adds no discovery-token debt.
+This does not replace the next matched cold-start comparison.
 
 ## Optional post-North-star work
 

@@ -45,6 +45,7 @@ const fakeClient = {
   },
 };
 const session = await Session.create(fakeClient);
+assert.equal(calls[0].parameters.profile, "lab_mutation");
 await session.renew();
 assert.equal(calls.at(-1).options.expectedRevision, undefined);
 

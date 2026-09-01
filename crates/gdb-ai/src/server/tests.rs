@@ -27,7 +27,6 @@ fn initialize_teaches_agents_the_stateful_workflow() {
     for required in [
         "tools/list",
         "argv",
-        "lab_mutation",
         "MCP manages leases and revisions",
         "stop_id",
         "byte-exact PTY",
@@ -380,6 +379,7 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
                 "action": "wait",
                 "session_id": session_id,
                 "wait": {"until": "settled"},
+                "input": {"text": "x"},
                 "inspect": [{"view": "stack", "limit": 1}]
             }
         }),

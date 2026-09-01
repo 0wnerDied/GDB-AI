@@ -1,13 +1,85 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use gdb_ai_mi::{MiResult, MiValue};
 use serde_json::{Value, json};
 
 use super::{
     context::{WaitSpec, apply_wait, apply_wait_baseline, context_options, wait_spec},
+    encoding::{MAX_INFERIOR_INPUT_BYTES, input_bytes},
     reconciliation::{reconcile_breakpoints, synchronize_breakpoint},
     request::{bool_value, required_session, string},
 };
+
+fn turn_input(parameters: &Value) -> Result<Option<Vec<u8>>> {
+    let Some(input) = parameters.get("input") else {
+        return Ok(None);
+    };
+    let bytes = input_bytes(input)?;
+    if bytes.len() > MAX_INFERIOR_INPUT_BYTES {
+        return Err(Error::new(
+            ErrorCode::OutputLimit,
+            "inferior input is limited to 64 KiB per call",
+        ));
+    }
+    Ok(Some(bytes))
+}
+
+async fn feed_inferior(
+    entry: &SessionEntry,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<Option<Value>> {
+    let Some(bytes) = input else {
+        return Ok(None);
+    };
+    let requested = bytes.len();
+    let (written, result) = match entry
+        .handle
+        .write_inferior_with_timeout(bytes, false, timeout)
+        .await
+    {
+        Ok(written) => (written, None),
+        Err(error) => {
+            let written = error
+                .details
+                .as_ref()
+                .and_then(|details| details["written"].as_u64())
+                .unwrap_or(0);
+            let remaining = error
+                .details
+                .as_ref()
+                .and_then(|details| details["remaining"].as_u64())
+                .unwrap_or(requested.saturating_sub(written as usize) as u64);
+            (
+                written as usize,
+                Some(json!({
+                    "written": written,
+                    "remaining": remaining,
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                        "retryable": error.retryable
+                    }
+                })),
+            )
+        }
+    };
+    if written > 0 {
+        entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "inferior_input".into(),
+            })
+            .await?;
+    }
+    Ok(result)
+}
+
+fn append_input(result: &mut Value, input: Option<&Value>) {
+    if let Some(input) = input {
+        result["input"] = input.clone();
+    }
+}
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
@@ -135,6 +207,13 @@ impl Gateway {
         let action = string(&request.parameters, "action")?;
         let wait = wait_spec(&request.parameters)?;
         validate_inspection_wait(&request.parameters, wait.as_ref())?;
+        let input = turn_input(&request.parameters)?;
+        if action == "interrupt" && input.is_some() {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "interrupt does not accept inferior input",
+            ));
+        }
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         let mut operation = OperationRecord {
@@ -187,6 +266,18 @@ impl Gateway {
             }
         };
         operation.accepted_event_seq = Some(reply.evidence_seq);
+        // 2026-09-01: Agents previously needed one call per input fragment
+        // between resume and stop waits. Feed the bounded byte stream after
+        // GDB accepts execution, then observe the resulting stop in this turn.
+        let input = feed_inferior(
+            &entry,
+            input,
+            Duration::from_millis(
+                wait.as_ref()
+                    .map_or(self.config.server.wait_timeout_ms, |wait| wait.timeout_ms),
+            ),
+        )
+        .await?;
         if let Some(wait) = wait {
             let report_settled_by = wait.until == "settled";
             operation.status = OperationStatus::WaitingForState;
@@ -214,6 +305,7 @@ impl Gateway {
                                 .into(),
                         );
                     }
+                    append_input(&mut result, input.as_ref());
                     self.append_stop_observations(request, &state, &mut result)
                         .await;
                     Ok(result)
@@ -223,13 +315,15 @@ impl Gateway {
                     operation.status = OperationStatus::TimedOut;
                     operation.completed_event_seq = Some(state.event_seq);
                     self.store.upsert_operation(&operation)?;
-                    Ok(json!({
+                    let mut result = json!({
                         "operation_id": operation.operation_id,
                         "wait_status": "TIMEOUT",
                         "target_state": state,
                         "can_interrupt": true,
                         "command": reply
-                    }))
+                    });
+                    append_input(&mut result, input.as_ref());
+                    Ok(result)
                 }
                 Err(error) => {
                     operation.status = OperationStatus::Failed;
@@ -244,16 +338,19 @@ impl Gateway {
             operation.status = OperationStatus::Completed;
             operation.completed_event_seq = Some(entry.handle.with_state(|state| state.event_seq));
             self.store.upsert_operation(&operation)?;
-            Ok(json!({
+            let mut result = json!({
                 "operation_id": operation.operation_id,
                 "wait_status": "ACCEPTED",
                 "command": reply,
                 "state": entry.handle.state()
-            }))
+            });
+            append_input(&mut result, input.as_ref());
+            Ok(result)
         }
     }
 
     pub(super) async fn execution_wait(&self, request: &ApiRequest) -> Result<Value> {
+        let input = turn_input(&request.parameters)?;
         let entry = self.entry(required_session(request)?).await?;
         let mut operation = request
             .parameters
@@ -279,6 +376,7 @@ impl Gateway {
         })?;
         validate_inspection_wait(&request.parameters, Some(&wait))?;
         let report_settled_by = wait.until == "settled";
+        let input = feed_inferior(&entry, input, Duration::from_millis(wait.timeout_ms)).await?;
         // 2026-08-28: Waiting without the operation's creation baseline let
         // an unrelated current or future state complete the wrong operation.
         let baseline = operation
@@ -321,6 +419,7 @@ impl Gateway {
             self.store.upsert_operation(operation)?;
         }
         let mut result = json!({ "operation": operation, "state": state });
+        append_input(&mut result, input.as_ref());
         if let Some(settled_by) = settled_by {
             result["settled_by"] = Value::String(settled_by.into());
         }

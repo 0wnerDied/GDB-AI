@@ -194,7 +194,7 @@ modes without claiming legacy HTTP+SSE.
 | Tool | Purpose |
 | --- | --- |
 | `gdb_session` | Sessions, leases, local launch, lifecycle, and capabilities |
-| `gdb_run` | Blocking run-to-stop with same-stop views, asynchronous waits, and breakpoint probes |
+| `gdb_run` | One-call input, run-to-stop, same-stop views, asynchronous waits, and breakpoint probes |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
 | `gdb_batch` | Multiple bounded inspection views at the current or named stop |
@@ -218,10 +218,15 @@ or revision. A stop-scoped call without `stop_id` binds to the current stop;
 provide a returned `stop_id` only when later calls must reject a newer stop.
 Projected continue and step actions wait for the next stop or exit by default;
 request `accepted` or `running` only for asynchronous interaction. Starting
-execution invalidates previous frame and value handles. Add an `inspect` array
-to a control or wait action to return bounded views from its resulting stop in
-the same `gdb_run` call; each view is its result key. A standalone `gdb_batch`
-accepts explicit names when the same view is needed more than once.
+execution invalidates previous frame and value handles. Add
+`input: {"text": ...}` or `input: {"data_base64": ...}` and an `inspect`
+array to a control or wait action to feed at most 64 KiB and return bounded
+views from its resulting stop in the same `gdb_run` call; each view is its
+result key. Successful input adds no echo; a stalled write reports exact
+`written` and `remaining` byte counts without wedging the session. Use
+`gdb_io` for open-ended interaction.
+A standalone `gdb_batch` accepts explicit names when the same view is needed
+more than once.
 Action `probe` combines a temporary breakpoint, continue, bounded capture, and
 cleanup in one call. If consistency is unknown or lost, the owner can attempt
 recovery or use `gdb_session` action `force_abort` to terminate resources

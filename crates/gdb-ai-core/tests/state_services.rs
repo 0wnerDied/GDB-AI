@@ -287,6 +287,21 @@ async fn tracked_state_lifecycle_round_trips() {
             .map(serde_json::Map::len),
         Some(2)
     );
+    let brief = before.result.as_ref().unwrap();
+    assert!(brief["locals"].is_array());
+    assert!(brief["arguments"].is_null());
+    let instructions = brief["disassembly"]["instructions"].as_array().unwrap();
+    assert!(instructions.len() <= 12);
+    assert!(
+        instructions
+            .iter()
+            .all(|instruction| instruction.get("source").is_none())
+    );
+    let brief_bytes = serde_json::to_vec(brief).unwrap().len();
+    assert!(
+        brief_bytes < 8 * 1024,
+        "brief snapshot is {brief_bytes} bytes"
+    );
 
     let input = call(
         &gateway,

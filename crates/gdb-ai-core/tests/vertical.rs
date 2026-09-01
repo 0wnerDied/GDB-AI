@@ -1218,38 +1218,6 @@ async fn local_debugging_vertical_slice() {
             .unwrap()
             .contains("marker reached")
     );
-    let input = successful(
-        gateway
-            .dispatch(
-                request(
-                    "input",
-                    Some(&session_id),
-                    "inferior_io.write",
-                    changed.revision,
-                    json!({"lease_id": lease_id, "text": "x"}),
-                ),
-                &caller,
-            )
-            .await,
-    );
-    let eof = successful(
-        gateway
-            .dispatch(
-                request(
-                    "eof",
-                    Some(&session_id),
-                    "inferior_io.send_eof",
-                    input.revision,
-                    json!({"lease_id": lease_id}),
-                ),
-                &caller,
-            )
-            .await,
-    );
-    assert_eq!(
-        eof.result.as_ref().unwrap(),
-        &json!({"sent": true, "closed": false, "mechanism": "pty_veof"})
-    );
     let exited = successful(
         gateway
             .dispatch(
@@ -1257,11 +1225,12 @@ async fn local_debugging_vertical_slice() {
                     "exit",
                     Some(&session_id),
                     "execution.control",
-                    eof.revision,
+                    changed.revision,
                     json!({
                         "action": "continue",
                         "lease_id": lease_id,
                         "stop_id": third_stop,
+                        "input": {"text": "x"},
                         "wait": {"until": "exited", "timeout_ms": 5000}
                     }),
                 ),
@@ -1270,6 +1239,7 @@ async fn local_debugging_vertical_slice() {
             .await,
     );
     assert!(exited.state.as_ref().unwrap().stop_id.is_none());
+    assert!(exited.result.as_ref().unwrap().get("input").is_none());
 
     successful(
         gateway

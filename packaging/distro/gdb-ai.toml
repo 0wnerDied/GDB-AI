@@ -40,7 +40,7 @@ total_artifact_bytes = 4294967296
 journal_bytes = 67108864
 
 [security]
-default_profile = "debug_control"
+default_profile = "lab_mutation"
 workspace_roots = ["/workspace"]
 remote_allowlist = []
 attach_allowlist = []

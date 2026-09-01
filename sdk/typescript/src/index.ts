@@ -136,7 +136,7 @@ export class Session {
     private leaseId: string,
   ) {}
 
-  static async create(client: Client, profile = "debug_control"): Promise<Session> {
+  static async create(client: Client, profile = "lab_mutation"): Promise<Session> {
     const response = await client.call<{
       session_id: string;
       write_lease: { lease_id: string };

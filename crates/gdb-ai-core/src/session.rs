@@ -823,6 +823,27 @@ impl SessionHandle {
                 {
                     return Ok(current);
                 }
+                // 2026-09-01: A target that exited before a requested running
+                // or stopped state left Agents waiting for a timeout, then
+                // making a second status call to discover the known outcome.
+                if !matches!(until, WaitUntil::Settled | WaitUntil::Exited)
+                    && let Some(inferior) = terminal_after(&current, baseline.as_ref())
+                {
+                    let code = if inferior.status == InferiorStatus::Exited {
+                        ErrorCode::TargetExited
+                    } else {
+                        ErrorCode::TargetDisconnected
+                    };
+                    return Err(Error::new(
+                        code,
+                        format!("target became {:?} before {until:?}", inferior.status),
+                    )
+                    .with_details(serde_json::json!({
+                        "inferior_id": inferior.id,
+                        "status": inferior.status,
+                        "exit_code": inferior.exit_code
+                    })));
+                }
                 // 2026-08-28: State waiters kept sleeping after GDB death or
                 // an unmatched result made the controller unreliable, turning
                 // a known failure into an unrelated timeout.
@@ -898,19 +919,38 @@ impl SessionHandle {
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))
     }
 
-    pub async fn write_inferior(&self, bytes: Vec<u8>, eof: bool) -> Result<()> {
+    pub async fn write_inferior(&self, bytes: Vec<u8>, eof: bool) -> Result<usize> {
+        self.write_inferior_with_timeout(bytes, eof, self.command_timeout)
+            .await
+    }
+
+    pub async fn write_inferior_with_timeout(
+        &self,
+        bytes: Vec<u8>,
+        eof: bool,
+        timeout: Duration,
+    ) -> Result<usize> {
+        let total = bytes.len();
+        let deadline = command_deadline(timeout);
         let (sender, receiver) = oneshot::channel();
-        self.requests
-            .send(WorkerRequest::WriteInferior {
+        // 2026-09-01: A PTY request that expired in the actor queue omitted
+        // byte progress while an in-flight timeout reported it. Zero accepted
+        // bytes is still exact and lets an Agent resume without guessing.
+        self.enqueue_until(
+            WorkerRequest::WriteInferior {
                 bytes,
                 eof,
+                deadline,
                 response: sender,
-            })
+            },
+            deadline,
+        )
+        .await
+        .map_err(|error| input_write_progress(error, total))?;
+        let result = receiver
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
-        receiver
-            .await
-            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+        result.map_err(|error| input_write_progress(error, total))
     }
 
     pub async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()> {
@@ -1015,12 +1055,24 @@ fn stopped_after(state: &SessionState, baseline: Option<&WaitBaseline>) -> bool 
 }
 
 fn exited_after(state: &SessionState, baseline: Option<&WaitBaseline>) -> bool {
+    terminal_after(state, baseline).is_some()
+}
+
+fn terminal_after<'a>(
+    state: &'a SessionState,
+    baseline: Option<&WaitBaseline>,
+) -> Option<&'a crate::domain::InferiorState> {
     // 2026-08-28: An inferior that was already terminal at the baseline
     // must not satisfy a new run-and-wait operation for another inferior.
-    state.inferiors.iter().any(|(backend_id, inferior)| {
-        terminal(inferior.status)
-            && baseline.is_none_or(|baseline| !baseline.terminal_inferiors.contains(backend_id))
-    })
+    state
+        .inferiors
+        .iter()
+        .find(|(backend_id, inferior)| {
+            terminal(inferior.status)
+                && baseline
+                    .is_none_or(|baseline| !baseline.terminal_inferiors.contains(*backend_id))
+        })
+        .map(|(_, inferior)| inferior)
 }
 
 pub(crate) fn settled_by(
@@ -1051,6 +1103,13 @@ fn command_queue_timeout() -> Error {
         "MI command deadline expired while queued",
     )
     .retryable()
+}
+
+fn input_write_progress(mut error: Error, total: usize) -> Error {
+    if error.code == ErrorCode::Timeout && error.details.is_none() {
+        error.details = Some(serde_json::json!({"written": 0, "remaining": total}));
+    }
+    error
 }
 
 #[cfg(test)]

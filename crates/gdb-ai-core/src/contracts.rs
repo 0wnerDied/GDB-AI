@@ -208,6 +208,14 @@ const WAIT_FIELDS: &[ParameterField] = &[
 const WAIT_OBJECT: ObjectContract = ObjectContract::new(WAIT_FIELDS, 0, &[]);
 const WAIT_KIND: ParameterKind = ParameterKind::Shape(&WAIT_OBJECT);
 
+const INFERIOR_INPUT_FIELDS: &[ParameterField] = &[
+    optional("text", ParameterKind::String),
+    optional("data_base64", ParameterKind::String),
+];
+const INFERIOR_INPUT_OBJECT: ObjectContract =
+    ObjectContract::new(INFERIOR_INPUT_FIELDS, 0, &["text", "data_base64"]);
+const INFERIOR_INPUT_KIND: ParameterKind = ParameterKind::Shape(&INFERIOR_INPUT_OBJECT);
+
 const ENDPOINT_FIELDS: &[ParameterField] = &[
     required("host", ParameterKind::String),
     required("port", ParameterKind::Positive),
@@ -632,11 +640,13 @@ impl CanonicalMethod {
                 ),
                 optional("location", String),
                 optional("wait", WAIT_KIND),
+                optional("input", INFERIOR_INPUT_KIND),
                 optional("inspect", TURN_INSPECTION_KIND),
             ]),
             ExecutionWait => MethodContract::plain(vec![
                 optional("operation_id", String),
                 required("wait", WAIT_KIND),
+                optional("input", INFERIOR_INPUT_KIND),
                 optional("inspect", TURN_INSPECTION_KIND),
             ]),
             BreakpointCreate => MethodContract::plain(vec![
@@ -1006,6 +1016,7 @@ mod tests {
             .validate_parameters(&json!({
                 "action": "continue",
                 "wait": {"until": "settled"},
+                "input": {"data_base64": "QQ=="},
                 "inspect": [{"view": "registers", "roles": ["pc", "sp"]}]
             }))
             .unwrap();
@@ -1084,6 +1095,13 @@ mod tests {
             (
                 CanonicalMethod::InferiorIoWrite,
                 json!({"text": "A", "data_base64": "QQ=="}),
+            ),
+            (
+                CanonicalMethod::ExecutionControl,
+                json!({
+                    "action": "continue",
+                    "input": {"text": "A", "data_base64": "QQ=="}
+                }),
             ),
             (
                 CanonicalMethod::BreakpointCreate,

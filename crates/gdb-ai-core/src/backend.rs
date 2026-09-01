@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use gdb_ai_mi::{MiFramer, MiLimits, MiRecord, parse_record, quote_c_string};
 use nix::{
+    fcntl::{FcntlArg, OFlag, fcntl},
     pty::openpty,
     sys::{
         resource::{Resource, setrlimit},
@@ -16,17 +17,19 @@ use std::{
     os::fd::{AsFd, AsRawFd},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
+    pin::Pin,
     process::{Command as StdCommand, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc,
     },
+    task::{Context, Poll, ready},
     thread::JoinHandle,
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf, unix::AsyncFd},
     process::{Child, ChildStdin, Command},
     sync::{Notify, mpsc},
 };
@@ -566,10 +569,35 @@ pub struct GdbBackend {
     child: Child,
     stdin: ChildStdin,
     input: BackendInputs,
-    pty_writer: tokio::fs::File,
+    pty_writer: AsyncFd<File>,
     pty_raw: bool,
     pty_output: Arc<PtyOutput>,
     descriptor: BackendDescriptor,
+}
+
+struct AsyncPty(AsyncFd<File>);
+
+impl AsyncRead for AsyncPty {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        loop {
+            let mut readable = ready!(self.0.poll_read_ready(context))?;
+            match readable.try_io(|inner| {
+                let mut reader = inner.get_ref();
+                reader.read(buffer.initialize_unfilled())
+            }) {
+                Ok(Ok(length)) => {
+                    buffer.advance(length);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(error)) => return Poll::Ready(Err(error)),
+                Err(_) => continue,
+            }
+        }
+    }
 }
 
 struct BackendInputs {
@@ -612,7 +640,12 @@ pub trait DebugBackend: Send {
     fn pty_path(&self) -> &str;
     async fn send(&mut self, raw: &[u8]) -> Result<()>;
     async fn next_input(&mut self) -> Option<BackendInput>;
-    async fn write_inferior(&mut self, bytes: &[u8], eof: bool) -> Result<()>;
+    async fn write_inferior(
+        &mut self,
+        bytes: &[u8],
+        eof: bool,
+        deadline: tokio::time::Instant,
+    ) -> Result<usize>;
     async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()>;
     fn inferior_output(&self) -> Arc<PtyOutput>;
     fn signal_interrupt(&mut self) -> Result<()>;
@@ -643,6 +676,27 @@ impl GdbBackend {
         })?;
         let master = std::fs::File::from(pty.master);
         let writer = master.try_clone()?;
+        // 2026-09-01: Blocking PTY writes wedged the session worker when a
+        // stopped inferior could not drain input. Readiness plus a caller
+        // deadline preserves the exact written prefix and keeps GDB usable.
+        let flags = fcntl(&master, FcntlArg::F_GETFL).map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("cannot read inferior PTY flags: {error}"),
+            )
+        })?;
+        fcntl(
+            &master,
+            FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
+        )
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("cannot make inferior PTY nonblocking: {error}"),
+            )
+        })?;
+        let master = AsyncFd::new(master)?;
+        let writer = AsyncFd::new(writer)?;
         // 2026-08-28: Retaining the parent slave prevented the master reader
         // from observing inferior shutdown. The resolved path is all GDB needs.
         drop(pty.slave);
@@ -777,11 +831,7 @@ impl GdbBackend {
         )?);
         tokio::spawn(read_mi(stdout, control_sender, mi_limits));
         tokio::spawn(read_stderr(stderr, stderr_sender));
-        tokio::spawn(read_pty(
-            tokio::fs::File::from_std(master),
-            pty_sender,
-            pty_output.clone(),
-        ));
+        tokio::spawn(read_pty(AsyncPty(master), pty_sender, pty_output.clone()));
 
         Ok(Self {
             child,
@@ -794,7 +844,7 @@ impl GdbBackend {
                 stderr_closed: false,
                 pty_closed: false,
             },
-            pty_writer: tokio::fs::File::from_std(writer),
+            pty_writer: writer,
             pty_raw: true,
             pty_output,
             descriptor: BackendDescriptor {
@@ -835,15 +885,47 @@ impl GdbBackend {
         self.input.recv().await
     }
 
-    pub async fn write_inferior(&mut self, bytes: &[u8], eof: bool) -> Result<()> {
+    pub async fn write_inferior(
+        &mut self,
+        bytes: &[u8],
+        eof: bool,
+        deadline: tokio::time::Instant,
+    ) -> Result<usize> {
         let raw = !eof;
         if self.pty_raw != raw {
-            configure_inferior_pty(&self.pty_writer, raw)?;
+            configure_inferior_pty(self.pty_writer.get_ref(), raw)?;
             self.pty_raw = raw;
         }
-        self.pty_writer.write_all(bytes).await?;
-        self.pty_writer.flush().await?;
-        Ok(())
+        let mut written = 0;
+        while written < bytes.len() {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(inferior_write_timeout(written, bytes.len()));
+            }
+            let mut ready = tokio::time::timeout_at(deadline, self.pty_writer.writable())
+                .await
+                .map_err(|_| inferior_write_timeout(written, bytes.len()))??;
+            match ready.try_io(|inner| {
+                let mut writer = inner.get_ref();
+                writer.write(&bytes[written..])
+            }) {
+                Ok(Ok(0)) => {
+                    return Err(inferior_write_error(
+                        std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "inferior PTY accepted zero bytes",
+                        ),
+                        written,
+                        bytes.len(),
+                    ));
+                }
+                Ok(Ok(length)) => written += length,
+                Ok(Err(error)) => {
+                    return Err(inferior_write_error(error, written, bytes.len()));
+                }
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+        Ok(written)
     }
 
     pub async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()> {
@@ -857,7 +939,7 @@ impl GdbBackend {
         // fd is owned by self and the pointer remains valid for the call.
         let result = unsafe {
             libc::ioctl(
-                self.pty_writer.as_raw_fd(),
+                self.pty_writer.get_ref().as_raw_fd(),
                 libc::TIOCSWINSZ,
                 &winsize as *const libc::winsize,
             )
@@ -953,8 +1035,13 @@ impl DebugBackend for GdbBackend {
         self.next_input().await
     }
 
-    async fn write_inferior(&mut self, bytes: &[u8], eof: bool) -> Result<()> {
-        self.write_inferior(bytes, eof).await
+    async fn write_inferior(
+        &mut self,
+        bytes: &[u8],
+        eof: bool,
+        deadline: tokio::time::Instant,
+    ) -> Result<usize> {
+        self.write_inferior(bytes, eof, deadline).await
     }
 
     async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()> {
@@ -1128,6 +1215,29 @@ where
             }
         }
     }
+}
+
+fn inferior_write_timeout(written: usize, total: usize) -> Error {
+    Error::new(
+        ErrorCode::Timeout,
+        format!("inferior input stalled after {written} of {total} bytes"),
+    )
+    .retryable()
+    .with_details(serde_json::json!({
+        "written": written,
+        "remaining": total - written
+    }))
+}
+
+fn inferior_write_error(error: std::io::Error, written: usize, total: usize) -> Error {
+    Error::new(
+        ErrorCode::TargetUnavailable,
+        format!("inferior PTY write failed after {written} of {total} bytes: {error}"),
+    )
+    .with_details(serde_json::json!({
+        "written": written,
+        "remaining": total - written
+    }))
 }
 
 fn try_notify_pty(sender: &mpsc::Sender<BackendInput>, input: BackendInput) -> bool {

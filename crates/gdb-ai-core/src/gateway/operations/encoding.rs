@@ -3,6 +3,8 @@ use serde_json::{Map, Value};
 
 use crate::{Error, ErrorCode, Result};
 
+pub(super) const MAX_INFERIOR_INPUT_BYTES: usize = 64 * 1024;
+
 pub(super) fn hex_decode(value: &str) -> Result<Vec<u8>> {
     if !value.len().is_multiple_of(2) {
         return Err(Error::new(

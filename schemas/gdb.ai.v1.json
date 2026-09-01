@@ -947,6 +947,31 @@
               "inferior_id": {
                 "type": "string"
               },
+              "input": {
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": [
+                      "text"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "data_base64"
+                    ]
+                  }
+                ],
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [],
+                "type": "object"
+              },
               "inspect": {
                 "items": {
                   "additionalProperties": false,
@@ -1062,6 +1087,31 @@
             "properties": {
               "accept_latest_revision": {
                 "type": "boolean"
+              },
+              "input": {
+                "additionalProperties": false,
+                "oneOf": [
+                  {
+                    "required": [
+                      "text"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "data_base64"
+                    ]
+                  }
+                ],
+                "properties": {
+                  "data_base64": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [],
+                "type": "object"
               },
               "inspect": {
                 "items": {

@@ -51,10 +51,13 @@ restart wait observes `running` for `stop: "none"`, and the selected stop plus
 its snapshot for other start policies; an explicit `accepted` remains
 non-blocking. Canonical execution control without a wait is accepted
 immediately; projected `gdb_run` control waits until settled by default.
-Execution control and wait requests may include bounded `inspect` views. A
-stopped result returns them from that same stop; an exited result returns no
-observations. Turn items expose `view` plus the high-frequency `limit`, `roles`,
-and `profile` selectors; `inspection.batch` retains the complete selector set.
+Execution control and wait requests may include one bounded byte-exact `input`
+and bounded `inspect` views. Input is fed before the wait, and the result
+reports only a partial write or error; success adds no redundant input echo. A
+stopped result returns views from that same stop; an exited result returns no
+observations. Turn items expose `view` plus the high-frequency `limit`,
+`roles`, and `profile` selectors; `inspection.batch` retains the complete
+selector set.
 
 Streamable HTTP supports two version-specific request paths over the same
 endpoint and canonical dispatcher. MCP `2025-11-25` stores the negotiated

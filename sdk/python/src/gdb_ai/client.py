@@ -174,7 +174,7 @@ class Session:
     lease_id: str
 
     @classmethod
-    def create(cls, client: Client, profile: str = "debug_control") -> "Session":
+    def create(cls, client: Client, profile: str = "lab_mutation") -> "Session":
         response = client.call("session.create", {"profile": profile})
         result = response["result"]
         return cls(

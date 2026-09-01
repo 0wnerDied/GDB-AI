@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use super::{
-    encoding::{byte_content, input_bytes},
+    encoding::{MAX_INFERIOR_INPUT_BYTES, byte_content, input_bytes},
     request::{required_session, unsigned},
 };
 use crate::{
@@ -60,14 +60,16 @@ impl Gateway {
     pub(super) async fn io_write(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
         let bytes = input_bytes(&request.parameters)?;
-        if bytes.len() > 64 * 1024 {
+        if bytes.len() > MAX_INFERIOR_INPUT_BYTES {
             return Err(Error::new(
                 ErrorCode::OutputLimit,
                 "inferior input is limited to 64 KiB per call",
             ));
         }
-        let written = bytes.len();
-        entry.handle.write_inferior(bytes, false).await?;
+        let written = entry
+            .handle
+            .write_inferior_with_timeout(bytes, false, self.config.server.wait_timeout())
+            .await?;
         entry
             .handle
             .record_event(DomainEvent::ControllerChanged {
@@ -91,7 +93,10 @@ impl Gateway {
         // the old close_stdin result falsely claimed an OS-level half-close.
         // 2026-08-31: One VEOF only releases pending input after raw mode;
         // queue a second boundary so the inferior observes EOF as requested.
-        entry.handle.write_inferior(vec![0x04, 0x04], true).await?;
+        entry
+            .handle
+            .write_inferior_with_timeout(vec![0x04, 0x04], true, self.config.server.wait_timeout())
+            .await?;
         entry
             .handle
             .record_event(DomainEvent::ControllerChanged {

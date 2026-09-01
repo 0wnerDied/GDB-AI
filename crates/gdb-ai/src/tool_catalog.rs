@@ -146,7 +146,7 @@ const RAW_ACTIONS: &[ToolAction] = &[action!("mi", RawMi), action!("console", Ra
 const TOOLS: &[ToolProjection] = &[
     ToolProjection {
         name: "gdb_session",
-        description: "Create, launch, inspect, or close a local GDB session.",
+        description: "Manage sessions and targets.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,
@@ -155,7 +155,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_run",
-        description: "Run through the next stop and optionally return same-stop views, or probe one breakpoint.",
+        description: "Input, run to a stop, inspect, or probe.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,
@@ -166,7 +166,7 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_breakpoints",
         // 2026-09-01: Agents mistook the executable mapping start for the PIE
         // base. State the load-bias invariant once instead of in every branch.
-        description: "Manage bounded breakpoints/watchpoints; module_offset = load bias + ELF vaddr.",
+        description: "Breakpoints/watchpoints; module_offset = load bias + ELF vaddr.",
         discriminator: Some("action"),
         actions: BREAKPOINT_ACTIONS,
         read_only: false,
@@ -175,7 +175,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_inspect",
-        description: "Read one bounded debugger view at the current or named stop.",
+        description: "Read one bounded view at a stop.",
         discriminator: Some("view"),
         actions: INSPECTION_ACTIONS,
         read_only: true,
@@ -184,7 +184,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_evaluate",
-        description: "Evaluate an expression while inferior calls and writes are disabled.",
+        description: "Evaluate without calls or writes.",
         discriminator: None,
         actions: EVALUATE_ACTIONS,
         read_only: true,
@@ -202,7 +202,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_memory",
-        description: "Read, compare, search, or conditionally write bounded memory.",
+        description: "Read memory; advanced: write/search/compare.",
         discriminator: Some("action"),
         actions: MEMORY_ACTIONS,
         read_only: false,
@@ -220,7 +220,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_disassemble",
-        description: "Read bounded disassembly around an expression or address range.",
+        description: "Read instructions around an address.",
         discriminator: None,
         actions: DISASSEMBLY_ACTIONS,
         read_only: true,
@@ -229,7 +229,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_io",
-        description: "Read or write the inferior PTY; send_eof requires a stopped target.",
+        description: "Open-ended PTY I/O, EOF, or resize.",
         discriminator: Some("action"),
         actions: IO_ACTIONS,
         read_only: false,
@@ -259,7 +259,7 @@ const TOOLS: &[ToolProjection] = &[
     // token-saving primitive available without exposing unrelated tools.
     ToolProjection {
         name: "gdb_batch",
-        description: "Run bounded inspection requests against one stop context.",
+        description: "Read bounded views at one stop.",
         discriminator: None,
         actions: BATCH_ACTIONS,
         read_only: true,
@@ -277,7 +277,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_events",
-        description: "Wait for the next bounded session event.",
+        description: "Wait for a session event.",
         discriminator: None,
         actions: EVENT_ACTIONS,
         read_only: true,
@@ -388,6 +388,7 @@ fn projected_schema(tool: &ToolProjection, include_advanced: bool, admin: bool) 
             if let Some(discriminator) = tool.discriminator {
                 add_discriminator(&mut schema, discriminator, &action_names);
             }
+            compact_schema_defaults(&mut schema);
             schema
         })
         .collect::<Vec<_>>();
@@ -428,6 +429,18 @@ fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
     if method == CanonicalMethod::SessionCreate && !admin {
         properties.remove("profile");
     }
+    if matches!(
+        method,
+        CanonicalMethod::ExecutionControl | CanonicalMethod::ExecutionWait
+    ) && let Some(input) = properties.get_mut("input").and_then(Value::as_object_mut)
+    {
+        // 2026-09-01: Two repeated required-field branches pushed the default
+        // tool catalog over its prompt budget. A closed two-field object with
+        // min/max one preserves the same exactly-one input contract.
+        input.remove("oneOf");
+        input.insert("minProperties".into(), Value::from(1));
+        input.insert("maxProperties".into(), Value::from(1));
+    }
     if method == CanonicalMethod::AgentProbe {
         // 2026-09-01: The projected probe repeated every location selector
         // inside `location` and exposed backend budget knobs with useful
@@ -466,6 +479,25 @@ fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
             .retain(|branch| branch["required"][0] != "location");
     }
     schema
+}
+
+fn compact_schema_defaults(schema: &mut Value) {
+    match schema {
+        Value::Object(object) => {
+            // 2026-09-01: Generated empty required arrays repeated a JSON
+            // Schema default throughout tools/list without constraining input.
+            if object
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                object.remove("required");
+            }
+            object.values_mut().for_each(compact_schema_defaults);
+        }
+        Value::Array(values) => values.iter_mut().for_each(compact_schema_defaults),
+        _ => {}
+    }
 }
 
 fn add_discriminator(schema: &mut Value, discriminator: &str, action_names: &[&str]) {
@@ -671,6 +703,7 @@ mod tests {
     fn omits_transport_coordination_from_agent_tools() {
         let tools = tools(false, false);
         let encoded = serde_json::to_string(&tools).unwrap();
+        assert!(!encoded.contains("\"required\":[]"));
         for field in [
             "accept_latest_revision",
             "lease_id",
