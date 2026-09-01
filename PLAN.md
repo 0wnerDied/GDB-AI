@@ -260,6 +260,58 @@ Run the next blind comparison against these exact commits. The targeted replay
 proves the previous long path can collapse correctly; only a fresh Agent run
 can establish natural probe adoption and comparative exploit progress.
 
+### Cold-start Agent-interface rerun
+
+A fresh Terra xhigh pair used the same stripped PIE, one-hour ceiling, source
+isolation, and three-process ASLR gate. The native group stopped dynamic work
+after 10m42s and the projected group after 11m42s; both completed their reports
+early.
+
+| Interface | Verified progress | Debugger traffic | Highest valid result |
+| --- | ---: | ---: | --- |
+| Native GDB CLI | 10m42s | 3 starts, 29 command lines, 3,081 output bytes | listed capability bypass with VFS read, delete, and bounded overwrite |
+| Default GDB/AI | 15m46s including ordinary validation | 41 calls, 15,276 request and 47,067 response bytes | fixed one-byte heap NUL overflow |
+
+The native Agent recognized that a listed hash and a static XOR constant remove
+the application authorization boundary. The GDB/AI Agent derived the same
+capability formula but treated only the adjacent heap byte as its final
+primitive. That difference is Agent reasoning on a predominantly static target,
+not evidence that either debugger changed target semantics. Use a target whose
+next primitive requires runtime state before making another comparative debugger
+claim.
+
+The projected trace did expose independent interface costs. Its 18,196-byte
+catalog dominated the short run. Thirteen benchmark-driver invocations added
+about 144 seconds outside debugger response time. Two cold GDB starts timed out;
+the server had created 194 Tokio threads before a session and synchronously
+probed bubblewrap. An unmapped memory read was rejected by policy before GDB
+could return its precise error. An exit-only wait missed a crash, and the Agent
+did not naturally use probe because the supplied libc failed before the command
+loop and later default-libc sessions hit the startup failure. Driver placeholder,
+invented tool-name, and missing-session follow-on calls remain harness or Agent
+errors and are not debugger defects.
+
+Complete only the shared fixes demonstrated by this run:
+
+- [x] Bound the I/O runtime to four workers instead of the host CPU count. A
+  release server now has six threads before session creation and seven with one
+  GDB, versus 194 and 196; eight concurrent GDB sessions start successfully in
+  108 ms with 15 server threads.
+- [x] Disable optional bubblewrap probing by default while retaining explicit
+  `auto` and `required` deployment modes.
+- [x] Keep memory reads admitted by mutation-capable profiles on read
+  coordination, so unmapped local reads reach `GDB_ERROR` without an
+  acknowledgement or mutation revision. Omit the ineffective compatibility
+  flags from projected schemas.
+- [x] Remove the redundant MI AST from projected GDB failures. The reproduced
+  32-byte unmapped read falls from 830 to 581 wire bytes while retaining code,
+  message, retry semantics, state, and evidence.
+- [x] State that omitting a run wait already returns at the next attributable
+  stop or exit with bounded output; reserve accepted/running for later I/O.
+- [x] Emit only positive MCP annotations and one breakpoint-location syntax.
+  The same ten-tool catalog falls from 18,196 to 16,865 wire bytes without
+  removing a debugger action or canonical request form.
+
 ## Optional post-North-star work
 
 Non-stop per-thread execution, record/replay providers, fuller multi-inferior
