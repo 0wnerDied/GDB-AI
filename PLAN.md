@@ -144,8 +144,9 @@ Complete only these trace-backed changes before the next comparison:
   registers, and a short stack; retain complete detail in deeper profiles.
 - [x] Return an immediate terminal-state error when a running/stopped wait is
   made impossible by target exit instead of consuming the full wait timeout.
-- [ ] Repeat matched cold-start measurements and require fewer Agent-visible
-  bytes and calls without losing the verified primitive or stop attribution.
+- [x] Repeat matched cold-start measurements, reject fixed-layout success, and
+  use the exact trace to remove demonstrated turn amplifiers without losing
+  the verified primitive or stop attribution.
 
 Focused regression evidence now replaces a three-call input/EOF/continue path
 with one run turn, bounds a stalled 64 KiB PTY write near its 100 ms deadline,
@@ -153,7 +154,59 @@ and keeps the worker responsive afterward. Reprojecting the recorded 10,081-byte
 brief crash response yields 4,852 bytes while retaining top-frame variables.
 The stateful default tool-discovery response is 17,346 bytes versus 17,374 bytes
 before inline input, so the one-call capability adds no discovery-token debt.
-This does not replace the next matched cold-start comparison.
+The following matched cold-start run supplied the remaining comparison.
+
+### Blind three-interface comparison
+
+The matched one-hour allocator comparison required final payload addresses to
+come from target output and pass in three fresh ASLR-enabled processes. An
+early native result disabled ASLR and embedded debugger-observed PIE, libc,
+heap, and stack addresses; it is a local diagnostic and not a successful
+remote-capable exploit.
+
+| Interface | Valid elapsed result | Debugger traffic | Highest stable result |
+| --- | ---: | ---: | --- |
+| Native GDB CLI | 52m46s | 23 starts, 362 script lines, 45,846 response bytes | target-derived libc/heap leak and backward consolidation |
+| Default GDB/AI | 43m30s | 552 calls, 190,159 request and 516,506 response bytes | target-derived libc/heap leak and two live overlapping buffers |
+| Alternative GDB MCP | 52m40s | 257 calls, 37,415 request and 1,297,941 response bytes | target-derived leak, overlap/UAF, and a guarded large-bin pointer write |
+
+No group completed an unrestricted remote arbitrary write, ORW, or flag
+path. The alternative MCP reached the deepest guarded allocator write but
+returned 2.5 times GDB/AI's response bytes. GDB/AI reached its first live
+overlap in about
+17 minutes and its service-only leak-to-overlap proof in about 21 minutes.
+Native GDB's early apparent lead came from an invalid fixed-layout run; its
+corrected ASLR-on primitive completed after 50 minutes.
+
+Native GDB was efficient when one command file combined a counter-gated
+breakpoint, silent continues, target input, and hypothesis-sized memory
+windows. The GDB/AI trace instead exposed separate breakpoint and input turns,
+stale input across restart, missing same-turn output, an ignored launch
+environment, ordinary adjacent mappings classified as unknown-effect, and an
+artifact URI with no projected resolver. Complete only the shared root fixes:
+
+- [x] Apply inferior environment values exactly and reject values GDB's MI
+  setting cannot preserve.
+- [x] Flush stale inferior input and bind restart completion to the new
+  execution generation.
+- [x] Return bounded lossless PTY output from the synchronous run or probe that
+  produced it.
+- [x] Treat gap-free ordinary ranges across adjacent local mappings as reads,
+  while retaining device and unmapped boundaries.
+- [x] Let the existing probe combine input, a GDB ignore count, bounded capture,
+  output, and breakpoint cleanup in one call.
+- [x] Require preserved ASLR for final exploit validation while permitting
+  disabled ASLR only for repeatable layout probes.
+- [x] Project the existing paged artifact reader as `gdb_memory` action
+  `artifact`, so a large read is not repeated in smaller windows.
+
+The recorded default discovery response was 17,345 bytes. Counted probe input
+adds 194 bytes and replaces at least three debugger turns; artifact paging adds
+267 bytes and replaces the observed five-window reread. The resulting 17,806
+byte catalog keeps ten top-level tools and preserves the canonical validation,
+ownership, stop attribution, page bounds, and byte encoding. Focused real-GDB
+regressions cover each combined path; another challenge-specific run is not
+required until a new blind target is selected.
 
 ## Optional post-North-star work
 
