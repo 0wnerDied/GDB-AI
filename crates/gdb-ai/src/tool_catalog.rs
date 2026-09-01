@@ -149,7 +149,7 @@ const RAW_ACTIONS: &[ToolAction] = &[action!("mi", RawMi), action!("console", Ra
 const TOOLS: &[ToolProjection] = &[
     ToolProjection {
         name: "gdb_session",
-        description: "Manage sessions and targets.",
+        description: "Manage sessions and targets; use first_instruction for stripped executables.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,

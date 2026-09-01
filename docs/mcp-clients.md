@@ -168,7 +168,9 @@ finished. Supply `stop_id` only when a later read must reject a newer stop.
 For the shortest reliable local crash-or-exit loop:
 
 1. Create a session and retain its `session_id`.
-2. Launch at the first useful stop or set a breakpoint.
+2. Launch at the first useful stop or set a breakpoint. Use
+   `first_instruction` when the executable is stripped and has no `main`
+   symbol.
 3. Call `gdb_run` action `continue` with byte-exact `input` and its trailing LF
    when required. The default wait runs through the next stop or exit. Add
    `inspect: [{"view": "crash", "profile": "brief"}]` when stopped crash

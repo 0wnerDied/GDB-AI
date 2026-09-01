@@ -93,8 +93,9 @@ impl RpcFault {
 // 2026-09-01: Exploit success criteria belong to the caller's prompt; server
 // initialization describes interface semantics, not debugging methodology.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; launch; argv \
-excludes program. MCP manages leases and revisions. stop_id pins later evidence; omit it for \
-current-stop reads. gdb_run waits for stop/exit; input feeds byte-exact PTY data and inspect \
+excludes program; use first_instruction for stripped executables. MCP manages leases and \
+revisions. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
+stop/exit; input feeds byte-exact PTY data and inspect \
 returns same-stop views. Use accepted/running only for async I/O. Reuse the session with \
 restart; gdb_run action=probe batches input, skips ignore_count hits, captures memory, and \
 returns output in one call. Use gdb_batch for current-stop views and gdb_inspect view=crash \

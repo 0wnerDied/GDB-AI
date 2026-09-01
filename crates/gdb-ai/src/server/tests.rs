@@ -28,6 +28,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
     for required in [
         "tools/list",
         "argv",
+        "first_instruction for stripped executables",
         "MCP manages leases and revisions",
         "stop_id",
         "byte-exact PTY",
