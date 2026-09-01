@@ -873,7 +873,9 @@ fn rejects_unknown_or_wrong_typed_method_parameters() {
 fn classifies_linux_memory_ranges_without_client_input() {
     let maps = concat!(
         "00400000-00410000 r-xp 00000000 08:01 1 /workspace/target\n",
+        "00410000-00411000 r--p 00010000 08:01 1 /workspace/target\n",
         "70000000-70001000 rw-s 00000000 00:05 2 /dev/uio0\n",
+        "70001000-70002000 rw-p 00000000 00:00 0\n",
     );
     assert_eq!(
         classify_linux_maps(maps, 0x0040_0100, 0x0040_0200),
@@ -892,8 +894,16 @@ fn classifies_linux_memory_ranges_without_client_input() {
         MemoryRangeEffect::Ordinary
     );
     assert_eq!(
-        classify_linux_maps(maps, 0x0041_0000, 0x0041_0000),
+        classify_linux_maps(maps, 0x0040_ffff, 0x0041_0000),
+        MemoryRangeEffect::Ordinary
+    );
+    assert_eq!(
+        classify_linux_maps(maps, 0x0041_1000, 0x0041_1000),
         MemoryRangeEffect::Unknown
+    );
+    assert_eq!(
+        classify_linux_maps(maps, 0x7000_0fff, 0x7000_1000),
+        MemoryRangeEffect::Volatile
     );
 
     let mut state = SessionState::creating(crate::domain::SessionId("sess_effect".into()));

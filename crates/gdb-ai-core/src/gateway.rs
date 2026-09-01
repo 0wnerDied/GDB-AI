@@ -1196,6 +1196,8 @@ fn classify_memory_range(state: &SessionState, request: &ApiRequest) -> Result<M
 }
 
 fn classify_linux_maps(maps: &str, start: u64, last: u64) -> MemoryRangeEffect {
+    let mut next = start;
+    let mut effect = MemoryRangeEffect::Ordinary;
     for line in maps.lines() {
         let mut fields = line.split_whitespace();
         let Some((map_start, map_end)) = fields.next().and_then(|range| range.split_once('-'))
@@ -1208,15 +1210,23 @@ fn classify_linux_maps(maps: &str, start: u64, last: u64) -> MemoryRangeEffect {
         ) else {
             continue;
         };
-        if start < map_start || last >= map_end {
+        if map_end <= next {
             continue;
         }
+        // 2026-09-01: Requiring one mapping to contain the whole range made
+        // ordinary reads across adjacent local mappings look effect-unknown.
+        // Preserve the device boundary while accepting gap-free coverage.
+        if map_start > next {
+            return MemoryRangeEffect::Unknown;
+        }
         let path = fields.nth(4).unwrap_or_default();
-        return if path.starts_with("/dev/") {
-            MemoryRangeEffect::Volatile
-        } else {
-            MemoryRangeEffect::Ordinary
-        };
+        if path.starts_with("/dev/") {
+            effect = MemoryRangeEffect::Volatile;
+        }
+        if last < map_end {
+            return effect;
+        }
+        next = map_end;
     }
     MemoryRangeEffect::Unknown
 }
