@@ -112,7 +112,9 @@ enum TranscriptCommand {
     Inspect { journal: PathBuf },
 }
 
-#[tokio::main]
+// 2026-09-01: Tokio's host-CPU default created 194 threads per server on the
+// benchmark host, starving short-lived GDB sessions under concurrent load.
+#[tokio::main(worker_threads = 4)]
 async fn main() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
