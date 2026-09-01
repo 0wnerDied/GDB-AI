@@ -90,8 +90,9 @@ The base PTY and transcript resource URIs return current-bound manifests;
 are unavailable. A resource page therefore never inherits an ambiguous base
 URI.
 Canonical I/O and transcript reads return exactly one lossless representation:
-`text` for valid UTF-8 or `data_base64` for binary bytes. This avoids charging
-an Agent context for the same evidence twice. MCP session resource ranges use
+`text` for UTF-8 without control characters other than tab and line endings,
+or `data_base64` otherwise. This avoids both JSON control-byte expansion and
+charging an Agent for the same evidence twice. MCP session resource ranges use
 `text` for UTF-8 and a base64 `blob` for binary bytes, never both.
 The inferior PTY starts in raw mode, so `data_base64` input reaches the target
 without terminal flow-control, signal, newline, or echo transformations.

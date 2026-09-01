@@ -125,18 +125,19 @@ pub(super) fn byte_content(bytes: Vec<u8>) -> Map<String, Value> {
     // 2026-08-30: Returning UTF-8 as both text and base64 duplicated target
     // evidence and inflated Agent context. Emit exactly one lossless form.
     let mut content = Map::new();
-    match String::from_utf8(bytes) {
-        Ok(text) => {
-            content.insert("encoding".into(), Value::String("utf-8".into()));
-            content.insert("text".into(), Value::String(text));
-        }
-        Err(error) => {
-            content.insert("encoding".into(), Value::String("binary".into()));
-            content.insert(
-                "data_base64".into(),
-                Value::String(BASE64.encode(error.into_bytes())),
-            );
-        }
+    // 2026-09-01: NUL-heavy target output is valid UTF-8, but JSON expands
+    // every byte to `\u0000`. Keep ordinary terminal whitespace readable and
+    // use the smaller lossless binary form for other control bytes.
+    let readable = std::str::from_utf8(&bytes).ok().filter(|text| {
+        text.chars()
+            .all(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+    });
+    if let Some(text) = readable {
+        content.insert("encoding".into(), Value::String("utf-8".into()));
+        content.insert("text".into(), Value::String(text.into()));
+    } else {
+        content.insert("encoding".into(), Value::String("binary".into()));
+        content.insert("data_base64".into(), Value::String(BASE64.encode(bytes)));
     }
     content
 }
@@ -167,5 +168,12 @@ mod tests {
         let binary = byte_content(vec![0xff]);
         assert_eq!(binary["data_base64"], "/w==");
         assert!(!binary.contains_key("text"));
+
+        let controls = byte_content(b"A\0B".to_vec());
+        assert_eq!(controls["data_base64"], "QQBC");
+        assert!(!controls.contains_key("text"));
+
+        let lines = byte_content(b"A\tB\n".to_vec());
+        assert_eq!(lines["text"], "A\tB\n");
     }
 }
