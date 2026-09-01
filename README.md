@@ -96,8 +96,8 @@ qualify. Agent-effect comparisons are not part of the compatibility claim.
   TypeScript SDK, CLI operations, schema files, and Prometheus text metrics
 - Secure GDB startup, clean or allowlisted inherited inferior environments,
   workspace path policy,
-  bubblewrap filesystem/network hardening when available, `no_new_privs`, and
-  process rlimits; untrusted targets require an external container or VM
+  optional bubblewrap filesystem/network hardening, `no_new_privs`, and process
+  rlimits; untrusted targets require an external container or VM
 - Optional SHA-256-pinned GDB Python MI extension and conditional kernel
   provider with bounded tasks/modules/panic context and an explicit monitor
   allowlist; see [Linux kernel debugging](docs/kernel.md)

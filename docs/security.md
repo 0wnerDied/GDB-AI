@@ -7,6 +7,8 @@ unless `environment_mode=inherited` selects variables named by the operator's
 bounded set. GDB/AI rejects environment values containing whitespace or a
 double quote because GDB cannot preserve them through its MI setting command.
 Target paths are canonicalized beneath configured workspace roots.
+Bubblewrap hardening is disabled by default. Operators may select `auto` or
+`required` when its filesystem and network namespaces are wanted.
 
 Profiles separate offline observation, live observation, debug control,
 laboratory mutation, and raw administration. Raw access also requires an

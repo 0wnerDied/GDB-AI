@@ -63,7 +63,7 @@ default_profile = "lab_mutation"
 workspace_roots = ["."]
 remote_allowlist = []
 attach_allowlist = []
-sandbox = "auto"
+sandbox = "disabled" # Set auto or required to enable bubblewrap hardening.
 kernel_enabled = false
 monitor_allowlist = []
 # source_map = [{ from = "/build/src", to = "/workspace/src" }]

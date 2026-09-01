@@ -325,9 +325,9 @@ pub struct SecurityConfig {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxMode {
-    #[default]
     Auto,
     Required,
+    #[default]
     Disabled,
 }
 
@@ -349,7 +349,10 @@ impl Default for SecurityConfig {
             attach_allowlist: Vec::new(),
             environment_allowlist: Vec::new(),
             source_map: Vec::new(),
-            sandbox: SandboxMode::Auto,
+            // 2026-09-01: Automatic bubblewrap probing blocked debugger cold
+            // starts under load. Local Agent sessions start directly unless
+            // an operator explicitly enables hardening.
+            sandbox: SandboxMode::Disabled,
             kernel_enabled: false,
             monitor_allowlist: Vec::new(),
         }
@@ -388,6 +391,7 @@ mod tests {
             Config::default().security.default_profile,
             Profile::LabMutation
         );
+        assert_eq!(Config::default().security.sandbox, SandboxMode::Disabled);
         assert_eq!(
             default_state_directory(Some("/state".into()), Some("/home/user".into())),
             PathBuf::from("/state/gdb-ai")

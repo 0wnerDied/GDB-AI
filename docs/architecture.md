@@ -144,10 +144,11 @@ guard through the complete checked dispatch; snapshot publication occurs only
 after the actor validates and atomically commits the original stop baseline.
 
 GDB starts with initialization files, target auto-load, debuginfod, shell
-launch, and inferior function calls disabled by default. Linux bubblewrap,
-when available, adds filesystem and network hardening; it is not a complete
-sandbox. Untrusted targets require an external container or VM supervisor for
-PID/user namespaces, cgroups, seccomp, and stronger isolation.
+launch, and inferior function calls disabled by default. Linux bubblewrap is
+disabled by default; `sandbox = "auto"` or `"required"` enables its filesystem
+and network hardening. It is not a complete sandbox. Untrusted targets require
+an external container or VM supervisor for PID/user namespaces, cgroups,
+seccomp, and stronger isolation.
 
 HTTP is loopback-only. Remote access must terminate TLS at a trusted same-host
 proxy, use explicit authentication, and validate browser origins. Stdio and
