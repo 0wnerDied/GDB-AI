@@ -699,6 +699,19 @@ async fn local_debugging_vertical_slice() {
             .await,
     );
     assert_eq!(memory.result.as_ref().unwrap()["stop_id"], second_stop);
+    let unmapped = gateway
+        .dispatch(
+            request(
+                "unmapped-memory",
+                Some(&session_id),
+                "memory.read",
+                None,
+                json!({"address": "0x410", "length": 32, "accept_current_stop": true}),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(unmapped.error.unwrap().code, ErrorCode::GdbError);
     let search = successful(
         gateway
             .dispatch(

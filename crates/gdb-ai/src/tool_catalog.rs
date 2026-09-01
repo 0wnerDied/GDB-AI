@@ -456,6 +456,18 @@ fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
             properties.remove(field);
         }
     }
+    if matches!(
+        method,
+        CanonicalMethod::MemoryRead
+            | CanonicalMethod::MemorySearch
+            | CanonicalMethod::MemoryCompare
+    ) {
+        // 2026-09-01: Mutation profiles now acknowledge target-effect reads
+        // by policy; other profiles cannot elevate them with a request flag.
+        // Keep the legacy fields canonical without spending Agent tokens.
+        properties.remove("acknowledge_target_effects");
+        properties.remove("volatile");
+    }
     // 2026-09-01: Requiring an Agent to fetch and echo the current stop split
     // one inspection into two calls. MCP binds an omitted stop_id internally;
     // an explicit stop_id remains available for cross-call attribution.
@@ -685,6 +697,13 @@ mod tests {
         );
         let canonical = CanonicalMethod::MemoryRead.parameter_schema();
         assert!(canonical["properties"].get("accept_current_stop").is_some());
+        let projected = projected_method_schema(CanonicalMethod::MemoryRead, false);
+        assert!(
+            projected["properties"]
+                .get("acknowledge_target_effects")
+                .is_none()
+        );
+        assert!(projected["properties"].get("volatile").is_none());
     }
 
     #[test]

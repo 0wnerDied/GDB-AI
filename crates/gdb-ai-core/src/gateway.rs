@@ -366,6 +366,10 @@ impl Gateway {
                 ));
             }
         }
+        let profile = entry
+            .as_ref()
+            .map(|entry| entry.handle.profile())
+            .unwrap_or(self.config.security.default_profile);
         if let Some(entry) = &entry
             && matches!(
                 request.method,
@@ -373,38 +377,18 @@ impl Gateway {
                     | crate::protocol::CanonicalMethod::MemorySearch
                     | crate::protocol::CanonicalMethod::MemoryCompare
             )
+            && !matches!(profile, Profile::LabMutation | Profile::RawAdmin)
         {
             // 2026-08-29: The caller-controlled `volatile` flag previously
             // decided whether a read might mutate a remote device. Classify
-            // the target range here and use the flag only as acknowledgement.
+            // the target range here instead of trusting request metadata.
             let range_effect = classify_memory_range(&entry.handle.state(), request)?;
+            // 2026-09-01: Labeling an admitted target-effect read as a
+            // mutation made projected MCP demand a revision for local memory
+            // failures. Mutation-capable profiles preserve read coordination;
+            // observation profiles reject the classified effect below.
             if range_effect != MemoryRangeEffect::Ordinary {
                 effect = Effect::VolatileTargetRead;
-                let acknowledged = request
-                    .parameters
-                    .get("acknowledge_target_effects")
-                    .or_else(|| request.parameters.get("volatile"))
-                    .and_then(Value::as_bool)
-                    == Some(true);
-                if !acknowledged {
-                    self.store.audit(
-                        &caller.identity,
-                        Some(entry.handle.id()),
-                        &request.method,
-                        effect,
-                        false,
-                        Some(entry.handle.with_state(|state| state.revision)),
-                        &serde_json::to_value(request)?,
-                        "denied",
-                    )?;
-                    return Err(Error::new(
-                        ErrorCode::PolicyDenied,
-                        format!(
-                            "{} memory range requires acknowledge_target_effects=true",
-                            range_effect.as_str()
-                        ),
-                    ));
-                }
             }
         }
         // 2026-08-30: Persisting ordinary observations to two SQLite audit
@@ -412,10 +396,6 @@ impl Gateway {
         // evidence remains in the session journal; state-changing and volatile
         // operations retain durable admission and completion audit records.
         let durable_audit = effect != Effect::Read;
-        let profile = entry
-            .as_ref()
-            .map(|entry| entry.handle.profile())
-            .unwrap_or(self.config.security.default_profile);
         // 2026-08-28: Selecting a profile must not grant raw authority; the
         // transport has to authenticate and explicitly mark an admin caller.
         if profile == Profile::RawAdmin && !caller.admin {
@@ -1150,16 +1130,6 @@ enum MemoryRangeEffect {
     Ordinary,
     Volatile,
     Unknown,
-}
-
-impl MemoryRangeEffect {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Ordinary => "ordinary",
-            Self::Volatile => "volatile",
-            Self::Unknown => "unknown-effect",
-        }
-    }
 }
 
 fn classify_memory_range(state: &SessionState, request: &ApiRequest) -> Result<MemoryRangeEffect> {

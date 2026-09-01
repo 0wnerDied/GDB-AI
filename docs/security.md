@@ -22,10 +22,11 @@ input and debugger mutations needed by exploit Agents. Operators may configure
 deployment is required; `raw_admin` remains explicit.
 
 Memory reads are classified by the server. Core and proven ordinary local
-mappings remain read effects; remote, unknown, and local device mappings
-require `acknowledge_target_effects=true` and the `lab_mutation` profile.
-The legacy `volatile=true` field is accepted only as the same acknowledgement,
-not as the source of the classification.
+mappings remain read effects. `lab_mutation` and `raw_admin` profiles accept
+remote, unknown, and local device reads directly; observation profiles reject
+them. The canonical API retains `acknowledge_target_effects=true` and the legacy
+`volatile=true` alias for wire compatibility; admission is profile-driven and
+projected Agent tools omit both.
 
 HTTP always binds only to loopback; an optional bearer token authenticates
 clients but does not permit a non-loopback listener. Unix sockets are mode
