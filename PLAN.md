@@ -162,7 +162,8 @@ The matched one-hour allocator comparison required final payload addresses to
 come from target output and pass in three fresh ASLR-enabled processes. An
 early native result disabled ASLR and embedded debugger-observed PIE, libc,
 heap, and stack addresses; it is a local diagnostic and not a successful
-remote-capable exploit.
+remote-capable exploit. This is an evaluation rule owned by the Agent prompt,
+not debugger initialization or component policy.
 
 | Interface | Valid elapsed result | Debugger traffic | Highest stable result |
 | --- | ---: | ---: | --- |
@@ -195,8 +196,6 @@ artifact URI with no projected resolver. Complete only the shared root fixes:
   while retaining device and unmapped boundaries.
 - [x] Let the existing probe combine input, a GDB ignore count, bounded capture,
   output, and breakpoint cleanup in one call.
-- [x] Require preserved ASLR for final exploit validation while permitting
-  disabled ASLR only for repeatable layout probes.
 - [x] Project the existing paged artifact reader as `gdb_memory` action
   `artifact`, so a large read is not repeated in smaller windows.
 
