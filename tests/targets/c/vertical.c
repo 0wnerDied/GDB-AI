@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 volatile int global_value = 7;
@@ -13,9 +14,11 @@ __attribute__((noinline)) static void marker(void)
 
 int main(void)
 {
+  const char *environment = getenv("GDB_AI_TEST_ENV");
   /* 2026-08-29: TCG can keep this fixture stopped for over 30 seconds.
      Leave the alarm as a final guard without racing debugger deadlines. */
   alarm(300);
+  printf("environment: %s\n", environment ? environment : "unset");
   marker();
   (void) getchar();
   return global_value == 42 ? 0 : 1;

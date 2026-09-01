@@ -4,8 +4,9 @@ GDB starts with initialization, target auto-load, debuginfod, shell launch,
 and inferior function calls disabled. Inferiors start with a clean environment
 unless `environment_mode=inherited` selects variables named by the operator's
 `security.environment_allowlist`; request values may then override that
-bounded set. Target paths are canonicalized beneath configured workspace
-roots.
+bounded set. GDB/AI rejects environment values containing whitespace or a
+double quote because GDB cannot preserve them through its MI setting command.
+Target paths are canonicalized beneath configured workspace roots.
 
 Profiles separate offline observation, live observation, debug control,
 laboratory mutation, and raw administration. Raw access also requires an

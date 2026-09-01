@@ -200,6 +200,7 @@ async fn local_debugging_vertical_slice() {
                         "program": "vertical",
                         "lease_id": lease_id,
                         "cwd": directory.path(),
+                        "environment": {"GDB_AI_TEST_ENV": "preserved"},
                         "stop": "first_instruction",
                         "wait": {"until": "snapshot", "timeout_ms": 5000}
                     }),
@@ -1212,12 +1213,10 @@ async fn local_debugging_vertical_slice() {
             )
             .await,
     );
-    assert!(
-        output.result.unwrap()["text"]
-            .as_str()
-            .unwrap()
-            .contains("marker reached")
-    );
+    let output = output.result.unwrap();
+    let output = output["text"].as_str().unwrap();
+    assert!(output.contains("marker reached"));
+    assert!(output.contains("environment: preserved"), "{output:?}");
     let exited = successful(
         gateway
             .dispatch(

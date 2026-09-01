@@ -550,10 +550,13 @@ impl Gateway {
         }
         setup.push(arguments);
         for (name, value) in environment {
+            // 2026-09-01: GDB accepts quoted environment arguments but keeps
+            // the quotes or silently leaves NAME undefined. Send one validated
+            // bare assignment so successful launch means the value was applied.
             setup.push(
                 MiCommand::new("-gdb-set")?
                     .bare("environment")?
-                    .string(format!("{name}={value}")),
+                    .bare(format!("{name}={value}"))?,
             );
         }
         setup.push(
@@ -892,6 +895,9 @@ pub(super) fn validate_environment(environment: &BTreeMap<String, String>) -> Re
             || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
             || value.len() > 64 * 1024
             || value.contains('\0')
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == b'"')
         {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
@@ -1111,6 +1117,17 @@ mod tests {
 
         assert_eq!(environment.len(), 1);
         assert_eq!(environment.get("PATH"), Some(&path));
+    }
+
+    #[test]
+    fn rejects_environment_values_gdb_cannot_preserve() {
+        for value in ["two words", "\"quoted\""] {
+            let environment = BTreeMap::from([("VALUE".into(), value.into())]);
+            assert_eq!(
+                validate_environment(&environment).unwrap_err().code,
+                ErrorCode::InvalidArgument
+            );
+        }
     }
 
     #[test]
