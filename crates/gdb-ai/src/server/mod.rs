@@ -88,12 +88,15 @@ impl RpcFault {
 // 2026-09-01: Keep coordination implicit for the common path: projected run
 // waits for stop/exit and projected reads bind the current stop. Explicit
 // running and stop pins remain for PTY races and cross-call evidence.
+// 2026-09-01: Fixed-layout proofs were mistaken for remote-capable exploits.
+// Preserve ASLR for final validation while allowing repeatable layout probes.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; launch; argv \
 excludes program. MCP manages leases and revisions. stop_id pins later evidence; omit it for \
 current-stop reads. gdb_run waits for stop/exit; input feeds byte-exact PTY data and inspect \
 returns same-stop views. Use accepted/running only for async I/O. Reuse the session with \
 restart; use gdb_run action=probe with input and ignore_count for \
-one-call counted capture. Use gdb_batch for current-stop views and gdb_inspect view=crash \
+one-call counted capture. Disable ASLR only for repeatable layout probes and preserve it for \
+final exploit validation. Use gdb_batch for current-stop views and gdb_inspect view=crash \
 profile=brief for triage. Query a returned operation_id after timeout. Close when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {

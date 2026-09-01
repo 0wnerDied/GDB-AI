@@ -32,6 +32,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "byte-exact PTY",
         "waits for stop/exit",
         "restart",
+        "preserve it for final exploit validation",
         "gdb_batch",
         "gdb_run action=probe",
         "gdb_inspect view=crash profile=brief",
