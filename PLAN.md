@@ -207,6 +207,59 @@ ownership, stop attribution, page bounds, and byte encoding. Focused real-GDB
 regressions cover each combined path; another challenge-specific run is not
 required until a new blind target is selected.
 
+### Post-fix two-interface rerun
+
+A matched blind rerun used the same stripped PIE, libc, Terra xhigh model,
+one-hour limit, source restrictions, and three-fresh-process ASLR validity gate.
+The alternative MCP was excluded after prior testing established that it was
+not competitive.
+
+| Interface | Dynamic time | Debugger traffic | Highest valid result |
+| --- | ---: | ---: | --- |
+| Native GDB CLI | 15m49s | 14 starts, 233 command lines, 32,646 output bytes | target-output libc and heap disclosure; adjacent size-byte clearing |
+| Default GDB/AI | 20m51s | 265 calls, 74,583 request and 228,143 response bytes | target-output libc disclosure; adjacent size-byte clearing |
+
+Neither group completed arbitrary write, control flow, ORW, or a flag path.
+Native GDB reached its first stable disclosure in 3m15s; GDB/AI reached its
+first stable disclosure in 17m03s. Both final claims passed three ordinary
+ASLR-enabled processes, but native GDB retained the deeper heap disclosure and
+won both progress and context gates. GDB/AI's 33 initializations and 29
+create/launch pairs include the comparison harness restarting its stdio server
+for each sequence; report them separately rather than treating them as GDB
+output, while retaining their Agent-visible cost in the measured total.
+
+The trace contained no projected probe calls. A focused replay showed the
+causes in the interface rather than transport latency:
+
+- [x] Let a module-offset probe start at the loader stop, use the existing
+  pending PIE rebind path, follow the stable breakpoint ID, and clean up the
+  materialized breakpoint in the same call.
+- [x] Add bounded address-expression memory windows to probe capture so a
+  counted input turn does not require a later `gdb_memory` call.
+- [x] Describe probe as batched exact input, skipped intermediate hits,
+  same-stop expression/stack/memory capture, output, and cleanup.
+- [x] Encode control-bearing UTF-8 as one lossless binary value instead of
+  expanding each NUL into a JSON escape.
+- [x] Omit successful `ok` text, healthy/active state defaults, null frame
+  fields, and ready snapshot identity duplicated by the current `stop_id`.
+
+The default serialized catalog is now 18,151 bytes, 345 bytes above the rerun
+catalog because memory capture and the stripped-target hint are explicit. In
+exchange, an end-to-end replay from the loader stop queued two protocol
+commands, skipped their intermediate
+breakpoint hits, captured an exact memory window, returned target output, and
+cleaned up with one `gdb_run` call. Encoding the NUL-heavy output reduced that
+probe response from 8,621 to 2,679 bytes; compact state reduced it again to
+2,459 bytes. The complete four-call create/launch/probe/close replay fell from
+11,105 to 4,554 response bytes. Applying only the state and success-envelope
+projection to the recorded blind trace reduces 228,143 response bytes to
+193,587 bytes (15.1%) without dropping stop, frame, process, inferior, thread,
+origin, or stop-reason facts.
+
+Run the next blind comparison against these exact commits. The targeted replay
+proves the previous long path can collapse correctly; only a fresh Agent run
+can establish natural probe adoption and comparative exploit progress.
+
 ## Optional post-North-star work
 
 Non-stop per-thread execution, record/replay providers, fuller multi-inferior
