@@ -127,6 +127,45 @@ fn bounds_caller_controlled_faults_and_progress_tokens() {
 }
 
 #[test]
+fn projected_gdb_errors_omit_the_redundant_mi_record() {
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "gdb-error".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::MemoryRead,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let result = tool_result(
+        ApiResponse::failure(
+            &request,
+            gdb_ai_core::Error::new(gdb_ai_core::ErrorCode::GdbError, "Unable to read memory.")
+                .with_details(json!({
+                    "token": 30,
+                    "evidence_seq": 134,
+                    "record": {"record": "result", "data": {"class": "error"}}
+                })),
+            None,
+        ),
+        CanonicalMethod::MemoryRead,
+    );
+    assert_eq!(
+        result["structuredContent"]["error"]["message"],
+        "Unable to read memory."
+    );
+    assert!(
+        result["structuredContent"]["error"]
+            .get("details")
+            .is_none()
+    );
+    assert_eq!(
+        result["structuredContent"]["evidence"][0]["kind"],
+        "journal-entry"
+    );
+}
+
+#[test]
 fn maps_tool_metadata_outside_canonical_parameters() {
     let request = map_tool(
         "gdb_run",

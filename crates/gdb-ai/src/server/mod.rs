@@ -8,6 +8,7 @@ use std::{
 };
 
 use gdb_ai_core::{
+    ErrorCode,
     domain::{
         BackendHealth, Consistency, SessionLifecycle, SessionState, SnapshotStatus, TargetOrigin,
     },
@@ -857,7 +858,22 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         compact.insert("evidence".into(), json!(evidence));
     }
     if let Some(error) = error {
-        compact.insert("error".into(), json!(error));
+        let mut projected = json!(error);
+        if error.code == ErrorCode::GdbError
+            && let Some(projected) = projected.as_object_mut()
+            && let Some(details) = projected.get_mut("details").and_then(Value::as_object_mut)
+        {
+            // 2026-09-01: Projected GDB failures expanded the already rendered
+            // message into a complete MI AST and byte array. Canonical replies
+            // and journal evidence retain the record for exact diagnostics.
+            for field in ["record", "token", "evidence_seq"] {
+                details.remove(field);
+            }
+            if details.is_empty() {
+                projected.remove("details");
+            }
+        }
+        compact.insert("error".into(), projected);
     }
     Value::Object(compact)
 }
