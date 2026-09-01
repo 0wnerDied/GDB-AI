@@ -131,10 +131,13 @@ async fn probe_and_experiment_capture_and_clean_up() {
                 "location": {"function": "marker"},
                 "ignore_count": 1,
                 "input": {"text": "x"},
-                "capture": [{"expression": "global_value"}],
+                "capture": [
+                    {"expression": "global_value"},
+                    {"memory": {"address_expression": "&global_value", "length": 4}}
+                ],
                 "budget": {
                     "max_calls": 8,
-                    "max_values": 2,
+                    "max_values": 3,
                     "wall_time_ms": 5000
                 }
             }),
@@ -149,6 +152,10 @@ async fn probe_and_experiment_capture_and_clean_up() {
     assert_eq!(
         probe.result.as_ref().unwrap()["captures"][0]["observation"]["observations"][0]["value"],
         "8"
+    );
+    assert_eq!(
+        probe.result.as_ref().unwrap()["captures"][0]["observation"]["observations"][1]["memory"]["hex"],
+        "08000000"
     );
 
     let exited = call(

@@ -177,8 +177,11 @@ For the shortest reliable local crash-or-exit loop:
    another session. Batch deterministic commands into one PTY write.
 
 For a counted one-shot breakpoint, use `gdb_run` action `probe` with `input`,
-`ignore_count`, and bounded expression or stack captures. It inserts and
-cleans up its temporary breakpoint in the same call.
+`ignore_count`, and bounded expression, stack, or memory captures. A memory
+capture supplies `address_expression` and `length`. The call queues the whole
+input, skips intermediate hits, returns output and observations, and cleans up
+its temporary breakpoint. A module offset may be supplied before a stripped
+PIE maps; GDB/AI rebinds it when the mapping appears.
 
 The result reports bounded `output` produced during the call, plus
 `settled_by: "stopped"`, one `stop_id`, and requested observations, or

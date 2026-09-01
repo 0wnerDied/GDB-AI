@@ -318,9 +318,21 @@ const CAPTURE_STACK_ITEM_FIELDS: &[ParameterField] = &[required(
 )];
 const CAPTURE_STACK_ITEM_OBJECT: ObjectContract =
     ObjectContract::new(CAPTURE_STACK_ITEM_FIELDS, 0, &[]);
+const CAPTURE_MEMORY_FIELDS: &[ParameterField] = &[
+    required("address_expression", ParameterKind::String),
+    required("length", ParameterKind::Positive),
+];
+const CAPTURE_MEMORY_OBJECT: ObjectContract = ObjectContract::new(CAPTURE_MEMORY_FIELDS, 0, &[]);
+const CAPTURE_MEMORY_ITEM_FIELDS: &[ParameterField] = &[required(
+    "memory",
+    ParameterKind::Shape(&CAPTURE_MEMORY_OBJECT),
+)];
+const CAPTURE_MEMORY_ITEM_OBJECT: ObjectContract =
+    ObjectContract::new(CAPTURE_MEMORY_ITEM_FIELDS, 0, &[]);
 const CAPTURE_ITEM_KINDS: &[ParameterKind] = &[
     ParameterKind::Shape(&CAPTURE_EXPRESSION_OBJECT),
     ParameterKind::Shape(&CAPTURE_STACK_ITEM_OBJECT),
+    ParameterKind::Shape(&CAPTURE_MEMORY_ITEM_OBJECT),
 ];
 const CAPTURE_ITEM_KIND: ParameterKind = ParameterKind::OneOf(CAPTURE_ITEM_KINDS);
 const CAPTURE_KIND: ParameterKind = ParameterKind::ArrayOf(&CAPTURE_ITEM_KIND);
@@ -1002,7 +1014,11 @@ mod tests {
         CanonicalMethod::AgentProbe
             .validate_parameters(&json!({
                 "location": {"source": {"path": "/tmp/a.c", "line": 7}},
-                "capture": [{"expression": "length"}, {"stack": {"limit": 4}}],
+                "capture": [
+                    {"expression": "length"},
+                    {"stack": {"limit": 4}},
+                    {"memory": {"address_expression": "$sp", "length": 16}}
+                ],
                 "budget": {"max_calls": 8, "wall_time_ms": 1000}
             }))
             .unwrap();

@@ -3530,6 +3530,32 @@
                         "stack"
                       ],
                       "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "memory": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "address_expression": {
+                              "type": "string"
+                            },
+                            "length": {
+                              "minimum": 1,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "address_expression",
+                            "length"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "memory"
+                      ],
+                      "type": "object"
                     }
                   ]
                 },
@@ -3848,6 +3874,32 @@
                       },
                       "required": [
                         "stack"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "memory": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "address_expression": {
+                              "type": "string"
+                            },
+                            "length": {
+                              "minimum": 1,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "address_expression",
+                            "length"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "memory"
                       ],
                       "type": "object"
                     }

@@ -94,8 +94,8 @@ const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; 
 excludes program. MCP manages leases and revisions. stop_id pins later evidence; omit it for \
 current-stop reads. gdb_run waits for stop/exit; input feeds byte-exact PTY data and inspect \
 returns same-stop views. Use accepted/running only for async I/O. Reuse the session with \
-restart; use gdb_run action=probe with input and ignore_count for \
-one-call counted capture. Use gdb_batch for current-stop views and gdb_inspect view=crash \
+restart; gdb_run action=probe batches input, skips ignore_count hits, captures memory, and \
+returns output in one call. Use gdb_batch for current-stop views and gdb_inspect view=crash \
 profile=brief for triage. Query a returned operation_id after timeout. Close when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {

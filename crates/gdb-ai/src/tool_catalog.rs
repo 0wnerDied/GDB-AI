@@ -158,7 +158,9 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_run",
-        description: "Input, run to a stop, and return bounded output/inspection; or probe.",
+        // 2026-09-01: A blind Agent treated probe as non-interactive and
+        // rebuilt its counted input and memory workflow from separate calls.
+        description: "Run with exact input/output; probe skips hits and captures expressions, stack, or memory.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,
@@ -723,15 +725,22 @@ mod tests {
         assert_eq!(probe["properties"]["input"]["maxProperties"], 1);
         assert!(probe["properties"]["input"].get("oneOf").is_none());
         assert!(probe["properties"]["ignore_count"].is_object());
+        assert!(
+            probe["properties"]["capture"]["items"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["properties"].get("memory").is_some())
+        );
         let default_bytes = serde_json::to_vec(&tools).unwrap().len();
-        // 2026-09-01: Counted probe input adds one compact catalog shape but
-        // removes a separate breakpoint, run, and input round trip per probe.
-        // Artifact paging adds 267 bytes and replaces repeated window reads.
-        assert!(default_bytes < 17_900, "{default_bytes}");
+        // 2026-09-01: Counted input and memory capture add compact schema
+        // shapes but replace separate breakpoint, run, input, and memory
+        // turns. Artifact paging likewise replaces repeated window reads.
+        assert!(default_bytes < 18_200, "{default_bytes}");
         let advanced_bytes = serde_json::to_vec(&super::tools(true, false))
             .unwrap()
             .len();
-        assert!(advanced_bytes < 29_200, "{advanced_bytes}");
+        assert!(advanced_bytes < 29_800, "{advanced_bytes}");
     }
 
     #[test]

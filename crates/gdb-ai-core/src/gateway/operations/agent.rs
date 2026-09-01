@@ -6,11 +6,13 @@ use serde_json::{Value, json};
 
 use super::{
     context::{context_options, require_stopped_context},
+    encoding::{hex_encode, parse_address},
     evaluation::{safe_evaluate_command, validate_expression},
     execution::{append_turn_output, feed_inferior, turn_input},
+    memory::read_memory_bytes,
     mi::{normalized_frames, result_text},
     reconciliation::synchronize_breakpoint,
-    request::{required_session, string},
+    request::{required_session, string, unsigned},
 };
 use crate::{
     Error, ErrorCode, Result,
@@ -621,10 +623,60 @@ impl Gateway {
                     "stack": normalized_frames(&reply.record, state, &context),
                     "evidence_seq": reply.evidence_seq
                 }));
+            } else if let Some(memory) = item.get("memory") {
+                let address_expression = string(memory, "address_expression")?;
+                validate_expression(&address_expression)?;
+                let length = usize::try_from(unsigned(memory, "length")?).map_err(|_| {
+                    Error::new(ErrorCode::OutputLimit, "probe memory length is too large")
+                })?;
+                if length == 0 || length > budget.max_memory_bytes {
+                    return Err(Error::new(
+                        ErrorCode::OutputLimit,
+                        "probe memory capture exceeds max_memory_bytes",
+                    ));
+                }
+                let read_calls = length.div_ceil(64 * 1024);
+                if calls.saturating_add(1 + read_calls) > budget.max_calls {
+                    return Err(Error::new(
+                        ErrorCode::OutputLimit,
+                        "probe exhausted its debugger-call budget",
+                    ));
+                }
+                let context = json!({"stop_id": state.stop_id});
+                let command = context_options(
+                    MiCommand::new("-data-evaluate-expression")?.string(&address_expression),
+                    &context,
+                    state,
+                )?;
+                let reply = safe_evaluate_command(&entry.handle, command).await?;
+                *calls += 1;
+                let address = result_text(&reply.record, "value")
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::GdbError,
+                            "probe address expression returned no value",
+                        )
+                    })
+                    .and_then(|value| parse_address(&value))?;
+                // 2026-09-01: Blind exploit traces separated a counted run
+                // from every narrow memory read. Capture the exact window
+                // under the probe's existing stable-stop fence instead.
+                let (bytes, evidence_seq) =
+                    read_memory_bytes(&entry.handle, state, address, length, false).await?;
+                *calls += read_calls;
+                observations.push(json!({
+                    "memory": {
+                        "address_expression": address_expression,
+                        "address": format!("0x{address:x}"),
+                        "length": bytes.len(),
+                        "hex": hex_encode(&bytes),
+                        "evidence_seq": evidence_seq
+                    }
+                }));
             } else {
                 return Err(Error::new(
                     ErrorCode::InvalidArgument,
-                    "capture items require expression or stack",
+                    "capture items require expression, stack, or memory",
                 ));
             }
         }
