@@ -461,11 +461,16 @@ mod tests {
             memory["then"]["properties"]["parameters"]["additionalProperties"],
             false
         );
-        assert!(
-            memory["then"]["properties"]["parameters"]["required"]
-                .as_array()
-                .unwrap()
-                .contains(&Value::String("address".into()))
+        let parameters = &memory["then"]["properties"]["parameters"];
+        // 2026-09-04: Requiring a literal address here rejected the generated
+        // one-call expression form. Preserve exactly one address selector.
+        assert_eq!(parameters["required"], json!(["length"]));
+        assert_eq!(
+            parameters["allOf"][0]["oneOf"],
+            json!([
+                {"required": ["address"]},
+                {"required": ["address_expression"]}
+            ])
         );
     }
 
