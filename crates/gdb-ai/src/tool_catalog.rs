@@ -150,9 +150,9 @@ const RAW_ACTIONS: &[ToolAction] = &[action!("mi", RawMi), action!("console", Ra
 const TOOLS: &[ToolProjection] = &[
     ToolProjection {
         name: "gdb_session",
-        // 2026-09-04: An Agent repeated the executable in argv because the
-        // launch convention appeared only in initialization instructions.
-        description: "Manage sessions and targets; launch program names the executable and argv contains only its arguments; use first_instruction for stripped executables.",
+        // 2026-09-04: Agents combined create with target fields and guessed
+        // remote parameter names. State the lifecycle split beside the schema.
+        description: "Create a session with action/profile only, then launch with program plus argument-only argv or connect_remote with endpoint and optional executable; relative paths use workspace roots; use first_instruction for stripped executables.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,
