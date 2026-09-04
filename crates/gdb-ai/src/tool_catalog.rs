@@ -306,7 +306,9 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_kernel",
-        description: "Inspect kernel targets or run allowlisted monitor commands.",
+        // 2026-09-04: Agents guessed `what` and promoted view names to actions.
+        // Spell out the two-field inspection shape beside its strict schema.
+        description: "Use action=inspect plus view=capabilities|version|base|current_task|init_task|tasks|modules|stack|panic; action=monitor takes command.",
         discriminator: Some("action"),
         actions: KERNEL_ACTIONS,
         read_only: false,
