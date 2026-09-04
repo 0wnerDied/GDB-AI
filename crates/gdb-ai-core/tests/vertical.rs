@@ -1296,6 +1296,31 @@ async fn local_debugging_vertical_slice() {
     let output = output["text"].as_str().unwrap();
     assert!(output.contains("marker reached"));
     assert!(output.contains("environment: preserved"), "{output:?}");
+    let called = successful(
+        gateway
+            .dispatch(
+                request(
+                    "inferior-call",
+                    Some(&session_id),
+                    "value.evaluate",
+                    changed.revision,
+                    json!({
+                        "lease_id": lease_id,
+                        "expression": "(void *)sbrk(0)",
+                        "side_effects": "allow",
+                        "stop_id": third_stop
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(called.result.as_ref().unwrap()["side_effects"], "allowed");
+    assert!(
+        called.result.as_ref().unwrap()["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("0x"))
+    );
     let deleted = successful(
         gateway
             .dispatch(
@@ -1303,7 +1328,7 @@ async fn local_debugging_vertical_slice() {
                     "delete-before-restart",
                     Some(&session_id),
                     "breakpoint.delete",
-                    changed.revision,
+                    called.revision,
                     json!({"lease_id": lease_id, "breakpoint_id": breakpoint_id}),
                 ),
                 &caller,

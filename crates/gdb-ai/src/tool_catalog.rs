@@ -209,10 +209,10 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_evaluate",
-        description: "Evaluate without calls or writes.",
+        description: "Evaluate expressions; side_effects=allow permits inferior calls and assignments.",
         discriminator: None,
         actions: EVALUATE_ACTIONS,
-        read_only: true,
+        read_only: false,
         advanced: false,
         raw: false,
     },

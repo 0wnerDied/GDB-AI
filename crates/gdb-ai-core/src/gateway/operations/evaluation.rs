@@ -12,16 +12,11 @@ pub(super) async fn safe_evaluate_command(
 }
 
 pub(super) fn validate_expression(expression: &str) -> Result<()> {
-    if expression.is_empty() || expression.len() > 4_096 || expression.contains('\0') {
-        return Err(Error::new(
-            ErrorCode::InvalidArgument,
-            "expression must contain 1 to 4096 bytes and no NUL",
-        ));
-    }
+    validate_expression_text(expression)?;
 
     // 2026-08-29: Legacy GDB cannot disable register writes after a live
-    // inferior exists. Reject mutation and call syntax before GDB sees it;
-    // backend guards still independently block inferior calls and memory.
+    // inferior exists. Reject mutation and call syntax before GDB sees a
+    // side-effect-denied expression; explicit mutation uses a separate path.
     let bytes = expression.as_bytes();
     let mut quote = None;
     let mut escaped = false;
@@ -90,6 +85,17 @@ pub(super) fn validate_expression(expression: &str) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+pub(super) fn validate_expression_text(expression: &str) -> Result<()> {
+    if expression.is_empty() || expression.len() > 4_096 || expression.contains('\0') {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "expression must contain 1 to 4096 bytes and no NUL",
+        ));
+    }
+
     Ok(())
 }
 

@@ -769,7 +769,7 @@ impl CanonicalMethod {
             InspectionSnapshotGet => MethodContract::plain(vec![required("snapshot_id", String)]),
             ValueEvaluate => MethodContract::contextual(vec![
                 required("expression", String),
-                optional("side_effects", Enum(&["deny"])),
+                optional("side_effects", Enum(&["deny", "allow"])),
             ]),
             ValueCreate => MethodContract::contextual(vec![required("expression", String)]),
             ValueChildren => MethodContract::contextual(vec![
@@ -1128,7 +1128,7 @@ mod tests {
         let side_effects = CanonicalMethod::ValueEvaluate
             .validate_parameters(&json!({"expression": "$rax", "side_effects": "forbid"}))
             .unwrap_err();
-        assert!(side_effects.message.contains("one of deny"));
+        assert!(side_effects.message.contains("one of deny, allow"));
     }
 
     #[test]

@@ -2096,7 +2096,8 @@
               },
               "side_effects": {
                 "enum": [
-                  "deny"
+                  "deny",
+                  "allow"
                 ],
                 "type": "string"
               },

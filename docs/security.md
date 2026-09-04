@@ -1,11 +1,13 @@
 # Security Model
 
 GDB starts with initialization, target auto-load, debuginfod, shell launch,
-and inferior function calls disabled. Inferiors start with a clean environment
-unless `environment_mode=inherited` selects variables named by the operator's
-`security.environment_allowlist`; request values may then override that
-bounded set. GDB/AI rejects environment values containing whitespace or a
-double quote because GDB cannot preserve them through its MI setting command.
+and inferior function calls disabled. `gdb_evaluate side_effects=allow`
+temporarily enables calls for mutation profiles. Inferiors start with a clean
+environment unless `environment_mode=inherited` selects variables named by
+the operator's `security.environment_allowlist`; request values may then
+override that bounded set. GDB/AI rejects environment values containing
+whitespace or a double quote because GDB cannot preserve them through its MI
+setting command.
 Target paths are canonicalized beneath configured workspace roots; relative
 paths resolve from those roots rather than the server process directory.
 Remote connections that name an executable also set GDB's working directory

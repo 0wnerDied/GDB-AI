@@ -999,6 +999,12 @@ fn inline_probe_input_is_a_target_mutation() {
     assert_eq!(effect_for_request(&request), Effect::Control);
     request.parameters = json!({"input": {"text": "x"}});
     assert_eq!(effect_for_request(&request), Effect::TargetMutation);
+
+    request.method = crate::protocol::CanonicalMethod::ValueEvaluate;
+    request.parameters = json!({"expression": "$pc"});
+    assert_eq!(effect_for_request(&request), Effect::Read);
+    request.parameters["side_effects"] = json!("allow");
+    assert_eq!(effect_for_request(&request), Effect::TargetMutation);
 }
 
 #[test]

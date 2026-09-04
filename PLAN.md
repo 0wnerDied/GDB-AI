@@ -426,6 +426,11 @@ returned both 20-byte trigger streams without another client session, a child
 exit left the parent running, and replacement startup reported abandoned
 sessions as `FAILED/DEAD` with their old leases removed.
 
+The native assisted proof also depended on a one-line inferior function call,
+which projected evaluation rejected unconditionally. Explicit
+`side_effects=allow` now performs the same call or assignment through the
+ordinary evaluation tool while retaining read-only evaluation by default.
+
 ### Blind kernel exploit-speed qualification
 
 A concurrent source-free ring-1 run exposed a different adoption gap. Native
@@ -495,6 +500,8 @@ Complete only the shared fixes demonstrated by these runs:
   `@` stream in the Agent-facing tool description.
 - [x] Mark persisted nonterminal sessions and leases abandoned when a new
   daemon owns their store, rather than advertising dead actors as controllable.
+- [x] Let explicit projected evaluation call inferior functions or assign
+  values in one request instead of requiring raw GDB for exploit-side probes.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

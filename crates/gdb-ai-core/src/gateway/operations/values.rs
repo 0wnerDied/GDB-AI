@@ -3,12 +3,12 @@ use ulid::Ulid;
 
 use super::{
     context::{context_options, require_stopped_context},
-    evaluation::{safe_evaluate_command, validate_expression},
+    evaluation::{safe_evaluate_command, validate_expression, validate_expression_text},
     mi::result_text,
     request::{bounded_limit, required_session, string},
 };
 use crate::{
-    Error, ErrorCode, Result,
+    Result,
     backend::MiCommand,
     domain::{DomainEvent, ValueBinding, ValueId},
     gateway::{Gateway, SessionEntry},
@@ -35,30 +35,43 @@ impl Gateway {
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
         let expression = string(&request.parameters, "expression")?;
-        validate_expression(&expression)?;
-        if request
+        let side_effects = request
             .parameters
             .get("side_effects")
             .and_then(Value::as_str)
-            .unwrap_or("deny")
-            != "deny"
-        {
-            return Err(Error::new(
-                ErrorCode::PolicyDenied,
-                "the vertical slice only supports side_effects=deny",
-            ));
-        }
+            .unwrap_or("deny");
         let evaluate = context_options(
-            MiCommand::new("-data-evaluate-expression")?.string(expression),
+            MiCommand::new("-data-evaluate-expression")?.string(&expression),
             &request.parameters,
             &state,
         )?;
-        let reply = safe_evaluate_command(&entry.handle, evaluate).await?;
+        let reply = if side_effects == "allow" {
+            validate_expression_text(&expression)?;
+            entry
+                .handle
+                .transaction(
+                    vec![
+                        MiCommand::new("-gdb-set")?
+                            .bare("may-call-functions")?
+                            .bare("on")?,
+                    ],
+                    evaluate,
+                    vec![
+                        MiCommand::new("-gdb-set")?
+                            .bare("may-call-functions")?
+                            .bare("off")?,
+                    ],
+                )
+                .await?
+        } else {
+            validate_expression(&expression)?;
+            safe_evaluate_command(&entry.handle, evaluate).await?
+        };
         Ok(json!({
             "stop_id": state.stop_id,
             "value": result_text(&reply.record, "value"),
             "command": reply,
-            "side_effects": "denied"
+            "side_effects": if side_effects == "allow" { "allowed" } else { "denied" }
         }))
     }
 

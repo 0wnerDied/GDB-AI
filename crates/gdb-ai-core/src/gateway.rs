@@ -81,7 +81,19 @@ fn effect_for_request(request: &ApiRequest) -> Effect {
     // 2026-09-01: Inline input retained the method's read/control effect, so
     // lease preparation and policy missed its target mutation. Derive all
     // admission, coordination, and audit from the same request-level effect.
-    if matches!(
+    if request.method == CanonicalMethod::ValueEvaluate
+        && request
+            .parameters
+            .get("side_effects")
+            .and_then(Value::as_str)
+            == Some("allow")
+    {
+        // 2026-09-05: Raw GDB reached an exploit primitive with one inferior
+        // function call while projected evaluation rejected every call. Keep
+        // ordinary evaluation read-only, but classify an explicit opt-in as
+        // target mutation so the default exploit profile can execute it.
+        Effect::TargetMutation
+    } else if matches!(
         request.method,
         CanonicalMethod::ExecutionControl
             | CanonicalMethod::ExecutionWait

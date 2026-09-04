@@ -406,6 +406,27 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
             .as_str()
             .is_some()
     );
+    let mutated = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({
+            "name": "gdb_evaluate",
+            "arguments": {
+                "session_id": session_id,
+                "expression": "$pc = $pc",
+                "side_effects": "allow"
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mutated["isError"], false);
+    assert_eq!(
+        mutated["structuredContent"]["result"]["side_effects"],
+        "allowed"
+    );
     let turned = call_tool(
         &gateway,
         &caller,
