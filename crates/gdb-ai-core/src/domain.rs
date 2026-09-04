@@ -167,6 +167,8 @@ pub struct WaitBaseline {
     pub execution_epoch: u64,
     pub stop_id: Option<StopId>,
     pub terminal_inferiors: BTreeSet<String>,
+    #[serde(default)]
+    pub terminal_inferior_generations: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -609,6 +611,19 @@ impl From<&SessionState> for WaitBaseline {
                     )
                 })
                 .map(|(backend_id, _)| backend_id.clone())
+                .collect(),
+            terminal_inferior_generations: state
+                .inferiors
+                .iter()
+                .filter(|(_, inferior)| {
+                    matches!(
+                        inferior.status,
+                        InferiorStatus::Exited
+                            | InferiorStatus::Detached
+                            | InferiorStatus::Disconnected
+                    )
+                })
+                .map(|(backend_id, inferior)| (backend_id.clone(), inferior.generation))
                 .collect(),
         }
     }

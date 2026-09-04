@@ -1094,13 +1094,22 @@ fn terminal_after<'a>(
 ) -> Option<&'a crate::domain::InferiorState> {
     // 2026-08-28: An inferior that was already terminal at the baseline
     // must not satisfy a new run-and-wait operation for another inferior.
+    // 2026-09-05: Backend IDs are reused across launches, so ID-only baselines
+    // made a replacement process time out after it had exited. Match generations.
     state
         .inferiors
         .iter()
         .find(|(backend_id, inferior)| {
             terminal(inferior.status)
-                && baseline
-                    .is_none_or(|baseline| !baseline.terminal_inferiors.contains(*backend_id))
+                && baseline.is_none_or(|baseline| {
+                    baseline
+                        .terminal_inferior_generations
+                        .get(*backend_id)
+                        .map_or_else(
+                            || !baseline.terminal_inferiors.contains(*backend_id),
+                            |generation| *generation != inferior.generation,
+                        )
+                })
         })
         .map(|(_, inferior)| inferior)
 }

@@ -68,7 +68,7 @@ fn conditional_capability_is_not_unconditionally_supported() {
 }
 
 #[test]
-fn exit_wait_ignores_an_already_terminal_inferior() {
+fn exit_wait_tracks_terminal_inferior_generations() {
     let mut reducer = StateReducer::new(SessionState::creating(SessionId("sess_wait".into())));
     for (seq, event) in [
         (1, DomainEvent::BackendStarted),
@@ -150,6 +150,34 @@ fn exit_wait_ignores_an_already_terminal_inferior() {
         Some(&baseline)
     ));
     assert_eq!(settled_by(reducer.state(), Some(&baseline)), Some("exited"));
+    let reuse_baseline = WaitBaseline::from(reducer.state());
+    for (seq, event) in [
+        (
+            6,
+            DomainEvent::InferiorAdded {
+                backend_id: "i1".into(),
+                pid: Some(3),
+            },
+        ),
+        (
+            7,
+            DomainEvent::InferiorExited {
+                backend_id: "i1".into(),
+                exit_code: Some("0".into()),
+                from_stop_record: true,
+            },
+        ),
+    ] {
+        reducer
+            .apply(&JournaledEvent::for_replay(seq, event))
+            .unwrap();
+    }
+
+    assert!(wait_satisfied(
+        reducer.state(),
+        WaitUntil::Exited,
+        Some(&reuse_baseline)
+    ));
 }
 
 #[tokio::test]
