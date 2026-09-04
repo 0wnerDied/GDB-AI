@@ -132,6 +132,12 @@ async fn main() {
 async fn run() -> Result<(), AnyError> {
     let cli = Cli::parse();
     let config = Config::load(cli.config)?;
+    #[cfg(unix)]
+    // 2026-09-04: Detached servers received SIGHUP during GDB teardown and
+    // exited before returning session.close. A server must outlive its GDBs.
+    let _hangups = matches!(&cli.command, Command::Serve { .. })
+        .then(server_hangups)
+        .transpose()?;
     match cli.command {
         Command::Serve {
             stdio: true,
@@ -527,4 +533,31 @@ fn program_available(program: &str) -> bool {
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(unix)]
+fn server_hangups() -> io::Result<tokio::signal::unix::Signal> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn server_hangup_handler_suppresses_default_exit() {
+        let mut hangups = server_hangups().unwrap();
+        let status = std::process::Command::new("kill")
+            .args(["-HUP", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+
+        assert!(status.success());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), hangups.recv())
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
 }
