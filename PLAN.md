@@ -379,8 +379,9 @@ The projected trace spent 18 calls diagnosing an executable whose supplied
 runtime was not prepared before launch, and nine calls repeated state already
 returned by the preceding operation. Runtime binding now remains an explicit
 pre-debugging responsibility instead of changing the target inside GDB/AI.
-Existing `restart` removes seven calls from three-process replay; the remaining
-measured split is probe capture followed by a separate run-to-crash inspection.
+Existing `restart` removes seven calls from three-process replay.
+`continue_to_stop` removes the remaining probe-capture/run-to-crash split while
+preserving the first capture and returning bounded crash inspection.
 
 ### Blind kernel exploit-speed qualification
 
@@ -437,6 +438,8 @@ Complete only the shared fixes demonstrated by these runs:
   blocking probe while `input` remains target PTY data.
 - [x] Let one `gdb_probe` start a host command after its breakpoint is armed
   and the inferior runs, returning trigger status on a hit or timeout.
+- [x] Let `gdb_probe` remove its temporary breakpoint, continue to the next
+  stop or exit, and return optional bounded inspection in the same call.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

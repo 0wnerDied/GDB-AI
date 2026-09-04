@@ -28,7 +28,7 @@ use crate::{
     gateway::{Gateway, SessionEntry},
     normalize::breakpoint_number as inserted_breakpoint_number,
     persistence::Store,
-    protocol::ApiRequest,
+    protocol::{ApiRequest, CanonicalMethod},
     session::{PendingModuleBreakpoint, SessionHandle, WaitUntil},
 };
 
@@ -440,10 +440,19 @@ impl Gateway {
             .get("stop_policy")
             .and_then(Value::as_str)
             .unwrap_or("on_condition");
-        if !matches!(stop_policy, "on_condition" | "continue_after_capture") {
+        if !matches!(
+            stop_policy,
+            "on_condition" | "continue_after_capture" | "continue_to_stop"
+        ) {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
-                "stop_policy must be on_condition or continue_after_capture",
+                "stop_policy must be on_condition, continue_after_capture, or continue_to_stop",
+            ));
+        }
+        if request.parameters.get("inspect").is_some() && stop_policy != "continue_to_stop" {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "inspect requires stop_policy=continue_to_stop",
             ));
         }
         let mut insert = MiCommand::new("-break-insert")?.bare("-f")?;
@@ -655,42 +664,97 @@ impl Gateway {
                 Ok(result) => result,
                 Err(_) => Err(Error::new(ErrorCode::Timeout, "probe timed out")),
             };
-        let trigger_result = if let Some(trigger) = trigger_process {
-            Some((*trigger).finish().await)
-        } else {
-            None
-        };
-        let cleanup = breakpoint.remove().await;
-        match run_result {
-            Ok(mut result) => {
-                if let Some(trigger) = trigger_result {
-                    result["trigger"] = trigger;
-                }
-                let cleanup_error = cleanup.err();
+        let cleanup_error = breakpoint.remove().await.err();
+        let mut outcome = match run_result {
+            Ok(mut result)
+                if cleanup_error.is_none() && stop_policy == "continue_after_capture" =>
+            {
                 // 2026-08-28: continue_after_capture stopped after the final
                 // hit. Resume only after the temporary breakpoint is removed.
-                if stop_policy == "continue_after_capture" && cleanup_error.is_none() {
-                    match entry
-                        .handle
-                        .command(MiCommand::new("-exec-continue")?)
-                        .await
-                    {
-                        Ok(resume) => {
-                            result["continued"] = Value::Bool(true);
-                            result["resume_evidence_seq"] = Value::from(resume.evidence_seq);
+                entry
+                    .handle
+                    .command(MiCommand::new("-exec-continue")?)
+                    .await
+                    .map(|resume| {
+                        result["continued"] = Value::Bool(true);
+                        result["resume_evidence_seq"] = Value::from(resume.evidence_seq);
+                        result
+                    })
+            }
+            Ok(mut result) if cleanup_error.is_none() && stop_policy == "continue_to_stop" => {
+                // 2026-09-05: Probe capture and run-to-crash were separate
+                // Agent turns even though the temporary breakpoint must be
+                // removed before both paths resume. Reuse synchronous run
+                // control here and return only its non-duplicated facts.
+                // 2026-09-05: Keeping this continuation future inline enlarged
+                // every dispatch branch enough to overflow ordinary test-thread
+                // stacks. Heap only this optional compound operation.
+                let continued: Result<Value> = Box::pin(async {
+                    let remaining = Duration::from_millis(budget.wall_time_ms)
+                        .checked_sub(started.elapsed())
+                        .ok_or_else(|| Error::new(ErrorCode::Timeout, "probe timed out"))?;
+                    let mut parameters = json!({
+                        "action": "continue",
+                        "wait": {
+                            "until": "settled",
+                            "timeout_ms": remaining.as_millis().max(1) as u64
                         }
-                        Err(error) => {
-                            operation.status = OperationStatus::Failed;
-                            operation.error = Some(error.to_string());
-                            operation.completed_event_seq =
-                                Some(entry.handle.with_state(|state| state.event_seq));
-                            self.store.upsert_operation(&operation)?;
-                            return Err(error);
+                    });
+                    if let Some(inspect) = request.parameters.get("inspect") {
+                        parameters["inspect"] = inspect.clone();
+                    }
+                    self.execution_control(&ApiRequest {
+                        api_version: request.api_version.clone(),
+                        request_id: format!("{}:continue", request.request_id),
+                        session_id: request.session_id.clone(),
+                        method: CanonicalMethod::ExecutionControl,
+                        expected_revision: None,
+                        idempotency_key: None,
+                        parameters,
+                    })
+                    .await
+                })
+                .await;
+                continued.map(|continued| {
+                    result["continued"] = Value::Bool(true);
+                    let mut after = json!({});
+                    for key in [
+                        "operation_id",
+                        "wait_status",
+                        "settled_by",
+                        "stop_id",
+                        "observations",
+                        "observation_error",
+                        "can_interrupt",
+                    ] {
+                        if let Some(value) = continued.get(key) {
+                            after[key] = value.clone();
                         }
                     }
-                } else {
-                    result["continued"] = Value::Bool(false);
+                    if let Some(evidence_seq) = continued.pointer("/command/evidence_seq") {
+                        after["resume_evidence_seq"] = evidence_seq.clone();
+                    }
+                    result["after"] = after;
+                    result
+                })
+            }
+            Ok(mut result) => {
+                result["continued"] = Value::Bool(false);
+                Ok(result)
+            }
+            Err(error) => Err(error),
+        };
+        if let Some(trigger) = trigger_process {
+            let trigger = (*trigger).finish().await;
+            match &mut outcome {
+                Ok(result) => result["trigger"] = trigger,
+                Err(error) => {
+                    error.details.get_or_insert_with(|| json!({}))["trigger"] = trigger;
                 }
+            }
+        }
+        match outcome {
+            Ok(mut result) => {
                 operation.status = OperationStatus::Completed;
                 operation.error = cleanup_error.as_ref().map(ToString::to_string);
                 operation.completed_event_seq =
@@ -708,17 +772,13 @@ impl Gateway {
                 }
                 Ok(result)
             }
-            Err(mut error) => {
-                if let Some(trigger) = trigger_result {
-                    error.details.get_or_insert_with(|| json!({}))["trigger"] = trigger;
-                }
-                let cleanup_error = cleanup.err();
+            Err(error) => {
                 operation.status = if error.code == ErrorCode::Timeout {
                     OperationStatus::TimedOut
                 } else {
                     OperationStatus::Failed
                 };
-                operation.error = Some(match cleanup_error {
+                operation.error = Some(match cleanup_error.as_ref() {
                     Some(cleanup_error) => {
                         format!("{error}; cleanup failed: {cleanup_error}")
                     }

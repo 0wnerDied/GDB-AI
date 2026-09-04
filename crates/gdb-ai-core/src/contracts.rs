@@ -881,8 +881,9 @@ impl CanonicalMethod {
                 optional("max_hits", Unsigned),
                 optional(
                     "stop_policy",
-                    Enum(&["on_condition", "continue_after_capture"]),
+                    Enum(&["on_condition", "continue_after_capture", "continue_to_stop"]),
                 ),
+                optional("inspect", TURN_INSPECTION_KIND),
                 optional("budget", BUDGET_KIND),
             ])
             .exactly_one(&[

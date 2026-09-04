@@ -165,7 +165,7 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_run",
         // 2026-09-01: Blind Agents rebuilt probe workflows or selected an
         // exit-only wait even though one default turn already handles both.
-        description: "Run with exact input/output; omit wait for stop-or-exit. Probe skips hits and captures expressions, stack, or memory.",
+        description: "Run with exact input/output; omit wait for stop-or-exit. Probe skips hits and captures expressions, stack, or memory; continue_to_stop adds same-call crash inspection.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,
@@ -177,7 +177,7 @@ const TOOLS: &[ToolProjection] = &[
         // 2026-09-04: Repeated blind Agents overlooked the probe action nested
         // under gdb_run and rebuilt it from several debugger turns. Surface
         // the existing one-call workflow under the operation they search for.
-        description: "Arm a temporary breakpoint on a stopped or running target; input is PTY data, while trigger.command starts one host process after arming; kernel_module_offset resolves a loaded kernel module; skip hits, capture expressions, stack, memory, and output, then clean up.",
+        description: "Arm a temporary breakpoint on a stopped or running target; input is PTY data and trigger.command starts one host process after arming. Skip hits and capture expressions, stack, memory, and output; continue_to_stop removes the probe, reaches the next stop/exit, and runs optional inspect views in the same call. kernel_module_offset resolves a loaded kernel module.",
         discriminator: None,
         actions: PROBE_ACTIONS,
         read_only: false,

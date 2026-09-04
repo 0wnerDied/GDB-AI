@@ -314,7 +314,7 @@ async fn probe_starts_an_external_trigger_after_arming() {
     let sentinel = directory.path().join("triggered");
     std::fs::write(
         &source,
-        "#include <unistd.h>\n__attribute__((noinline)) void marker(void) {}\nint main(int argc, char **argv) { if (argc != 2) return 2; while (access(argv[1], F_OK) != 0) usleep(1000); marker(); return 0; }\n",
+        "#include <signal.h>\n#include <unistd.h>\n__attribute__((noinline)) void marker(void) {}\nint main(int argc, char **argv) { if (argc != 2) return 2; while (access(argv[1], F_OK) != 0) usleep(1000); marker(); raise(SIGSEGV); return 0; }\n",
     )
     .unwrap();
     assert!(
@@ -384,14 +384,30 @@ async fn probe_starts_an_external_trigger_after_arming() {
                     "command": ["touch", "triggered"],
                     "cwd": directory.path()
                 },
+                "stop_policy": "continue_to_stop",
+                "inspect": [{"view": "crash", "profile": "minimal"}],
                 "budget": {"max_calls": 4, "wall_time_ms": 5000}
             }),
         ),
     )
     .await;
     assert_eq!(probed.result.as_ref().unwrap()["capture_count"], 1);
+    assert_eq!(probed.result.as_ref().unwrap()["continued"], true);
+    assert_eq!(
+        probed.result.as_ref().unwrap()["after"]["wait_status"],
+        "COMPLETED"
+    );
+    assert_eq!(
+        probed.result.as_ref().unwrap()["after"]["settled_by"],
+        "stopped"
+    );
+    assert!(probed.result.as_ref().unwrap()["after"]["observations"]["crash"].is_object());
     assert!(probed.result.as_ref().unwrap()["trigger"]["pid"].is_u64());
     assert!(sentinel.exists());
+    assert_eq!(
+        probed.state.as_ref().unwrap().stop_reason.as_deref(),
+        Some("signal-received")
+    );
     assert!(probed.state.as_ref().unwrap().breakpoints.is_empty());
 
     std::fs::remove_file(&sentinel).unwrap();

@@ -3672,6 +3672,58 @@
                 "required": [],
                 "type": "object"
               },
+              "inspect": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "limit": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "profile": {
+                      "enum": [
+                        "minimal",
+                        "brief",
+                        "standard",
+                        "deep"
+                      ],
+                      "type": "string"
+                    },
+                    "roles": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "view": {
+                      "enum": [
+                        "stop_context",
+                        "target",
+                        "capabilities",
+                        "providers",
+                        "crash",
+                        "threads",
+                        "stack",
+                        "frame",
+                        "locals",
+                        "arguments",
+                        "registers",
+                        "modules",
+                        "breakpoints",
+                        "source",
+                        "mappings",
+                        "signals"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "view"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "kernel_module_offset": {
                 "additionalProperties": false,
                 "properties": {
@@ -3811,7 +3863,8 @@
               "stop_policy": {
                 "enum": [
                   "on_condition",
-                  "continue_after_capture"
+                  "continue_after_capture",
+                  "continue_to_stop"
                 ],
                 "type": "string"
               },
@@ -4057,6 +4110,58 @@
                 "required": [],
                 "type": "object"
               },
+              "inspect": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "limit": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "profile": {
+                      "enum": [
+                        "minimal",
+                        "brief",
+                        "standard",
+                        "deep"
+                      ],
+                      "type": "string"
+                    },
+                    "roles": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "view": {
+                      "enum": [
+                        "stop_context",
+                        "target",
+                        "capabilities",
+                        "providers",
+                        "crash",
+                        "threads",
+                        "stack",
+                        "frame",
+                        "locals",
+                        "arguments",
+                        "registers",
+                        "modules",
+                        "breakpoints",
+                        "source",
+                        "mappings",
+                        "signals"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "view"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
               "kernel_module_offset": {
                 "additionalProperties": false,
                 "properties": {
@@ -4196,7 +4301,8 @@
               "stop_policy": {
                 "enum": [
                   "on_condition",
-                  "continue_after_capture"
+                  "continue_after_capture",
+                  "continue_to_stop"
                 ],
                 "type": "string"
               },
