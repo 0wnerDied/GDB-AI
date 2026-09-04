@@ -157,7 +157,7 @@ Single-client stdio:
 target/release/gdb-ai serve --stdio
 ```
 
-The default MCP catalog is the bounded ten-tool Agent surface below. Use
+The default MCP catalog is the bounded eleven-tool Agent surface below. Use
 `--advanced-tools` only when an Agent needs extended targets, mutations,
 variable objects, tracking, probes, or kernel operations. The full
 canonical `gdb.ai/call` API remains available independently of MCP discovery.
