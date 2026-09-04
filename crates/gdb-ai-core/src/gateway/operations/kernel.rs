@@ -1,11 +1,13 @@
 use std::collections::BTreeSet;
 
+use gdb_ai_mi::MiRecord;
 use serde_json::{Value, json};
 
 use super::{
     context::{context_options, require_stopped_context},
-    encoding::{first_word, gdb_c_string, parse_gdb_u64},
+    encoding::{first_word, gdb_c_string, parse_address, parse_gdb_u64},
     evaluation::safe_evaluate_command,
+    memory::{find_memory_result, read_memory_bytes},
     mi::{find_register_name, result_string_list, result_text},
     request::{bounded_limit, bounded_offset, required_session, string},
 };
@@ -17,6 +19,89 @@ use crate::{
     protocol::{ApiRequest, CanonicalMethod},
     providers::LINUX_KERNEL_PROVIDER_VERSION,
 };
+
+const X86_KERNEL_START: u64 = 0xffff_ffff_8000_0000;
+const X86_MODULE_START: u64 = 0xffff_ffff_c000_0000;
+const X86_MODULE_END: u64 = 0xffff_ffff_ff00_0000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KernelMapping {
+    start: u64,
+    end: u64,
+    permissions: String,
+}
+
+impl KernelMapping {
+    fn size(&self) -> u64 {
+        self.end - self.start
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "start": format!("0x{:016x}", self.start),
+            "end": format!("0x{:016x}", self.end),
+            "size": self.size(),
+            "permissions": self.permissions,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct KernelBootstrap {
+    pc: u64,
+    image: KernelMapping,
+    version_address: Option<u64>,
+    version: Option<String>,
+    module_candidates: Vec<KernelMapping>,
+    module_candidates_truncated: bool,
+    evidence_seq: u64,
+}
+
+fn parse_qemu_memory_map(output: &[u8]) -> Vec<KernelMapping> {
+    let output = String::from_utf8_lossy(output);
+    let mut mappings = output
+        .split(['\n', '|'])
+        .filter_map(|line| {
+            let mut fields = line.split_ascii_whitespace();
+            let (start, end) = fields.next()?.split_once('-')?;
+            let _size = fields.next()?;
+            let permissions = fields.next()?;
+            let start = u64::from_str_radix(start, 16).ok()?;
+            let end = u64::from_str_radix(end, 16).ok()?;
+            (start < end && start & (1 << 63) != 0).then(|| KernelMapping {
+                start,
+                end,
+                permissions: permissions.to_owned(),
+            })
+        })
+        .collect::<Vec<_>>();
+    mappings.sort_by_key(|mapping| (mapping.start, mapping.end));
+    mappings.dedup();
+    mappings
+}
+
+fn select_kernel_image(mappings: &[KernelMapping]) -> Option<KernelMapping> {
+    mappings
+        .iter()
+        .filter(|mapping| {
+            mapping.start >= X86_KERNEL_START
+                && mapping.end <= X86_MODULE_START
+                && mapping.size() >= 1024 * 1024
+                && !mapping.permissions.contains('w')
+        })
+        .min_by_key(|mapping| mapping.start)
+        .cloned()
+}
+
+fn command_output(reply: &crate::session::CommandReply) -> Vec<u8> {
+    let mut output = Vec::new();
+    for record in &reply.stream_records {
+        if let MiRecord::ConsoleStream(bytes) | MiRecord::TargetStream(bytes) = record {
+            output.extend(bytes);
+        }
+    }
+    output
+}
 
 async fn kernel_current_text(
     entry: &SessionEntry,
@@ -89,6 +174,178 @@ async fn kernel_address(
 }
 
 impl Gateway {
+    async fn kernel_bootstrap(
+        &self,
+        entry: &SessionEntry,
+        parameters: &Value,
+        state: &crate::domain::SessionState,
+    ) -> Result<KernelBootstrap> {
+        entry
+            .handle
+            .stable_observation(
+                state,
+                Box::pin(async {
+                    let names_reply = entry
+                        .handle
+                        .command(MiCommand::new("-data-list-register-names")?)
+                        .await?;
+                    let names = result_string_list(&names_reply.record, "register-names");
+                    if find_register_name(&names, "gs_base").is_none() {
+                        return Err(Error::new(
+                            ErrorCode::CapabilityMissing,
+                            "symbol-free bootstrap currently requires an x86-64 QEMU target",
+                        ));
+                    }
+                    let (cs, cs_seq) = kernel_address(entry, parameters, state, "$cs").await?;
+                    if cs & 3 == 3 {
+                        return Err(Error::new(
+                            ErrorCode::CapabilityMissing,
+                            "symbol-free bootstrap requires a stop in kernel context",
+                        ));
+                    }
+                    let (pc, pc_seq) = kernel_address(entry, parameters, state, "$pc").await?;
+                    // 2026-09-04: Forwarding `monitor info mem` produced tens
+                    // of MiB of MI and journal data before the useful kernel
+                    // mappings. Capture it inside GDB and emit only global
+                    // kernel addresses so one semantic call stays bounded.
+                    let monitor = entry
+                        .handle
+                        .command(
+                            MiCommand::new("-interpreter-exec")?
+                                .bare("console")?
+                                .string(
+                                    "python import gdb; print('|'.join(line for line in gdb.execute('monitor info mem', to_string=True).splitlines() if line.startswith('ffffffff')))"
+                                ),
+                        )
+                        .await?;
+                    let output = command_output(&monitor);
+                    let mappings = parse_qemu_memory_map(&output);
+                    // 2026-09-04: A stop inside a loadable module made the PC
+                    // mapping look like the kernel image. Select the first
+                    // large read-only core mapping independently of stop site.
+                    let image = select_kernel_image(&mappings).ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::CapabilityMissing,
+                            "QEMU did not report a symbol-free kernel image mapping",
+                        )
+                    })?;
+
+                    let needle = b"Linux version ";
+                    let pattern = needle
+                        .iter()
+                        .map(|byte| format!("0x{byte:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let image_length = usize::try_from(image.end - image.start).map_err(|_| {
+                        Error::new(ErrorCode::OutputLimit, "kernel image mapping is too large")
+                    })?;
+                    let find = entry
+                        .handle
+                        .command(
+                            MiCommand::new("-interpreter-exec")?
+                                .bare("console")?
+                                .string(format!(
+                                    "find /b /9 0x{:x}, +{}, {pattern}",
+                                    image.start, image_length
+                                )),
+                        )
+                        .await?;
+                    let (matches, _, _, _) =
+                        find_memory_result(&find, image.start, image_length, 8);
+                    let mut version_address = None;
+                    let mut version = None;
+                    let mut version_seq = find.evidence_seq;
+                    // 2026-09-04: The image can retain a shorter banner
+                    // template before the populated linux_banner. Prefer the
+                    // longest bounded match so version reports runtime text.
+                    for address in matches
+                        .iter()
+                        .filter_map(|address| parse_address(address).ok())
+                    {
+                        let length = usize::try_from((image.end - address).min(512)).unwrap_or(512);
+                        let (bytes, evidence_seq) =
+                            read_memory_bytes(&entry.handle, state, address, length, true).await?;
+                        let end = bytes
+                            .iter()
+                            .position(|byte| *byte == 0)
+                            .unwrap_or(bytes.len());
+                        let candidate = String::from_utf8_lossy(&bytes[..end])
+                            .trim_end_matches(['\r', '\n'])
+                            .to_owned();
+                        if candidate.starts_with("Linux version ")
+                            && version
+                                .as_ref()
+                                .is_none_or(|current: &String| candidate.len() > current.len())
+                        {
+                            version_address = Some(address);
+                            version = Some(candidate);
+                        }
+                        version_seq = version_seq.max(evidence_seq);
+                    }
+
+                    let mut module_candidates = mappings
+                        .into_iter()
+                        .filter(|mapping| {
+                            mapping.start >= X86_MODULE_START
+                                && mapping.end <= X86_MODULE_END
+                                && (mapping.end <= image.start || mapping.start >= image.end)
+                        })
+                        .collect::<Vec<_>>();
+                    let module_candidates_truncated = module_candidates.len() > 128;
+                    module_candidates.truncate(128);
+                    Ok(KernelBootstrap {
+                        pc,
+                        image,
+                        version_address,
+                        version,
+                        module_candidates,
+                        module_candidates_truncated,
+                        evidence_seq: names_reply
+                            .evidence_seq
+                            .max(cs_seq)
+                            .max(pc_seq)
+                            .max(monitor.evidence_seq)
+                            .max(find.evidence_seq)
+                            .max(version_seq),
+                    })
+                }),
+            )
+            .await
+    }
+
+    fn kernel_bootstrap_result(
+        &self,
+        bootstrap: KernelBootstrap,
+        state: &crate::domain::SessionState,
+    ) -> Value {
+        let warnings = bootstrap
+            .version
+            .is_none()
+            .then_some("Linux version string was not found in the kernel image mapping")
+            .into_iter()
+            .collect::<Vec<_>>();
+        json!({
+            "view": "bootstrap",
+            "architecture": "x86-64",
+            "mode": "kernel",
+            "pc": format!("0x{:016x}", bootstrap.pc),
+            "image": bootstrap.image.json(),
+            "version": bootstrap.version,
+            "version_address": bootstrap.version_address.map(|address| format!("0x{address:016x}")),
+            "module_candidates": bootstrap.module_candidates.iter().map(KernelMapping::json).collect::<Vec<_>>(),
+            "module_candidates_truncated": bootstrap.module_candidates_truncated,
+            "partial": !warnings.is_empty(),
+            "warnings": warnings,
+            "stop_id": state.stop_id,
+            "source": {
+                "provider": "linux-kernel",
+                "version": LINUX_KERNEL_PROVIDER_VERSION,
+                "mechanism": "qemu-info-mem+gdb-find"
+            },
+            "evidence_seq": bootstrap.evidence_seq
+        })
+    }
+
     pub(super) async fn kernel_inspect(&self, request: &ApiRequest) -> Result<Value> {
         if !self.config.security.kernel_enabled {
             return Err(Error::new(
@@ -101,6 +358,12 @@ impl Gateway {
         require_stopped_context(&request.parameters, &state)?;
         let view = string(&request.parameters, "view")?;
         match view.as_str() {
+            "bootstrap" => {
+                let bootstrap = self
+                    .kernel_bootstrap(&entry, &request.parameters, &state)
+                    .await?;
+                Ok(self.kernel_bootstrap_result(bootstrap, &state))
+            }
             "current_task" | "init_task" => {
                 // 2026-08-28: Linux current is a C macro, while current_task
                 // is an unrelocated per-CPU offset. Resolve the live pointer
@@ -123,9 +386,34 @@ impl Gateway {
                 }))
             }
             "version" => {
-                let (value, evidence_seq) =
-                    kernel_text(&entry, &request.parameters, &state, "(char *)linux_banner")
+                let symbol =
+                    kernel_text(&entry, &request.parameters, &state, "(char *)linux_banner").await;
+                if let Err(error) = &symbol
+                    && error.code == ErrorCode::GdbError
+                {
+                    let bootstrap = self
+                        .kernel_bootstrap(&entry, &request.parameters, &state)
                         .await?;
+                    let version = bootstrap.version.ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::CapabilityMissing,
+                            "Linux version string was not found in the kernel image mapping",
+                        )
+                    })?;
+                    return Ok(json!({
+                        "view": view,
+                        "version": version,
+                        "address": bootstrap.version_address.map(|address| format!("0x{address:016x}")),
+                        "stop_id": state.stop_id,
+                        "source": {
+                            "provider": "linux-kernel",
+                            "version": LINUX_KERNEL_PROVIDER_VERSION,
+                            "mechanism": "qemu-info-mem+gdb-find"
+                        },
+                        "evidence_seq": bootstrap.evidence_seq
+                    }));
+                }
+                let (value, evidence_seq) = symbol?;
                 Ok(json!({
                     "view": view,
                     "version": gdb_c_string(&value),
@@ -140,8 +428,29 @@ impl Gateway {
                 }))
             }
             "base" => {
-                let (address, evidence_seq) =
-                    kernel_address(&entry, &request.parameters, &state, "&_text").await?;
+                let symbol = kernel_address(&entry, &request.parameters, &state, "&_text").await;
+                if let Err(error) = &symbol
+                    && error.code == ErrorCode::GdbError
+                {
+                    let bootstrap = self
+                        .kernel_bootstrap(&entry, &request.parameters, &state)
+                        .await?;
+                    return Ok(json!({
+                        "view": view,
+                        "address": format!("0x{:016x}", bootstrap.image.start),
+                        "end": format!("0x{:016x}", bootstrap.image.end),
+                        "size": bootstrap.image.end - bootstrap.image.start,
+                        "symbol": null,
+                        "stop_id": state.stop_id,
+                        "source": {
+                            "provider": "linux-kernel",
+                            "version": LINUX_KERNEL_PROVIDER_VERSION,
+                            "mechanism": "qemu-info-mem"
+                        },
+                        "evidence_seq": bootstrap.evidence_seq
+                    }));
+                }
+                let (address, evidence_seq) = symbol?;
                 Ok(json!({
                     "view": view,
                     "address": format!("0x{address:016x}"),
@@ -188,6 +497,16 @@ impl Gateway {
                     "symbols": {
                         "status": if symbols.is_some() { "supported" } else { "unsupported" },
                         "mode": "trusted-vmlinux"
+                    },
+                    "bootstrap": {
+                        "status": if architecture == "x86-64"
+                            && matches!(state.target_origin, TargetOrigin::Remote)
+                        {
+                            "conditional"
+                        } else {
+                            "unsupported"
+                        },
+                        "mechanism": "QEMU monitor info mem"
                     },
                     "current_task": {
                         "status": if current_task == "unavailable" {
@@ -553,5 +872,36 @@ impl Gateway {
             "state_after": entry.handle.state(),
             "reconciliation": reconciliation
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KernelMapping, parse_qemu_memory_map, select_kernel_image};
+
+    #[test]
+    fn parses_only_high_qemu_memory_mappings() {
+        let mappings = parse_qemu_memory_map(
+            b"noise\n0000000000400000-0000000000410000 0000000000010000 ur-\n\
+              ffffffff81200000-ffffffff82f00000 0000000001d00000 -r-|\
+              ffffffffc0010000-ffffffffc0011000 0000000000001000 -rw\n",
+        );
+
+        assert_eq!(
+            mappings,
+            vec![
+                KernelMapping {
+                    start: 0xffff_ffff_8120_0000,
+                    end: 0xffff_ffff_82f0_0000,
+                    permissions: "-r-".into(),
+                },
+                KernelMapping {
+                    start: 0xffff_ffff_c001_0000,
+                    end: 0xffff_ffff_c001_1000,
+                    permissions: "-rw".into(),
+                },
+            ]
+        );
+        assert_eq!(select_kernel_image(&mappings), Some(mappings[0].clone()));
     }
 }

@@ -262,7 +262,7 @@ fn last_hex_address(text: &str) -> Option<u64> {
     u64::from_str_radix(&suffix[..digits], 16).ok()
 }
 
-fn find_memory_result(
+pub(super) fn find_memory_result(
     reply: &CommandReply,
     start: u64,
     length: usize,

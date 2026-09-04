@@ -868,6 +868,7 @@ impl CanonicalMethod {
                 required(
                     "view",
                     Enum(&[
+                        "bootstrap",
                         "capabilities",
                         "version",
                         "base",

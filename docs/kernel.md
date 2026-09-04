@@ -1,9 +1,9 @@
 # Linux kernel debugging
 
 The conditional `linux-kernel` provider runs above the ordinary GDB/MI remote
-target. Enable it only for a QEMU GDB stub or KGDB session configured with a
-trusted, matching `vmlinux`. GDB/AI does not auto-load target scripts and does
-not scan arbitrary kernel memory to invent missing symbols.
+target. Typed task and module views require a trusted, matching `vmlinux`.
+An x86-64 QEMU stub can also provide the bounded symbol-free bootstrap below.
+GDB/AI does not auto-load target scripts or invent typed symbols.
 
 `gdb_kernel` exposes two actions:
 
@@ -16,6 +16,7 @@ The `inspect` views are:
 
 | View | Result |
 | --- | --- |
+| `bootstrap` | Symbol-free x86-64 QEMU image range, version, and module mapping candidates |
 | `capabilities` | Architecture, transport, symbol mode, task strategy, and monitor limits |
 | `version` | Bounded `linux_banner` text |
 | `base` | Runtime `_text` address for synchronized symbols |
@@ -31,12 +32,19 @@ On AArch64, the provider uses `$sp_el0`. Task traversal uses debug type
 information from `vmlinux`. Module inspection supports both the legacy
 `core_layout` and Linux 6.4-or-newer `mem[]` layouts.
 
+When an x86-64 QEMU target is stopped in kernel context without usable
+`vmlinux` symbols, `bootstrap` compacts QEMU's memory map and a bounded GDB
+search into the runtime kernel image range, Linux version, and possible module
+mappings. The `base` and `version` views use the same fallback automatically.
+Candidate module mappings are intentionally unnamed until typed symbols or a
+kernel module list can prove their identity.
+
 The implementation follows the useful semantic boundaries demonstrated by
-[bata24/gef](https://github.com/bata24/gef): architecture-specific current-task
-resolution, bounded task traversal, explicit kernel base/version data, and an
-allowlisted QEMU monitor. It cross-checks symbol/type-based traversal against
-[pwndbg](https://github.com/pwndbg/pwndbg). Neither project is loaded into GDB
-or linked as a runtime dependency.
+[bata24/gef](https://github.com/bata24/gef): symbol-free QEMU bootstrap,
+architecture-specific current-task resolution, bounded task traversal, and
+explicit kernel base/version data. It cross-checks symbol/type-based traversal
+against [pwndbg](https://github.com/pwndbg/pwndbg). Neither project is loaded
+into GDB or linked as a runtime dependency.
 
 [Hex-Rays rax](https://github.com/HexRaysSA/rax) is a useful future RSP
 interoperability and checkpoint-safe-point test target. It is not required by

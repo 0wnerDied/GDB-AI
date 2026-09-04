@@ -122,8 +122,9 @@ accept exactly one supported representation. Source line numbers start at 1.
 count, current resumption cursor, and a status resource for resynchronization.
 `STREAM_CLOSED` instead means the session event source has terminated.
 
-The conditional `kernel.inspect` contract accepts `capabilities`, `version`,
-`base`, `current_task`, `init_task`, `tasks`, `modules`, `stack`, and `panic`.
+The conditional `kernel.inspect` contract accepts `bootstrap`, `capabilities`,
+`version`, `base`, `current_task`, `init_task`, `tasks`, `modules`, `stack`, and
+`panic`.
 `kernel.monitor` remains an audited mutation restricted by the configured
 first-word allowlist. These contracts are generated into both the canonical
 schema and the `gdb_kernel` MCP projection; they are not GDB/MI extensions.

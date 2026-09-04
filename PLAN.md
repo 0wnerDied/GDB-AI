@@ -354,6 +354,22 @@ out and the Agent correctly switched to a persistent breakpoint while fixing
 the payload. The final exploit derives every runtime address from a target
 leak and module offsets; it contains no absolute process address.
 
+### Blind kernel exploit-speed qualification
+
+A concurrent source-free ring-1 run exposed a different adoption gap. Native
+GDB reached the first symbolized module stop in 5m06s, proved the runtime UAF
+in 12m44s, obtained privilege in 31m37s, and completed three fresh KASLR boots
+in 55m26s. The GDB/AI arm reached the module stop in 7m28s but produced no
+verified primitive or exploit within the hour. It was paused for live interface
+fixes, so the final wall time is censored rather than a clean product score;
+the failed calls still identify the missing adoption path precisely.
+
+On the same stripped target, the specialized GEF oracle recovered the kernel
+layout, full version, and per-CPU current tasks in 2.65s. The first GDB/AI
+symbol-free bootstrap now returns the exact image range and version plus four
+module mapping candidates in 1.14s. Internal filtering reduced three semantic
+views from a 64 MiB journal failure to 65 KiB while keeping the target facts.
+
 Complete only the shared fixes demonstrated by these runs:
 
 - [x] Reset exit state when GDB reuses an inferior identifier for a new process.
@@ -378,9 +394,22 @@ Complete only the shared fixes demonstrated by these runs:
   record bounded-probe fallback separately from interface failure.
 - [ ] Repeat a matched native/GDB-AI comparison on a new runtime-dependent
   userland target after the adoption gate passes.
-- [ ] Qualify kernel debugging later with a blind ring-1 guest target, measuring
-  stop attribution, guest symbol/module discovery, reconnects, and exploit wall
-  time without supplying source.
+- [x] Finish the concurrent blind ring-1 qualification, measuring stop
+  attribution, guest symbol/module discovery, reconnects, primitive and exploit
+  wall time without supplying source.
+- [x] Add one symbol-free x86-64 QEMU bootstrap view and make `base` and
+  `version` fall back to it, filtering the monitor map inside GDB before MI.
+- [ ] Detect matching Linux `CONFIG_GDB_SCRIPTS` helpers and project the proven
+  `lx-symbols`, module, task, dmesg, current/per-CPU, and address-translation
+  semantics as bounded kernel views; keep the typed provider as the fallback.
+- [ ] Adopt GEF's proven symbol-free current-task, module-identity, page-walk,
+  and kallsyms semantics incrementally when each beats the native workflow on
+  a blind target; do not import its UI or compatibility surface wholesale.
+- [ ] Detect KGDB/KDB separately from a QEMU gdbstub. Normalize read-oriented
+  `monitor` process, module, and dmesg results while GDB remains the sole run
+  controller, as required by the upstream debugger contract.
+- [ ] Use drgn/crash typed-object and vmcore traversal semantics as references
+  for offline targets; add neither dependency until a measured target needs it.
 
 ## Optional post-North-star work
 
