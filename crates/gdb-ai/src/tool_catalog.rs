@@ -62,6 +62,10 @@ const SESSION_ACTIONS: &[ToolAction] = &[
     action!("force_abort", SessionForceAbort),
 ];
 const RUN_ACTIONS: &[ToolAction] = &[
+    // 2026-09-05: Blind exploit trials paired a session restart with an
+    // immediate continue 16 times. Reproject the existing direct restart so
+    // one run action owns the relaunch without another debugger turn.
+    action!("restart", TargetRestart),
     action!("continue", ExecutionControl),
     action!("interrupt", ExecutionControl),
     action!("step", ExecutionControl),
@@ -157,7 +161,7 @@ const TOOLS: &[ToolProjection] = &[
         // 2026-09-05: Advertising a profile that ordinary projected callers
         // cannot select caused a guaranteed create retry. The default already
         // permits exploit debugging, so expose only the actionable lifecycle.
-        description: "Create a session with action only, then launch a program unchanged with argument-only argv; patch its runtime first when needed. Relative paths use workspace roots; use first_instruction for stripped executables. Remote uses connect_remote with endpoint and optional executable.",
+        description: "Create a session with action only, then launch a program unchanged with argument-only argv; patch its runtime first when needed. Relative paths use workspace roots; use first_instruction only for pre-run setup. Remote uses connect_remote with endpoint and optional executable.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,
@@ -168,7 +172,7 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_run",
         // 2026-09-01: Blind Agents rebuilt probe workflows or selected an
         // exit-only wait even though one default turn already handles both.
-        description: "Run with exact input/output; omit wait for stop-or-exit. Probe can restart, skip hits, and capture expressions, stack, or memory; continue_to_stop adds same-call crash inspection.",
+        description: "Run with exact input/output; action=restart relaunches directly to running, while continue and step wait for stop-or-exit by default. Probe restart=true replaces separate restart/continue, then can trigger, capture, and continue_to_stop for crash inspection.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,

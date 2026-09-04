@@ -96,12 +96,15 @@ impl RpcFault {
 // 2026-09-04: A blind service trace treated PTY input as the probe's only
 // trigger and rebuilt the operation around socket traffic. State that an
 // external trigger runs concurrently with the blocking probe call.
+// 2026-09-05: A later trace stopped every stripped-target restart in the
+// loader and immediately continued. Distinguish one-time setup from a direct
+// exploit-trial relaunch in the Agent instructions.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; launch; argv \
-excludes program; patch the interpreter/library path before launch when needed; launch uses the program unchanged; use first_instruction for stripped executables. MCP manages leases and \
+excludes program; patch the interpreter/library path before launch when needed; launch uses the program unchanged; use first_instruction only for pre-run setup. MCP manages leases and \
 revisions. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
-stop/exit when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
+stop/exit after continue or step when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
 accepted/running only for later I/O. Use gdb_io write steps with wait_for for prompt-driven \
-menus. Reuse the session; gdb_probe restart=true reruns before arming, batches input or starts trigger.command after arming and returns its bounded stdout/stderr, skips ignore_count hits, and captures memory; continue_to_stop reaches the next crash/exit with optional inspect in the same call. Use gdb_batch for current-stop views and gdb_inspect view=crash \
+menus. Reuse the session; gdb_run restart relaunches directly, while gdb_probe restart=true replaces separate restart/continue before arming, batches input or starts trigger.command after arming and returns its bounded stdout/stderr, skips ignore_count hits, and captures memory; continue_to_stop reaches the next crash/exit with optional inspect in the same call. Use gdb_batch for current-stop views and gdb_inspect view=crash \
 profile=brief for triage. gdb_evaluate batches related expressions and side_effects=allow permits inferior calls or assignments in one request. Query a returned operation_id after timeout. Close when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
@@ -518,6 +521,11 @@ fn map_tool(
         ));
     }
     match (name, method, action.as_deref()) {
+        ("gdb_run", CanonicalMethod::TargetRestart, Some("restart")) => {
+            parameters
+                .entry("stop")
+                .or_insert_with(|| Value::String("none".into()));
+        }
         ("gdb_run", CanonicalMethod::ExecutionControl, Some(action)) => {
             parameters.insert("action".into(), Value::String(action.into()));
             // 2026-09-01: Returning immediately after MI acceptance made the

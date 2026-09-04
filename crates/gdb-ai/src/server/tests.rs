@@ -28,12 +28,12 @@ fn initialize_teaches_agents_the_stateful_workflow() {
     for required in [
         "tools/list",
         "argv",
-        "first_instruction for stripped executables",
+        "first_instruction only for pre-run setup",
         "MCP manages leases and revisions",
         "stop_id",
         "byte-exact PTY",
-        "waits for stop/exit when wait is omitted",
-        "restart",
+        "stop/exit after continue or step when wait is omitted",
+        "gdb_run restart relaunches directly",
         "gdb_batch",
         "gdb_probe",
         "trigger.command after arming",
@@ -204,6 +204,20 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     .unwrap();
     assert_eq!(blocking_run.parameters["wait"]["until"], "settled");
     assert_eq!(blocking_run.parameters["inspect"][0]["view"], "registers");
+
+    let direct_restart = map_tool(
+        "gdb_run",
+        json!({
+            "action": "restart",
+            "session_id": "sess_test"
+        }),
+        false,
+        false,
+        5,
+    )
+    .unwrap();
+    assert_eq!(direct_restart.method, CanonicalMethod::TargetRestart);
+    assert_eq!(direct_restart.parameters["stop"], "none");
 
     let observed_wait = map_tool(
         "gdb_run",

@@ -433,6 +433,24 @@ ordinary evaluation tool while retaining read-only evaluation by default.
 The projected proof also fetched two same-stop addresses in separate calls;
 an ordered `expressions` batch now returns both under one stop fence.
 
+A fresh stripped-PIE network comparison then gave the projected interface the
+earlier first runtime primitive and the deeper final result. Native GDB found
+its first primitive in 7m23s and completed three address-independent callback
+proofs in about 20 minutes with 13 debugger starts, but did not recover the
+flag. GDB/AI found its first primitive in 1m38s, reached controlled ROP in
+23m19s, recovered the flag in 23m42s, and repeated it on three ordinary
+processes in 30m18s through one daemon and one session. Its 64 successful tool
+calls took about one second in aggregate, so Agent reasoning and workflow
+selection still dominate transport time.
+
+The projected trace naturally used one probe for breakpoint, concurrent
+network trigger, register, and memory evidence, and immediately used batched
+evaluation for four and then five related expressions. It also paired 16
+first-instruction restarts with 16 immediate continues during exploit trials.
+The existing direct target restart is now also projected as `gdb_run restart`,
+where an omitted stop policy relaunches directly instead of requiring the
+second call.
+
 ### Blind kernel exploit-speed qualification
 
 A concurrent source-free ring-1 run exposed a different adoption gap. Native
@@ -506,6 +524,8 @@ Complete only the shared fixes demonstrated by these runs:
   values in one request instead of requiring raw GDB for exploit-side probes.
 - [x] Evaluate up to 16 related expressions under one stop fence and return
   ordered semantic values without one Agent turn per address.
+- [x] Project direct restart under `gdb_run` so repeated exploit trials do not
+  pair a first-instruction session restart with an immediate continue.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

@@ -195,7 +195,7 @@ modes without claiming legacy HTTP+SSE.
 | Tool | Purpose |
 | --- | --- |
 | `gdb_session` | Sessions, leases, local launch, lifecycle, and capabilities |
-| `gdb_run` | One-call input, run-to-stop, same-stop views, and asynchronous waits |
+| `gdb_run` | Direct restart, one-call input, run-to-stop, same-stop views, and waits |
 | `gdb_probe` | Temporary breakpoint, trigger, capture, optional next stop/crash inspection, and cleanup in one call |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
@@ -254,6 +254,9 @@ For `gdb_session` launch, `program` names the executable and `argv` contains
 only the arguments that follow it. GDB/AI uses `program` unchanged; patch its
 interpreter and library search path before launch when a supplied runtime is
 required.
+`gdb_run` action `restart` relaunches directly to running. Use a
+first-instruction session restart only when another setup action must precede
+execution.
 Projected terminal state reports `exit_code` as a decimal integer instead of
 GDB/MI's octal text.
 A standalone `gdb_batch` accepts explicit names when the same view is needed
