@@ -450,6 +450,10 @@ first-instruction restarts with 16 immediate continues during exploit trials.
 The existing direct target restart is now also projected as `gdb_run restart`,
 where an omitted stop policy relaunches directly instead of requiring the
 second call.
+The hand-written stateless client also failed four setup requests while adding
+duplicated protocol, method, and tool-name headers. Stateless HTTP now treats
+its already validated request metadata and JSON-RPC body as authoritative,
+without requiring the same routing fields in headers.
 
 ### Blind kernel exploit-speed qualification
 

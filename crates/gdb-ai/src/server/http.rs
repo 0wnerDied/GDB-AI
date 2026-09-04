@@ -19,7 +19,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_core::{
     config::Config,
     domain::SessionId,
@@ -204,7 +203,7 @@ async fn http_mcp(
     };
     let mut params = object.remove("params").unwrap_or_else(|| json!({}));
     if uses_stateless_http(&headers, &params) {
-        return http_mcp_stateless(state, headers, id, &method, params).await;
+        return http_mcp_stateless(state, id, &method, params).await;
     }
     if method == "initialize" {
         let Some(id) = id else {
@@ -467,17 +466,18 @@ async fn http_mcp(
 
 async fn http_mcp_stateless(
     state: HttpState,
-    headers: HeaderMap,
     id: Option<Value>,
     method: &str,
     mut params: Value,
 ) -> Response {
+    // 2026-09-05: Mirroring the protocol, method, and tool name in headers
+    // caused four blind-client retries even though routing and authorization
+    // already use the parsed JSON body. Validated request metadata is the
+    // single stateless protocol binding.
     let validation = stateless_request(&params).and_then(|stateless| {
-        if stateless {
-            validate_stateless_headers(&headers, method, &params)
-        } else {
-            Err(RpcFault::invalid("2026-07-28 request metadata is required"))
-        }
+        stateless
+            .then_some(())
+            .ok_or_else(|| RpcFault::invalid("2026-07-28 request metadata is required"))
     });
     if let Err(error) = validation {
         let mut response = json_http_response_for(
@@ -887,78 +887,6 @@ fn uses_stateless_http(headers: &HeaderMap, params: &Value) -> bool {
             .any(|version| version.as_bytes() != MCP_VERSION.as_bytes())
 }
 
-fn validate_stateless_headers(
-    headers: &HeaderMap,
-    method: &str,
-    params: &Value,
-) -> Result<(), RpcFault> {
-    if !http_protocol_version_matches(headers, STATELESS_MCP_VERSION) {
-        return Err(header_mismatch(
-            "MCP-Protocol-Version must match 2026-07-28 request metadata",
-        ));
-    }
-    let mirrored_method = single_header(headers, "mcp-method")?
-        .ok_or_else(|| header_mismatch("Mcp-Method is required"))?;
-    if mirrored_method != method {
-        return Err(header_mismatch("Mcp-Method does not match the request"));
-    }
-    let name = match method {
-        "tools/call" => params.get("name").and_then(Value::as_str),
-        "resources/read" => params.get("uri").and_then(Value::as_str),
-        _ => None,
-    };
-    if matches!(method, "tools/call" | "resources/read") {
-        let name = name.ok_or_else(|| header_mismatch("request name is missing"))?;
-        let mirrored_name = decoded_header(headers, "mcp-name")?
-            .ok_or_else(|| header_mismatch("Mcp-Name is required"))?;
-        if mirrored_name != name {
-            return Err(header_mismatch("Mcp-Name does not match the request"));
-        }
-    }
-    Ok(())
-}
-
-fn single_header(headers: &HeaderMap, name: &str) -> Result<Option<String>, RpcFault> {
-    let mut values = headers.get_all(name).iter();
-    let Some(value) = values.next() else {
-        return Ok(None);
-    };
-    if values.next().is_some() {
-        return Err(header_mismatch(format!("{name} must not be repeated")));
-    }
-    value
-        .to_str()
-        .map(str::to_owned)
-        .map(Some)
-        .map_err(|_| header_mismatch(format!("{name} is not valid ASCII")))
-}
-
-fn decoded_header(headers: &HeaderMap, name: &str) -> Result<Option<String>, RpcFault> {
-    let Some(value) = single_header(headers, name)? else {
-        return Ok(None);
-    };
-    let Some(encoded) = value
-        .strip_prefix("=?base64?")
-        .and_then(|value| value.strip_suffix("?="))
-    else {
-        return Ok(Some(value));
-    };
-    let decoded = BASE64
-        .decode(encoded)
-        .map_err(|_| header_mismatch(format!("{name} contains invalid base64")))?;
-    String::from_utf8(decoded)
-        .map(Some)
-        .map_err(|_| header_mismatch(format!("{name} contains invalid UTF-8")))
-}
-
-fn header_mismatch(message: impl Into<String>) -> RpcFault {
-    RpcFault {
-        code: -32020,
-        message: message.into(),
-        data: None,
-    }
-}
-
 fn accepts_mcp_responses(headers: &HeaderMap) -> bool {
     let mut json = false;
     let mut event_stream = false;
@@ -1366,11 +1294,6 @@ mod tests {
             header::ACCEPT,
             HeaderValue::from_static("application/json, text/event-stream"),
         );
-        headers.insert(
-            "mcp-protocol-version",
-            HeaderValue::from_static(STATELESS_MCP_VERSION),
-        );
-        headers.insert("mcp-method", HeaderValue::from_static("server/discover"));
         let metadata = json!({
             "io.modelcontextprotocol/protocolVersion": STATELESS_MCP_VERSION,
             "io.modelcontextprotocol/clientCapabilities": {}
@@ -1399,7 +1322,6 @@ mod tests {
         assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(response["result"]["ttlMs"], 86_400_000_u64);
 
-        headers.insert("mcp-method", HeaderValue::from_static("tools/list"));
         let listed = http_mcp(
             State(state.clone()),
             headers.clone(),
@@ -1418,24 +1340,28 @@ mod tests {
         let response: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 11);
 
-        headers.insert("mcp-method", HeaderValue::from_static("ping"));
-        let mismatch = http_mcp(
-            State(state),
+        let called = http_mcp(
+            State(state.clone()),
             headers,
             Json(json!({
                 "jsonrpc": "2.0",
                 "id": 3,
-                "method": "tools/list",
-                "params": {"_meta": metadata}
+                "method": "tools/call",
+                "params": {
+                    "_meta": metadata,
+                    "name": "gdb_session",
+                    "arguments": {"action": "list"}
+                }
             })),
         )
         .await;
-        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(mismatch.into_body(), MAX_MESSAGE_BYTES)
+        assert_eq!(called.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(called.into_body(), MAX_MESSAGE_BYTES)
             .await
             .unwrap();
         let response: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(response["error"]["code"], -32020);
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(response["result"]["isError"], false);
         gateway.shutdown().await;
     }
 
