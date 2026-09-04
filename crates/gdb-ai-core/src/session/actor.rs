@@ -1075,6 +1075,11 @@ impl SessionWorker {
                     Ok(()) => self.execute_until(command, deadline).await,
                     Err(error) => Err(error),
                 };
+                // 2026-09-04: Some remote stubs acknowledge -exec-interrupt
+                // before stopping (or without stopping at all). If the target
+                // is still running after the MI reply, deliver the existing
+                // process-group fallback so a later state wait can complete.
+                let result = self.finish_interrupt(result);
                 let _ = response.send(result);
                 self.fatal
             }
@@ -1773,13 +1778,9 @@ impl SessionWorker {
                             control.started.elapsed().as_micros().min(u64::MAX as u128) as u64,
                             false,
                         );
-                        control.response.send(command_reply(
-                            control.token,
-                            record,
-                            evidence_seq,
-                            Vec::new(),
-                            false,
-                        ));
+                        let result =
+                            command_reply(control.token, record, evidence_seq, Vec::new(), false);
+                        control.response.send(self.finish_interrupt(result));
                         continue;
                     }
                     if Some(token) == result_token {
@@ -1818,6 +1819,20 @@ impl SessionWorker {
                 }
             }
         }
+    }
+
+    fn finish_interrupt(&mut self, result: Result<CommandReply>) -> Result<CommandReply> {
+        if result.is_ok()
+            && self
+                .reducer
+                .state()
+                .inferiors
+                .values()
+                .any(|inferior| inferior.status == InferiorStatus::Running)
+        {
+            self.backend.signal_interrupt()?;
+        }
+        result
     }
 
     async fn execute_operation_until(

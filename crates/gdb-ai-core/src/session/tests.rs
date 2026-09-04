@@ -764,7 +764,7 @@ async fn queue_wait_counts_toward_command_deadline() {
 }
 
 #[tokio::test]
-async fn transaction_resume_is_owned_by_its_operation() {
+async fn transaction_resume_is_owned_and_interrupt_acknowledgement_stops() {
     if !crate::test_support::require_commands(&["gdb", "cc"]) {
         return;
     }
@@ -816,6 +816,25 @@ async fn transaction_resume_is_owned_by_its_operation() {
 
     session
         .cancel_operation(operation_id, OperationCancelMode::InterruptTarget)
+        .await
+        .unwrap();
+    session
+        .wait(WaitUntil::Stopped, Duration::from_secs(2))
+        .await
+        .unwrap();
+
+    session
+        .command(MiCommand::new("-exec-continue").unwrap())
+        .await
+        .unwrap();
+    session
+        .wait(WaitUntil::Running, Duration::from_secs(2))
+        .await
+        .unwrap();
+    // A harmless successful reply models a remote stub acknowledging its MI
+    // interrupt without producing the corresponding stop notification.
+    session
+        .interrupt(MiCommand::new("-gdb-version").unwrap())
         .await
         .unwrap();
     session
