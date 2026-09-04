@@ -493,7 +493,8 @@ impl Gateway {
         });
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
-        let bundled_runtime = if parameters.runtime == "auto" {
+        let requested_runtime = parameters.runtime.clone();
+        let bundled_runtime = if requested_runtime == "auto" {
             prepare_bundled_runtime(
                 &program,
                 entry.handle.session_directory(),
@@ -609,16 +610,21 @@ impl Gateway {
             .await?;
         let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
-        let mut result = json!({
+        // 2026-09-05: System fallback was represented by an absent field, so
+        // Agents could not tell which runtime actually launched the target.
+        // Always report the decision made for the requested runtime mode.
+        let runtime = bundled_runtime.as_ref().map_or_else(
+            || json!({"mode": "system", "requested": requested_runtime}),
+            |runtime| runtime.summary.clone(),
+        );
+        let result = json!({
             "command": reply,
             "state": state,
             "capabilities": capabilities,
             "start_policy": start_policy.as_str(),
-            "aslr": {"requested": aslr, "backend_managed": aslr_managed}
+            "aslr": {"requested": aslr, "backend_managed": aslr_managed},
+            "runtime": runtime
         });
-        if let Some(runtime) = bundled_runtime {
-            result["runtime"] = runtime.summary;
-        }
         Ok(result)
     }
 
@@ -1034,17 +1040,12 @@ async fn prepare_bundled_runtime(
                 .is_some_and(runtime_candidate_name)
         })
         .collect::<Vec<_>>();
-    let has_loader = runtime_files.iter().any(|path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(loader_candidate_name)
-    });
     let has_library = runtime_files.iter().any(|path| {
         path.file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.contains(".so") && !loader_candidate_name(name))
     });
-    if !has_loader || !has_library {
+    if !has_library {
         return Ok(None);
     }
     let interpreter = match Command::new("patchelf")
@@ -1121,15 +1122,32 @@ async fn prepare_bundled_runtime(
             candidates.entry(soname).or_default().insert(path);
         }
     }
-    let loader = unique_soname_candidate(&candidates, interpreter_soname, "loader")?;
-    let Some(loader) = loader else {
-        return Ok(None);
-    };
+    let bundled_loader = unique_soname_candidate(&candidates, interpreter_soname, "loader")?;
+    // 2026-09-05: Requiring a complete loader/library bundle discarded a
+    // usable supplied dependency, while mixing a supplied libc with the host
+    // loader could crash before main. Pair libc with its loader, but stage
+    // other matching dependencies over the system runtime when the pair is
+    // absent.
+    let use_bundled_loader = bundled_loader.is_some()
+        && candidates
+            .iter()
+            .any(|(soname, matches)| core_runtime_soname(soname) && matches.len() == 1);
+    let mut bundled_libraries = Vec::new();
+    let mut system_libraries = Vec::new();
     for name in &needed {
-        if unique_soname_candidate(&candidates, name, "library")?.is_none() {
-            return Ok(None);
+        let supplied = unique_soname_candidate(&candidates, name, "library")?.is_some();
+        if supplied && (use_bundled_loader || !core_runtime_soname(name)) {
+            bundled_libraries.push(name.clone());
+        } else {
+            system_libraries.push(name.clone());
         }
     }
+    if bundled_libraries.is_empty() {
+        return Ok(None);
+    }
+    let loader = bundled_loader
+        .filter(|_| use_bundled_loader)
+        .unwrap_or_else(|| PathBuf::from(&interpreter));
 
     let runtime_directory = session_directory.join(format!("runtime-{revision}"));
     let library_directory = runtime_directory.join("lib");
@@ -1138,7 +1156,11 @@ async fn prepare_bundled_runtime(
     // attachment lacked the DT_NEEDED filename. Stage aliases for every
     // unambiguous sibling without changing the supplied files.
     for (soname, matches) in &candidates {
-        if matches.len() != 1 || Path::new(soname).components().count() != 1 {
+        if matches.len() != 1
+            || Path::new(soname).components().count() != 1
+            || (!use_bundled_loader
+                && (core_runtime_soname(soname) || soname == interpreter_soname))
+        {
             continue;
         }
         let link = library_directory.join(soname);
@@ -1188,11 +1210,19 @@ async fn prepare_bundled_runtime(
     Ok(Some(BundledRuntime {
         program: prepared.clone(),
         summary: json!({
-            "mode": "bundled",
+            "mode": if system_libraries.is_empty() && use_bundled_loader {
+                "bundled"
+            } else {
+                "hybrid"
+            },
+            "requested": "auto",
             "prepared_program": prepared,
             "loader": loader,
+            "loader_source": if use_bundled_loader { "bundled" } else { "system" },
             "library_path": library_directory,
             "libraries": needed,
+            "bundled_libraries": bundled_libraries,
+            "system_libraries": system_libraries,
         }),
     }))
 }
@@ -1224,6 +1254,10 @@ fn loader_candidate_name(name: &str) -> bool {
         || name.starts_with("ld-linux")
         || name.starts_with("ld-musl")
         || name.starts_with("ld.so")
+}
+
+fn core_runtime_soname(name: &str) -> bool {
+    name.starts_with("libc.so")
 }
 
 pub(super) fn remote_endpoint(parameters: &Value) -> Result<String> {
@@ -1342,6 +1376,90 @@ pub(super) fn parse_process_start_time(stat: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stages_a_partial_sibling_library_without_mixing_libc() {
+        use std::process::Command as StdCommand;
+
+        if ["cc", "ldd", "patchelf"]
+            .iter()
+            .any(|command| StdCommand::new(command).arg("--version").output().is_err())
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let library_source = directory.path().join("library.c");
+        let program_source = directory.path().join("program.c");
+        let library = directory.path().join("libfixture.so.1.2");
+        let program = directory.path().join("program");
+        std::fs::write(&library_source, "int fixture(void) { return 42; }\n").unwrap();
+        std::fs::write(
+            &program_source,
+            "extern int fixture(void); int main(void) { return fixture() != 42; }\n",
+        )
+        .unwrap();
+        assert!(
+            StdCommand::new("cc")
+                .args(["-shared", "-fPIC", "-Wl,-soname,libfixture.so.1"])
+                .arg(&library_source)
+                .arg("-o")
+                .arg(&library)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            StdCommand::new("cc")
+                .args(["-fPIE", "-pie"])
+                .arg(&program_source)
+                .arg(&library)
+                .arg("-o")
+                .arg(&program)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let libraries = StdCommand::new("ldd").arg(&program).output().unwrap();
+        assert!(libraries.status.success());
+        let libc = String::from_utf8(libraries.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                (fields.next() == Some("libc.so.6"))
+                    .then(|| fields.nth(1).map(PathBuf::from))
+                    .flatten()
+            })
+            .unwrap();
+        let supplied_libc = directory.path().join("libc-supplied.so.6.999");
+        std::fs::copy(libc, &supplied_libc).unwrap();
+        let original = std::fs::read(&program).unwrap();
+
+        let runtime = prepare_bundled_runtime(&program, &directory.path().join("session"), 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.summary["mode"], "hybrid");
+        assert_eq!(runtime.summary["loader_source"], "system");
+        assert_eq!(
+            runtime.summary["bundled_libraries"],
+            json!(["libfixture.so.1"])
+        );
+        assert_eq!(runtime.summary["system_libraries"], json!(["libc.so.6"]));
+        let library_path = Path::new(runtime.summary["library_path"].as_str().unwrap());
+        assert_eq!(
+            std::fs::canonicalize(library_path.join("libfixture.so.1")).unwrap(),
+            library
+        );
+        assert!(!library_path.join("libc.so.6").exists());
+        assert!(
+            StdCommand::new(&runtime.program)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(std::fs::read(program).unwrap(), original);
+    }
 
     #[test]
     fn parses_and_revalidates_attach_identity() {

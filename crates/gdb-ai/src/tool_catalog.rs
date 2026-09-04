@@ -152,7 +152,7 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_session",
         // 2026-09-04: Agents combined create with target fields and guessed
         // remote parameter names. State the lifecycle split beside the schema.
-        description: "Create once, then launch program with argument-only argv; auto uses a complete sibling loader/library set and system opts out; relative paths use workspace roots; use first_instruction for stripped executables. Remote uses connect_remote with endpoint and optional executable.",
+        description: "Create once, then launch program with argument-only argv; auto stages matching sibling libraries, pairs a supplied libc with its loader, and reports the selection; system opts out. Relative paths use workspace roots; use first_instruction for stripped executables. Remote uses connect_remote with endpoint and optional executable.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,
