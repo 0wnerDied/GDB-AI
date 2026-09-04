@@ -93,14 +93,15 @@ pub(super) fn parse_address(value: &str) -> Result<u64> {
         .next()
         .unwrap_or(value)
         .trim_matches(|character: char| matches!(character, '(' | ')' | ','));
-    let value = value.strip_prefix("0x").ok_or_else(|| {
-        Error::new(
-            ErrorCode::GdbError,
-            format!("GDB value is not a hexadecimal address: {value}"),
-        )
-    })?;
-    u64::from_str_radix(value, 16)
-        .map_err(|_| Error::new(ErrorCode::GdbError, "invalid hexadecimal address"))
+    // 2026-09-04: Bare register expressions use GDB's decimal output radix,
+    // so requiring a 0x prefix rejected valid pointer-sized addresses during
+    // same-stop memory capture. Accept the two lossless unsigned forms GDB
+    // emits while keeping canonical API addresses hexadecimal.
+    let (digits, radix) = value
+        .strip_prefix("0x")
+        .map_or((value, 10), |digits| (digits, 16));
+    u64::from_str_radix(digits, radix)
+        .map_err(|_| Error::new(ErrorCode::GdbError, format!("invalid GDB address: {value}")))
 }
 
 pub(super) fn input_bytes(parameters: &Value) -> Result<Vec<u8>> {
@@ -157,6 +158,16 @@ mod tests {
         assert_eq!(hex_decode("00aBcDfF").unwrap(), bytes);
         assert!(hex_decode("0").is_err());
         assert!(hex_decode("0z").is_err());
+    }
+
+    #[test]
+    fn parses_hexadecimal_and_decimal_gdb_addresses() {
+        assert_eq!(
+            parse_address("0x5555555c1010 <member>").unwrap(),
+            0x5555555c1010
+        );
+        assert_eq!(parse_address("93824992677904").unwrap(), 0x5555555c1010);
+        assert!(parse_address("-1").is_err());
     }
 
     #[test]
