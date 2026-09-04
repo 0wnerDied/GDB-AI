@@ -186,6 +186,8 @@ its temporary breakpoint. A module offset may be supplied before a stripped
 PIE maps; GDB/AI rebinds it when the mapping appears.
 For an already-running target, the call arms and waits without a separate
 interrupt or resume.
+The `input` field writes the inferior PTY. For socket or other external events,
+start the trigger concurrently while the blocking probe call waits.
 `gdb_run` action `probe` remains an equivalent compatibility form.
 
 The result reports bounded `output` produced during the call, plus

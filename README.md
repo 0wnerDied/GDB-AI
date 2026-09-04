@@ -235,6 +235,8 @@ more than once.
 `gdb_probe` arms a temporary breakpoint on a stopped or already-running target
 and combines optional byte-exact input, `ignore_count`, bounded capture, output,
 and cleanup in one call. A running target is not interrupted or resumed first.
+`input` is inferior PTY data; for a socket or other external event, start the
+trigger concurrently while the probe call waits for its breakpoint.
 Its capture items accept an expression, stack, or exact memory window selected
 by `address_expression` and `length`. A module-offset probe may start before a
 stripped PIE maps; its temporary breakpoint is rebound and removed internally.

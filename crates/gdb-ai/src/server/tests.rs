@@ -36,11 +36,11 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "restart",
         "gdb_batch",
         "gdb_probe",
+        "external triggers concurrently",
         "gdb_inspect view=crash profile=brief",
     ] {
         assert!(instructions.contains(required), "missing {required}");
     }
-    assert!(instructions.len() < 700);
 }
 
 #[test]

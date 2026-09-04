@@ -93,13 +93,16 @@ impl RpcFault {
 // running and stop pins remain for PTY races and cross-call evidence.
 // 2026-09-01: Exploit success criteria belong to the caller's prompt; server
 // initialization describes interface semantics, not debugging methodology.
+// 2026-09-04: A blind service trace treated PTY input as the probe's only
+// trigger and rebuilt the operation around socket traffic. State that an
+// external trigger runs concurrently with the blocking probe call.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; launch; argv \
 excludes program; use first_instruction for stripped executables. MCP manages leases and \
 revisions. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
 stop/exit when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
 accepted/running only for later I/O. Reuse the session with \
 restart; gdb_probe batches input, skips ignore_count hits, captures memory, and \
-returns output in one call. Use gdb_batch for current-stop views and gdb_inspect view=crash \
+returns output in one call; run external triggers concurrently. Use gdb_batch for current-stop views and gdb_inspect view=crash \
 profile=brief for triage. Query a returned operation_id after timeout. Close when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
