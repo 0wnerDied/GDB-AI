@@ -3824,6 +3824,24 @@
               },
               "thread_id": {
                 "type": "string"
+              },
+              "trigger": {
+                "additionalProperties": false,
+                "properties": {
+                  "command": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "cwd": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "command"
+                ],
+                "type": "object"
               }
             },
             "required": [],
@@ -4191,6 +4209,24 @@
               },
               "thread_id": {
                 "type": "string"
+              },
+              "trigger": {
+                "additionalProperties": false,
+                "properties": {
+                  "command": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "cwd": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "command"
+                ],
+                "type": "object"
               }
             },
             "required": [],

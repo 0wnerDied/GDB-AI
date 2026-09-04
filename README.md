@@ -197,7 +197,7 @@ modes without claiming legacy HTTP+SSE.
 | --- | --- |
 | `gdb_session` | Sessions, leases, local launch, lifecycle, and capabilities |
 | `gdb_run` | One-call input, run-to-stop, same-stop views, and asynchronous waits |
-| `gdb_probe` | Temporary breakpoint, exact input, skipped hits, capture, output, and cleanup in one call |
+| `gdb_probe` | Temporary breakpoint, input or external trigger, skipped hits, capture, output, and cleanup in one call |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
 | `gdb_batch` | Multiple bounded inspection views at the current or named stop |
@@ -264,8 +264,14 @@ more than once.
 `gdb_probe` arms a temporary breakpoint on a stopped or already-running target
 and combines optional byte-exact input, `ignore_count`, bounded capture, output,
 and cleanup in one call. A running target is not interrupted or resumed first.
-`input` is inferior PTY data; for a socket or other external event, start the
-trigger concurrently while the probe call waits for its breakpoint.
+`input` is inferior PTY data. For a socket or other external event, pass
+`trigger: {"command": ["python3", "exploit.py"], "cwd": "..."}`. GDB/AI starts
+the command without a shell after the breakpoint is armed and the inferior is
+running, disconnects its standard streams, and terminates it when the probe
+finishes. The result, or timeout error details, report its PID, exit code, and
+whether it was still running. `cwd` must be inside a configured workspace; the
+command itself runs on the GDB/AI host with the server account and environment,
+and inherits the server working directory when `cwd` is omitted.
 Its capture items accept an expression, stack, or exact memory window selected
 by `address_expression` and `length`. A module-offset probe may start before a
 stripped PIE maps; its temporary breakpoint is rebound and removed internally.

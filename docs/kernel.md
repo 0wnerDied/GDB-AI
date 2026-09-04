@@ -70,8 +70,9 @@ transitions, and a randomized module layout where GEF's module commands fail.
 hexadecimal offset. From a stopped kernel context, one call discovers the live
 module, validates the offset against its executable segment, arms the temporary
 breakpoint, runs, captures the attributed stop, and removes the breakpoint.
-QEMU serial or network activity is an external trigger: start it concurrently
-while the blocking probe waits; `input` remains inferior PTY data.
+QEMU serial or network activity is an external trigger: supply a no-shell
+`trigger.command` to start it after the breakpoint is armed, or coordinate an
+existing process concurrently; `input` remains inferior PTY data.
 
 The implementation follows the useful semantic boundaries demonstrated by
 [bata24/gef](https://github.com/bata24/gef): symbol-free QEMU bootstrap,

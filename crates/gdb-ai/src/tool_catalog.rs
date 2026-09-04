@@ -175,7 +175,7 @@ const TOOLS: &[ToolProjection] = &[
         // 2026-09-04: Repeated blind Agents overlooked the probe action nested
         // under gdb_run and rebuilt it from several debugger turns. Surface
         // the existing one-call workflow under the operation they search for.
-        description: "Arm a temporary breakpoint on a stopped or running target; kernel_module_offset resolves a loaded kernel module's live text base; input is PTY data, while socket or other external triggers run concurrently; skip hits, capture expressions, stack, memory, and output, then clean up.",
+        description: "Arm a temporary breakpoint on a stopped or running target; input is PTY data, while trigger.command starts one host process after arming; kernel_module_offset resolves a loaded kernel module; skip hits, capture expressions, stack, memory, and output, then clean up.",
         discriminator: None,
         actions: PROBE_ACTIONS,
         read_only: false,
@@ -830,6 +830,10 @@ mod tests {
         assert!(probe["properties"]["input"].get("oneOf").is_none());
         assert!(probe["properties"]["ignore_count"].is_object());
         assert!(probe["properties"]["kernel_module_offset"].is_object());
+        assert_eq!(
+            probe["properties"]["trigger"]["properties"]["command"]["type"],
+            "array"
+        );
         assert!(
             probe["properties"]["capture"]["items"]["oneOf"]
                 .as_array()

@@ -216,6 +216,13 @@ const INFERIOR_INPUT_OBJECT: ObjectContract =
     ObjectContract::new(INFERIOR_INPUT_FIELDS, 0, &["text", "data_base64"]);
 const INFERIOR_INPUT_KIND: ParameterKind = ParameterKind::Shape(&INFERIOR_INPUT_OBJECT);
 
+const PROBE_TRIGGER_FIELDS: &[ParameterField] = &[
+    required("command", ParameterKind::StringArray),
+    optional("cwd", ParameterKind::String),
+];
+const PROBE_TRIGGER_OBJECT: ObjectContract = ObjectContract::new(PROBE_TRIGGER_FIELDS, 0, &[]);
+const PROBE_TRIGGER_KIND: ParameterKind = ParameterKind::Shape(&PROBE_TRIGGER_OBJECT);
+
 const IO_WRITE_STEP_FIELDS: &[ParameterField] = &[
     optional("wait_for", ParameterKind::String),
     optional("text", ParameterKind::String),
@@ -870,6 +877,7 @@ impl CanonicalMethod {
                 optional("condition", String),
                 optional("ignore_count", Unsigned),
                 optional("input", INFERIOR_INPUT_KIND),
+                optional("trigger", PROBE_TRIGGER_KIND),
                 optional("capture", CAPTURE_KIND),
                 optional("max_hits", Unsigned),
                 optional(

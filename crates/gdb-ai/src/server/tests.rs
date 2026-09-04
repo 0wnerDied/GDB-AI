@@ -36,7 +36,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "restart",
         "gdb_batch",
         "gdb_probe",
-        "external triggers concurrently",
+        "trigger.command after arming",
         "gdb_inspect view=crash profile=brief",
     ] {
         assert!(instructions.contains(required), "missing {required}");
@@ -241,7 +241,8 @@ fn maps_tool_metadata_outside_canonical_parameters() {
         "gdb_probe",
         json!({
             "session_id": "sess_test",
-            "function": "malloc"
+            "function": "malloc",
+            "trigger": {"command": ["python3", "exploit.py"]}
         }),
         false,
         false,
@@ -250,6 +251,10 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     .unwrap();
     assert_eq!(direct_probe.method, CanonicalMethod::AgentProbe);
     assert_eq!(direct_probe.parameters["accept_current_stop"], true);
+    assert_eq!(
+        direct_probe.parameters["trigger"]["command"][1],
+        "exploit.py"
+    );
 
     let pinned_batch = map_tool(
         "gdb_batch",

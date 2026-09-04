@@ -193,7 +193,9 @@ probes it, captures the stop, and removes the breakpoint in the same call.
 For an already-running target, the call arms and waits without a separate
 interrupt or resume.
 The `input` field writes the inferior PTY. For socket or other external events,
-start the trigger concurrently while the blocking probe call waits.
+set `trigger.command` to a no-shell command array and optionally set its
+workspace `cwd`. GDB/AI starts it after the breakpoint is armed and the target
+runs, then reports its process status with the probe result.
 `gdb_run` action `probe` remains an equivalent compatibility form.
 
 The result reports bounded `output` produced during the call, plus

@@ -301,3 +301,135 @@ async fn probe_and_experiment_capture_and_clean_up() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn probe_starts_an_external_trigger_after_arming() {
+    if !support::require_commands(&["gdb", "cc", "false", "touch"]) {
+        return;
+    }
+
+    let directory = tempdir().unwrap();
+    let executable = directory.path().join("external-trigger");
+    let source = directory.path().join("external-trigger.c");
+    let sentinel = directory.path().join("triggered");
+    std::fs::write(
+        &source,
+        "#include <unistd.h>\n__attribute__((noinline)) void marker(void) {}\nint main(int argc, char **argv) { if (argc != 2) return 2; while (access(argv[1], F_OK) != 0) usleep(1000); marker(); return 0; }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0"])
+            .arg(source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("external-trigger-test");
+    let created = call(
+        &gateway,
+        &caller,
+        request("create-trigger", None, "session.create", None, json!({})),
+    )
+    .await;
+    let session_id = created.session_id.as_ref().unwrap();
+    let lease_id = created.result.as_ref().unwrap()["write_lease"]["lease_id"]
+        .as_str()
+        .unwrap();
+    let launched = call(
+        &gateway,
+        &caller,
+        request(
+            "launch-trigger",
+            Some(session_id),
+            "target.launch",
+            created.revision,
+            json!({
+                "program": executable,
+                "argv": [sentinel],
+                "lease_id": lease_id,
+                "stop": "none",
+                "wait": {"until": "running", "timeout_ms": 5000}
+            }),
+        ),
+    )
+    .await;
+    let probed = call(
+        &gateway,
+        &caller,
+        request(
+            "probe-trigger",
+            Some(session_id),
+            "agent.probe",
+            launched.revision,
+            json!({
+                "lease_id": lease_id,
+                "function": "marker",
+                "trigger": {
+                    "command": ["touch", "triggered"],
+                    "cwd": directory.path()
+                },
+                "budget": {"max_calls": 4, "wall_time_ms": 5000}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(probed.result.as_ref().unwrap()["capture_count"], 1);
+    assert!(probed.result.as_ref().unwrap()["trigger"]["pid"].is_u64());
+    assert!(sentinel.exists());
+    assert!(probed.state.as_ref().unwrap().breakpoints.is_empty());
+
+    std::fs::remove_file(&sentinel).unwrap();
+    let restarted = call(
+        &gateway,
+        &caller,
+        request(
+            "restart-trigger",
+            Some(session_id),
+            "target.restart",
+            probed.revision,
+            json!({
+                "lease_id": lease_id,
+                "stop": "none",
+                "wait": {"until": "running", "timeout_ms": 5000}
+            }),
+        ),
+    )
+    .await;
+    let timed_out = gateway
+        .dispatch(
+            request(
+                "probe-failed-trigger",
+                Some(session_id),
+                "agent.probe",
+                restarted.revision,
+                json!({
+                    "lease_id": lease_id,
+                    "function": "marker",
+                    "trigger": {"command": ["false"]},
+                    "budget": {"max_calls": 4, "wall_time_ms": 200}
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    let error = timed_out.error.as_ref().unwrap();
+    assert_eq!(error.code, gdb_ai_core::ErrorCode::Timeout);
+    assert_eq!(error.details.as_ref().unwrap()["trigger"]["exit_code"], 1);
+    gateway.shutdown().await;
+}

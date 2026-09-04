@@ -419,6 +419,8 @@ Complete only the shared fixes demonstrated by these runs:
 - [x] Include the main executable's local mappings in the module view.
 - [x] State that socket and other external triggers run concurrently with a
   blocking probe while `input` remains target PTY data.
+- [x] Let one `gdb_probe` start a host command after its breakpoint is armed
+  and the inferior runs, returning trigger status on a hit or timeout.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

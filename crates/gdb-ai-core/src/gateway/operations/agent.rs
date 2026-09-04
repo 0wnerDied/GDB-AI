@@ -1,14 +1,18 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    os::unix::process::ExitStatusExt, path::PathBuf, process::Stdio, sync::Arc, time::Duration,
+};
 
 use gdb_ai_mi::{MiResult, MiValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::process::{Child, Command};
 
 use super::{
     context::{context_options, require_stopped_context},
     encoding::{hex_encode, parse_address},
     evaluation::{safe_evaluate_command, validate_expression},
     execution::{append_turn_output, feed_inferior, turn_input},
+    lifecycle::validate_argv,
     memory::read_memory_bytes,
     mi::{normalized_frames, result_text},
     reconciliation::synchronize_breakpoint,
@@ -27,6 +31,74 @@ use crate::{
     protocol::ApiRequest,
     session::{PendingModuleBreakpoint, SessionHandle, WaitUntil},
 };
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeTrigger {
+    command: Vec<String>,
+    cwd: Option<String>,
+}
+
+struct ProbeTriggerProcess {
+    child: Child,
+    pid: u32,
+}
+
+impl ProbeTriggerProcess {
+    async fn finish(mut self) -> Value {
+        let status = match self.child.try_wait() {
+            Ok(Some(status)) => return trigger_status(self.pid, status, false),
+            Ok(None) => self.child.kill().await,
+            Err(error) => {
+                return json!({"pid": self.pid, "cleanup_error": error.to_string()});
+            }
+        };
+        match status {
+            Ok(()) => match self.child.wait().await {
+                Ok(status) => trigger_status(self.pid, status, true),
+                Err(error) => json!({"pid": self.pid, "cleanup_error": error.to_string()}),
+            },
+            Err(error) => json!({"pid": self.pid, "cleanup_error": error.to_string()}),
+        }
+    }
+}
+
+fn trigger_status(pid: u32, status: std::process::ExitStatus, terminated: bool) -> Value {
+    json!({
+        "pid": pid,
+        "exit_code": status.code(),
+        "signal": status.signal(),
+        "success": status.success(),
+        "terminated_after_probe": terminated
+    })
+}
+
+fn start_probe_trigger(trigger: ProbeTrigger, cwd: Option<PathBuf>) -> Result<ProbeTriggerProcess> {
+    let program = &trigger.command[0];
+    let mut command = Command::new(program);
+    command
+        .args(&trigger.command[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let child = command.spawn().map_err(|error| {
+        Error::new(
+            ErrorCode::TargetUnavailable,
+            format!("cannot start probe trigger {program:?}: {error}"),
+        )
+    })?;
+    let pid = child.id().ok_or_else(|| {
+        Error::new(
+            ErrorCode::TargetUnavailable,
+            "probe trigger started without a process identifier",
+        )
+    })?;
+    Ok(ProbeTriggerProcess { child, pid })
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(default)]
@@ -313,6 +385,27 @@ impl Gateway {
 
     pub(super) async fn agent_probe(&self, request: &ApiRequest) -> Result<Value> {
         let input = turn_input(&request.parameters)?;
+        let trigger: Option<ProbeTrigger> = request
+            .parameters
+            .get("trigger")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| Error::new(ErrorCode::InvalidArgument, error.to_string()))?;
+        if let Some(trigger) = &trigger {
+            if trigger.command.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "probe trigger command must not be empty",
+                ));
+            }
+            validate_argv(&trigger.command)?;
+        }
+        let trigger_cwd = trigger
+            .as_ref()
+            .and_then(|trigger| trigger.cwd.as_deref())
+            .map(|cwd| self.workspace_path(cwd, true))
+            .transpose()?;
         let entry = self.entry(required_session(request)?).await?;
         let output_offset = entry.handle.inferior_output_position();
         let initial = entry.handle.state();
@@ -453,6 +546,14 @@ impl Gateway {
         let started = tokio::time::Instant::now();
         let mut captures = Vec::new();
         let mut calls = 1usize;
+        let mut trigger = trigger;
+        // 2026-09-05: Keeping this guard inside the wall-time future discarded
+        // an already-finished trigger's exit status when the probe timed out.
+        // Retain it here so failure responses preserve the triggering evidence.
+        // 2026-09-05: Embedding tokio's Child directly in this large async
+        // state machine overflowed callers' test-thread stack. Keep the guard
+        // heap-backed without changing its cancellation-on-drop lifetime.
+        let mut trigger_process: Option<Box<ProbeTriggerProcess>> = None;
         // 2026-08-28: Applying the wall budget only to stop waits let capture
         // commands exceed it repeatedly. Bound the complete experiment body.
         let run_result: Result<Value> =
@@ -484,6 +585,15 @@ impl Gateway {
                         // 2026-09-01: Counted breakpoint probes previously
                         // required a separate run call to feed menu input.
                         // Feed once after the breakpoint is armed.
+                        // 2026-09-05: Socket-driven probes previously required
+                        // a second client to race an external process against
+                        // this blocking call. Start one command only after the
+                        // breakpoint is armed and the inferior is resumed, and
+                        // before PTY input can itself stop the target.
+                        if let Some(trigger) = trigger.take() {
+                            trigger_process =
+                                Some(Box::new(start_probe_trigger(trigger, trigger_cwd.clone())?));
+                        }
                         let remaining = Duration::from_millis(budget.wall_time_ms)
                             .checked_sub(started.elapsed())
                             .ok_or_else(|| Error::new(ErrorCode::Timeout, "probe timed out"))?;
@@ -516,42 +626,46 @@ impl Gateway {
                     }
                 }
                 let serialized = serde_json::to_vec(&captures)?;
-                if serialized.len() > budget.max_context_bytes {
+                let mut result = if serialized.len() > budget.max_context_bytes {
                     let uri = self.put_artifact(
                         Some(entry.handle.id()),
                         &serialized,
                         "probe-observations",
                     )?;
-                    let mut result = json!({
+                    json!({
                         "captures": [],
                         "artifact": uri,
                         "capture_count": captures.len(),
                         "truncated": true
-                    });
-                    if let Some(input) = input_result {
-                        result["input"] = input;
-                    }
-                    Ok(result)
+                    })
                 } else {
-                    let mut result = json!({
+                    json!({
                         "captures": captures,
                         "capture_count": captures.len(),
                         "truncated": false
-                    });
-                    if let Some(input) = input_result {
-                        result["input"] = input;
-                    }
-                    Ok(result)
+                    })
+                };
+                if let Some(input) = input_result {
+                    result["input"] = input;
                 }
+                Ok(result)
             })
             .await
             {
                 Ok(result) => result,
                 Err(_) => Err(Error::new(ErrorCode::Timeout, "probe timed out")),
             };
+        let trigger_result = if let Some(trigger) = trigger_process {
+            Some((*trigger).finish().await)
+        } else {
+            None
+        };
         let cleanup = breakpoint.remove().await;
         match run_result {
             Ok(mut result) => {
+                if let Some(trigger) = trigger_result {
+                    result["trigger"] = trigger;
+                }
                 let cleanup_error = cleanup.err();
                 // 2026-08-28: continue_after_capture stopped after the final
                 // hit. Resume only after the temporary breakpoint is removed.
@@ -594,7 +708,10 @@ impl Gateway {
                 }
                 Ok(result)
             }
-            Err(error) => {
+            Err(mut error) => {
+                if let Some(trigger) = trigger_result {
+                    error.details.get_or_insert_with(|| json!({}))["trigger"] = trigger;
+                }
                 let cleanup_error = cleanup.err();
                 operation.status = if error.code == ErrorCode::Timeout {
                     OperationStatus::TimedOut
