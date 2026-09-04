@@ -6,7 +6,9 @@ task traversal requires a trusted, matching `vmlinux`. An x86-64 QEMU stub can
 also provide the bounded symbol-free bootstrap and module views below. GDB/AI
 does not auto-load target scripts or invent typed symbols.
 
-`gdb_kernel` exposes two actions:
+`gdb_kernel` exposes two actions. Requesting `dmesg` may execute the exact
+[`vmlinux-gdb.py` companion](https://docs.kernel.org/dev-tools/gdb-kernel-debugging.html)
+generated beside the current `vmlinux`; no separate configuration is required:
 
 - `inspect` returns bounded semantic observations;
 - `monitor` runs only the first-word verbs in `security.monitor_allowlist`,
@@ -27,6 +29,7 @@ The `inspect` views are:
 | `init_task` | Address of the initial task |
 | `tasks` | Paged `task_struct.tasks` traversal with PID, TGID, name, and current marker |
 | `modules` | Paged typed or symbol-free module list with address, name, runtime base, size, and segments |
+| `dmesg` | Bounded tail of the kernel log through matching Linux GDB helpers |
 | `stack` | Bounded kernel stack frames |
 | `panic` | Standard bounded stop snapshot with kernel provenance |
 

@@ -183,6 +183,7 @@ async fn qemu_memory_map(
 
 const KERNEL_SYMBOL_PREFIX: &str = "gdbai-kernel-symbols:";
 const KERNEL_PAGE_TABLE_PREFIX: &str = "gdbai-kernel-page-table:";
+const KERNEL_DMESG_PREFIX: &str = "gdbai-kernel-dmesg:";
 
 fn prefixed_json_output(output: &[u8], prefix: &str, missing: &str) -> Result<Value> {
     let output = String::from_utf8_lossy(output);
@@ -732,6 +733,58 @@ impl Gateway {
             .await
     }
 
+    async fn kernel_dmesg(
+        &self,
+        entry: &SessionEntry,
+        parameters: &Value,
+        state: &crate::domain::SessionState,
+    ) -> Result<Value> {
+        let limit = bounded_limit(parameters, 128, self.config.limits.value_children)?;
+        entry
+            .handle
+            .stable_observation(
+                state,
+                Box::pin(async {
+                    // 2026-09-05: Kernel Agents previously had to source a
+                    // build helper and parse the complete lx-dmesg terminal
+                    // stream. Discover the matching companion and retain only
+                    // the requested log tail in one stopped observation.
+                    let script = format!(
+                        "{}\n_gdbai_kernel_dmesg({limit})",
+                        include_str!("kernel_dmesg.py")
+                    );
+                    let reply = entry
+                        .handle
+                        .command_with_timeout(
+                            MiCommand::new("-interpreter-exec")?
+                                .bare("console")?
+                                .string(format!(
+                                    "python exec({})",
+                                    serde_json::to_string(&script)?
+                                )),
+                            kernel_observation_timeout(self.config.server.command_timeout()),
+                        )
+                        .await?;
+                    let mut result = prefixed_json_output(
+                        &command_output(&reply),
+                        KERNEL_DMESG_PREFIX,
+                        "GDB omitted the bounded kernel log",
+                    )?;
+                    result["view"] = Value::String("dmesg".into());
+                    result["limit"] = Value::from(limit);
+                    result["stop_id"] = json!(state.stop_id);
+                    result["source"] = json!({
+                        "provider": "linux-kernel",
+                        "version": LINUX_KERNEL_PROVIDER_VERSION,
+                        "mechanism": "linux-gdb-scripts"
+                    });
+                    result["evidence_seq"] = Value::from(reply.evidence_seq);
+                    Ok(result)
+                }),
+            )
+            .await
+    }
+
     pub(super) async fn kernel_inspect(&self, request: &ApiRequest) -> Result<Value> {
         if !self.config.security.kernel_enabled {
             return Err(Error::new(
@@ -1049,6 +1102,7 @@ impl Gateway {
             }
             "tasks" => self.kernel_tasks(request, &entry, &state).await,
             "modules" => self.kernel_modules(request, &entry, &state).await,
+            "dmesg" => self.kernel_dmesg(&entry, &request.parameters, &state).await,
             "capabilities" => {
                 let names_reply = entry
                     .handle

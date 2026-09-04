@@ -138,6 +138,105 @@ async fn call(gateway: &Gateway, caller: &Caller, request: ApiRequest) -> ApiRes
 }
 
 #[tokio::test]
+async fn loads_matching_kernel_helpers_for_bounded_dmesg() {
+    if !support::require_commands(&["cc", "gdb"]) {
+        return;
+    }
+
+    let directory = tempdir().unwrap();
+    let executable = directory.path().join("vmlinux");
+    let source = directory.path().join("kernel.c");
+    std::fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0"])
+            .arg(source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(
+        directory.path().join("vmlinux-gdb.py"),
+        "import gdb\nclass Dmesg(gdb.Command):\n    def __init__(self):\n        super().__init__('lx-dmesg', gdb.COMMAND_DATA)\n    def invoke(self, arg, from_tty):\n        for index in range(6):\n            gdb.write('[%d.000000] helper line %d\\n' % (index, index))\nDmesg()\n",
+    )
+    .unwrap();
+
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("kernel-helper-test");
+    let created = call(
+        &gateway,
+        &caller,
+        request("create-helper", None, "session.create", None, json!({})),
+    )
+    .await;
+    let session_id = created.session_id.as_ref().unwrap();
+    let lease_id = created.result.as_ref().unwrap()["write_lease"]["lease_id"]
+        .as_str()
+        .unwrap();
+    let launched = call(
+        &gateway,
+        &caller,
+        request(
+            "launch-helper",
+            Some(session_id),
+            "target.launch",
+            created.revision,
+            json!({
+                "program": executable,
+                "lease_id": lease_id,
+                "stop": "main"
+            }),
+        ),
+    )
+    .await;
+    let stop_id = launched
+        .state
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    let dmesg = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-helper-dmesg",
+            Some(session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "dmesg", "limit": 2, "stop_id": stop_id}),
+        ),
+    )
+    .await;
+    let result = dmesg.result.as_ref().unwrap();
+    assert_eq!(
+        result["lines"],
+        json!(["[4.000000] helper line 4", "[5.000000] helper line 5"])
+    );
+    assert_eq!(result["total_lines"], 6);
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["helper"], "vmlinux-gdb.py");
+    assert_eq!(result["source"]["mechanism"], "linux-gdb-scripts");
+
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     let Some((kernel_image, vmlinux, module)) = kernel_artifacts() else {
         return;
@@ -380,6 +479,10 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
         "unexpected kernel version: {version_result}"
     );
 
+    let mut helper = vmlinux.as_os_str().to_owned();
+    helper.push("-gdb.py");
+    let has_kernel_helpers = PathBuf::from(helper).is_file();
+
     let base = call(
         &gateway,
         &caller,
@@ -525,6 +628,28 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     assert!(loaded_module["size"].as_u64().is_some_and(|size| size > 0));
     if let Ok(layout) = std::env::var("GDB_AI_KERNEL_MODULE_LAYOUT") {
         assert_eq!(loaded_module["layout"], layout);
+    }
+    if has_kernel_helpers {
+        let dmesg = call(
+            &gateway,
+            &caller,
+            request(
+                "inspect-kernel-dmesg",
+                Some(&session_id),
+                "kernel.inspect",
+                None,
+                json!({"view": "dmesg", "stop_id": module_stop_id, "limit": 8}),
+            ),
+        )
+        .await;
+        let result = dmesg.result.as_ref().unwrap();
+        assert!(
+            result["lines"]
+                .as_array()
+                .is_some_and(|lines| !lines.is_empty() && lines.len() <= 8),
+            "matching Linux helpers must return a bounded kernel log: {result}"
+        );
+        assert_eq!(result["source"]["mechanism"], "linux-gdb-scripts");
     }
 
     let panic_breakpoint = call(

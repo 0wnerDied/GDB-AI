@@ -10,7 +10,7 @@ use crate::{
     session::SessionCapabilities,
 };
 
-pub const LINUX_KERNEL_PROVIDER_VERSION: &str = "1.1.0";
+pub const LINUX_KERNEL_PROVIDER_VERSION: &str = "1.2.0";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProviderDescriptor {

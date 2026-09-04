@@ -912,6 +912,7 @@ impl CanonicalMethod {
                         "init_task",
                         "tasks",
                         "modules",
+                        "dmesg",
                         "stack",
                         "panic",
                     ]),

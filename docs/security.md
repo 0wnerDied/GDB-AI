@@ -12,6 +12,9 @@ Target paths are canonicalized beneath configured workspace roots; relative
 paths resolve from those roots rather than the server process directory.
 Remote connections that name an executable also set GDB's working directory
 to its parent, so subsequent raw console file paths resolve there.
+Target auto-load remains disabled. A `kernel.inspect` `dmesg` request may
+explicitly execute the exact `vmlinux-gdb.py` companion beside the current
+`vmlinux`; that build helper runs with the GDB process's host permissions.
 Bubblewrap hardening is disabled by default. Operators may select `auto` or
 `required` for filesystem isolation. Observation profiles also isolate the
 network; `lab_mutation` and `raw_admin` retain it for remote GDB targets.

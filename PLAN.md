@@ -595,6 +595,10 @@ Complete only the shared fixes demonstrated by these runs:
 - [ ] Detect matching Linux `CONFIG_GDB_SCRIPTS` helpers and project the proven
   `lx-symbols`, module, task, dmesg, current/per-CPU, and address-translation
   semantics as bounded kernel views; keep the typed provider as the fallback.
+  The dmesg path now discovers the exact generated `vmlinux-gdb.py` companion
+  and returns its bounded log tail in one stopped observation. A matching
+  public Linux 6.1 run reduced 340 helper lines to the requested eight lines
+  and 574 response bytes in 48 ms.
 - [x] Decode exact requested kallsyms and per-CPU current tasks inside GDB for
   measured Linux 5.15 through 7.2 layouts, returning only semantic facts.
 - [x] Resolve stripped module identity and validated memory segments in the

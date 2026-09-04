@@ -318,7 +318,7 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_kernel",
         // 2026-09-04: Agents guessed `what` and promoted view names to actions.
         // Spell out action/view and view-specific fields beside the schema.
-        description: "Use action=inspect plus view=bootstrap|symbols|page_table|capabilities|version|base|current_task|init_task|tasks|modules|stack|panic; page_table requires address_expression, symbols requires names=[...], and bootstrap may take names to return layout, exact kallsyms, current tasks, and loaded modules together; action=monitor takes command.",
+        description: "Use action=inspect plus view=bootstrap|symbols|page_table|capabilities|version|base|current_task|init_task|tasks|modules|dmesg|stack|panic; page_table requires address_expression, symbols requires names=[...], dmesg returns a bounded tail through matching Linux GDB helpers, and bootstrap may take names to return layout, exact kallsyms, current tasks, and loaded modules together; action=monitor takes command.",
         discriminator: Some("action"),
         actions: KERNEL_ACTIONS,
         read_only: false,
