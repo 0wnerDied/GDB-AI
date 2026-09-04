@@ -200,7 +200,9 @@ The `input` field writes the inferior PTY. For socket or other external events,
 set `trigger.command` to a no-shell command array and optionally set its
 workspace `cwd`. GDB/AI starts it after the breakpoint is armed and the target
 runs, then reports its process status and bounded nonempty stdout/stderr with
-the probe result. Each stream includes its total byte count and truncation state.
+the probe result. A resumed probe lets the command finish within its remaining
+wall-time budget; a stopped probe cleans it up immediately. Each stream includes
+its total byte count and truncation state.
 The result reports bounded `output` produced during the call, plus
 `settled_by: "stopped"`, one `stop_id`, and requested observations, or
 `settled_by: "exited"` after normal termination. Use

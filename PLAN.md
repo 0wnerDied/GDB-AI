@@ -486,6 +486,10 @@ MCP session ID to the current stateless protocol, while explicit metadata and
 established stateful sessions retain validation. A minimal live client completed
 both `tools/list` and `tools/call` on their first requests without initialization,
 protocol headers, or `_meta`.
+The same replay's continued probe killed its host-side client immediately after
+capture, discarding the response generated once the target resumed. Continued
+probe policies now wait for that client within the existing wall-time budget;
+the stopped-at-hit policy retains immediate cleanup.
 
 ### Blind kernel exploit-speed qualification
 

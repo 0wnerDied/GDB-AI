@@ -183,7 +183,7 @@ const TOOLS: &[ToolProjection] = &[
         // 2026-09-04: Repeated blind Agents overlooked the probe action nested
         // under gdb_run and rebuilt it from several debugger turns. Surface
         // the existing one-call workflow under the operation they search for.
-        description: "Arm a temporary breakpoint on a stopped or running target; restart=true reruns the current target first, and a stopped target resumes automatically. input is PTY data and trigger.command starts one host process after arming and returns bounded stdout/stderr. Skip hits and capture expressions, stack, memory, output, and inspect views; continue_to_stop instead inspects the following stop/exit. kernel_module_offset resolves a loaded kernel module.",
+        description: "Arm a temporary breakpoint on a stopped or running target; restart=true reruns the current target first, and a stopped target resumes automatically. input is PTY data and trigger.command starts one host process after arming and returns bounded stdout/stderr; resumed policies wait for it within the remaining budget. Skip hits and capture expressions, stack, memory, output, and inspect views; continue_to_stop instead inspects the following stop/exit. kernel_module_offset resolves a loaded kernel module.",
         discriminator: None,
         actions: PROBE_ACTIONS,
         read_only: false,

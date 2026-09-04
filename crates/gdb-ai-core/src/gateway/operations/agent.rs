@@ -51,8 +51,22 @@ struct ProbeTriggerProcess {
 }
 
 impl ProbeTriggerProcess {
-    async fn finish(mut self) -> Value {
-        let mut result = match self.child.try_wait() {
+    // 2026-09-05: Resumed probes killed their network client before it could
+    // return the target response. Wait only within the probe's remaining
+    // budget; probes that leave the target stopped still clean up immediately.
+    async fn finish(mut self, completion_timeout: Option<Duration>) -> Value {
+        let completion = match self.child.try_wait() {
+            Ok(Some(status)) => Ok(Some(status)),
+            Ok(None) => match completion_timeout {
+                Some(timeout) => match tokio::time::timeout(timeout, self.child.wait()).await {
+                    Ok(status) => status.map(Some),
+                    Err(_) => Ok(None),
+                },
+                None => Ok(None),
+            },
+            Err(error) => Err(error),
+        };
+        let mut result = match completion {
             Ok(Some(status)) => trigger_status(self.pid, status, false),
             Ok(None) => match self.child.kill().await {
                 Ok(()) => match self.child.wait().await {
@@ -844,7 +858,11 @@ impl Gateway {
             Err(error) => Err(error),
         };
         if let Some(trigger) = trigger_process {
-            let trigger = (*trigger).finish().await;
+            let completion_timeout =
+                (outcome.is_ok() && stop_policy != "on_condition").then(|| {
+                    Duration::from_millis(budget.wall_time_ms).saturating_sub(started.elapsed())
+                });
+            let trigger = (*trigger).finish(completion_timeout).await;
             match &mut outcome {
                 Ok(result) => result["trigger"] = trigger,
                 Err(error) => {
@@ -1040,7 +1058,7 @@ mod tests {
             assert!(tokio::time::Instant::now() < deadline);
             tokio::task::yield_now().await;
         }
-        let result = trigger.finish().await;
+        let result = trigger.finish(None).await;
         assert_eq!(result["stdout"]["total_bytes"], written);
         assert_eq!(result["stdout"]["truncated"], true);
         assert_eq!(

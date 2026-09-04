@@ -306,7 +306,7 @@ async fn probe_and_experiment_capture_and_clean_up() {
 
 #[tokio::test]
 async fn probe_starts_an_external_trigger_after_arming() {
-    if !support::require_commands(&["gdb", "cc", "false", "touch"]) {
+    if !support::require_commands(&["gdb", "cc", "false", "python3", "touch"]) {
         return;
     }
 
@@ -413,13 +413,50 @@ async fn probe_starts_an_external_trigger_after_arming() {
     assert!(probed.state.as_ref().unwrap().breakpoints.is_empty());
 
     std::fs::remove_file(&sentinel).unwrap();
+    let completed_trigger = call(
+        &gateway,
+        &caller,
+        request(
+            "probe-completed-trigger",
+            Some(session_id),
+            "agent.probe",
+            probed.revision,
+            json!({
+                "lease_id": lease_id,
+                "function": "marker",
+                "restart": true,
+                "trigger": {
+                    "command": [
+                        "python3",
+                        "-c",
+                        "from pathlib import Path; import time; Path('triggered').touch(); time.sleep(.1); print('trigger-finished')"
+                    ],
+                    "cwd": directory.path()
+                },
+                "stop_policy": "continue_after_capture",
+                "budget": {"max_calls": 4, "wall_time_ms": 5000}
+            }),
+        ),
+    )
+    .await;
+    let completed_result = completed_trigger.result.as_ref().unwrap();
+    assert_eq!(completed_result["capture_count"], 1);
+    assert_eq!(completed_result["continued"], true);
+    assert_eq!(completed_result["trigger"]["success"], true);
+    assert_eq!(completed_result["trigger"]["terminated_after_probe"], false);
+    assert_eq!(
+        completed_result["trigger"]["stdout"]["text"],
+        "trigger-finished\n"
+    );
+
+    std::fs::remove_file(&sentinel).unwrap();
     let timed_out = gateway
         .dispatch(
             request(
                 "probe-failed-trigger",
                 Some(session_id),
                 "agent.probe",
-                probed.revision,
+                completed_trigger.revision,
                 json!({
                     "lease_id": lease_id,
                     "function": "marker",

@@ -277,13 +277,15 @@ under `after.observations`; the outer state and output are not duplicated.
 `trigger: {"command": ["python3", "exploit.py"], "cwd": "..."}`. GDB/AI starts
 the command without a shell after the breakpoint is armed and the inferior is
 running, drains and returns up to 64 KiB from each nonempty stdout/stderr stream,
-and terminates it when the probe finishes, including any `continue_to_stop`
-phase. Each returned stream states its lossless encoding, total bytes, and
-whether its retained prefix was truncated. The result, or timeout error details,
-also reports the trigger PID, exit code, and whether it was still running. `cwd`
-must be inside a configured workspace; the command itself runs on the GDB/AI
-host with the server account and environment, and inherits the server working
-directory when `cwd` is omitted.
+and returns its status. When the probe resumes the target, the command may finish
+within the remaining wall-time budget; otherwise GDB/AI terminates it. A probe
+that leaves the target stopped terminates a still-running command immediately.
+Each returned stream states its lossless encoding, total bytes, and whether its
+retained prefix was truncated. The result, or timeout error details, also reports
+the trigger PID, exit code, and whether it was still running. `cwd` must be inside
+a configured workspace; the command itself runs on the GDB/AI host with the
+server account and environment, and inherits the server working directory when
+`cwd` is omitted.
 Its capture items accept an expression, stack, or exact memory window selected
 by `address_expression` and `length`. A module-offset probe may start before a
 stripped PIE maps; its temporary breakpoint is rebound and removed internally.
