@@ -12,9 +12,9 @@ Bubblewrap hardening is disabled by default. Operators may select `auto` or
 
 Profiles separate offline observation, live observation, debug control,
 laboratory mutation, and raw administration. Raw access also requires an
-operator-enabled transport. Raw console uses an explicit host-safe verb
-allowlist, and raw MI cannot bypass workspace, attach, remote endpoint,
-inferior TTY, startup-setting, or process-lifecycle policy.
+operator-enabled transport. Raw console accepts GDB's complete single-command
+surface after that authorization; raw MI cannot bypass workspace, attach,
+remote endpoint, inferior TTY, startup-setting, or process-lifecycle policy.
 
 The default local profile is `lab_mutation`, which permits ordinary inferior
 input and debugger mutations needed by exploit Agents. Operators may configure

@@ -137,8 +137,10 @@ pub fn effect_for_method(method: CanonicalMethod) -> Effect {
 }
 
 pub fn validate_console_command(command: &str) -> Result<()> {
-    // 2026-08-28: Prefix validation alone allowed a newline to append a
-    // second denied CLI command inside one interpreter-exec request.
+    // 2026-09-04: The host-safe verb allowlist rejected essential debugger
+    // commands such as `add-symbol-file` after raw-admin authorization. Keep
+    // only the framing limits that protect the MI transport; raw means GDB's
+    // complete single-command console surface.
     if command.is_empty()
         || command.len() > 16 * 1024
         || command
@@ -150,57 +152,7 @@ pub fn validate_console_command(command: &str) -> Result<()> {
             "raw console command is empty, oversized, or multiline",
         ));
     }
-    let normalized = command.trim().to_ascii_lowercase();
-    let verb = normalized.split_whitespace().next().unwrap_or_default();
-    // 2026-08-28: GDB accepts abbreviated commands, so a deny-list for
-    // "shell", "python", and "quit" could be bypassed with sh, py, or q.
-    // Raw console remains useful through an explicit host-safe command set.
-    let allowed = [
-        "apropos",
-        "backtrace",
-        "break",
-        "catch",
-        "condition",
-        "continue",
-        "delete",
-        "disable",
-        "disassemble",
-        "down",
-        "enable",
-        "finish",
-        "frame",
-        "help",
-        "ignore",
-        "info",
-        "list",
-        "next",
-        "nexti",
-        // 2026-08-31: Rejecting GDB's standard `p` alias while permitting
-        // `print` made common read-only raw-admin inspection fail needlessly.
-        "p",
-        "print",
-        "ptype",
-        "rbreak",
-        "run",
-        "show",
-        "step",
-        "stepi",
-        "tbreak",
-        "thread",
-        "until",
-        "up",
-        "watch",
-        "whatis",
-        "x",
-    ];
-    if !allowed.contains(&verb) {
-        Err(Error::new(
-            ErrorCode::PolicyDenied,
-            "raw console command is outside the host-safe allowlist",
-        ))
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -240,20 +192,17 @@ mod tests {
     }
 
     #[test]
-    fn console_validation_blocks_host_escape_classes() {
-        for command in [
-            "shell id",
-            " Python ",
-            "set auto-load yes",
-            "monitor reset",
-            "show language\nshell id",
-            "sh id",
-            "q",
-            "target remote 127.0.0.1:1234",
-        ] {
+    fn console_validation_preserves_mi_framing() {
+        for command in ["", "show language\nshell id", "show language\0shell id"] {
             assert!(validate_console_command(command).is_err(), "{command}");
         }
-        assert!(validate_console_command("info registers").is_ok());
-        assert!(validate_console_command("p &main_arena").is_ok());
+        for command in [
+            "info registers",
+            "add-symbol-file module.ko 0xffffffffc0000000",
+            "target remote 127.0.0.1:1234",
+            "shell true",
+        ] {
+            assert!(validate_console_command(command).is_ok(), "{command}");
+        }
     }
 }
