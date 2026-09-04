@@ -175,7 +175,7 @@ const TOOLS: &[ToolProjection] = &[
         // 2026-09-04: Repeated blind Agents overlooked the probe action nested
         // under gdb_run and rebuilt it from several debugger turns. Surface
         // the existing one-call workflow under the operation they search for.
-        description: "Set a temporary breakpoint, send exact input, skip hits, capture expressions, stack, memory, and output, then clean up in one call.",
+        description: "Arm a temporary breakpoint on a stopped or running target, send exact input, skip hits, capture expressions, stack, memory, and output, then clean up in one call.",
         discriminator: None,
         actions: PROBE_ACTIONS,
         read_only: false,

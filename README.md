@@ -232,8 +232,9 @@ Projected terminal state reports `exit_code` as a decimal integer instead of
 GDB/MI's octal text.
 A standalone `gdb_batch` accepts explicit names when the same view is needed
 more than once.
-`gdb_probe` combines a temporary breakpoint, optional byte-exact input,
-`ignore_count`, continue, bounded capture and output, and cleanup in one call.
+`gdb_probe` arms a temporary breakpoint on a stopped or already-running target
+and combines optional byte-exact input, `ignore_count`, bounded capture, output,
+and cleanup in one call. A running target is not interrupted or resumed first.
 Its capture items accept an expression, stack, or exact memory window selected
 by `address_expression` and `length`. A module-offset probe may start before a
 stripped PIE maps; its temporary breakpoint is rebound and removed internally.

@@ -12,6 +12,11 @@ __attribute__((noinline)) static void marker(void)
   puts("marker reached");
 }
 
+__attribute__((noinline)) static void report_input(int input)
+{
+  printf("input received: %c\n", input);
+}
+
 int main(void)
 {
   const char *environment = getenv("GDB_AI_TEST_ENV");
@@ -27,6 +32,6 @@ int main(void)
   marker();
 #endif
   input = getchar();
-  printf("input received: %c\n", input);
+  report_input(input);
   return global_value == 42 ? 0 : 1;
 }

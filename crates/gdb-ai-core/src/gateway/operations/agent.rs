@@ -18,8 +18,8 @@ use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
     domain::{
-        BreakpointId, DomainEvent, OperationId, OperationRecord, OperationStatus, StopReason,
-        WaitBaseline,
+        BreakpointId, DomainEvent, InferiorStatus, OperationId, OperationRecord, OperationStatus,
+        StopReason, WaitBaseline,
     },
     gateway::{Gateway, SessionEntry},
     normalize::breakpoint_number as inserted_breakpoint_number,
@@ -110,9 +110,17 @@ fn require_probe_hit(
     stopped: &crate::domain::SessionState,
     expected_breakpoint: &str,
 ) -> Result<()> {
-    let new_stop = stopped.stop_id.is_some()
-        && stopped.stop_id != baseline.stop_id
-        && stopped.execution_epoch > baseline.execution_epoch;
+    // 2026-09-04: Arming an already-running inferior produces a new stop
+    // without another resume, so its execution epoch is unchanged. Preserve
+    // strict epoch advancement for probes that started from a stopped target.
+    let execution_reached_probe = stopped.execution_epoch > baseline.execution_epoch
+        || (stopped.execution_epoch == baseline.execution_epoch
+            && baseline
+                .inferiors
+                .values()
+                .any(|inferior| inferior.status == InferiorStatus::Running));
+    let new_stop =
+        stopped.stop_id.is_some() && stopped.stop_id != baseline.stop_id && execution_reached_probe;
     let breakpoint_matches = matches!(
         &stopped.stop_reason_detail,
         Some(StopReason::Breakpoint {
@@ -308,7 +316,16 @@ impl Gateway {
         let entry = self.entry(required_session(request)?).await?;
         let output_offset = entry.handle.inferior_output_position();
         let initial = entry.handle.state();
-        require_stopped_context(&request.parameters, &initial)?;
+        let initially_running = initial
+            .inferiors
+            .values()
+            .any(|inferior| inferior.status == InferiorStatus::Running);
+        // 2026-09-04: Requiring a stopped context rejected live services and
+        // forced Agents to rebuild this operation from separate debugger
+        // calls. A running inferior can accept the breakpoint in place.
+        if !initially_running {
+            require_stopped_context(&request.parameters, &initial)?;
+        }
         let budget: ObservationBudget = request
             .parameters
             .get("budget")
@@ -417,22 +434,30 @@ impl Gateway {
                 let mut input = input;
                 let mut input_result = None;
                 for hit in 1..=max_hits {
-                    if calls >= budget.max_calls {
-                        return Err(Error::new(
-                            ErrorCode::OutputLimit,
-                            "probe exhausted its debugger-call budget",
-                        ));
-                    }
                     let baseline = entry.handle.state();
-                    entry
-                        .handle
-                        .command(MiCommand::new("-exec-continue")?)
-                        .await?;
-                    calls += 1;
+                    let already_running = baseline
+                        .inferiors
+                        .values()
+                        .any(|inferior| inferior.status == InferiorStatus::Running);
+                    // A running baseline is already advancing toward the first
+                    // hit; only a captured stop needs another resume.
+                    if !already_running {
+                        if calls >= budget.max_calls {
+                            return Err(Error::new(
+                                ErrorCode::OutputLimit,
+                                "probe exhausted its debugger-call budget",
+                            ));
+                        }
+                        entry
+                            .handle
+                            .command(MiCommand::new("-exec-continue")?)
+                            .await?;
+                        calls += 1;
+                    }
                     if hit == 1 {
                         // 2026-09-01: Counted breakpoint probes previously
                         // required a separate run call to feed menu input.
-                        // Feed once after GDB accepts the first resume.
+                        // Feed once after the breakpoint is armed.
                         let remaining = Duration::from_millis(budget.wall_time_ms)
                             .checked_sub(started.elapsed())
                             .ok_or_else(|| Error::new(ErrorCode::Timeout, "probe timed out"))?;
@@ -691,7 +716,8 @@ impl Gateway {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{InferiorId, SessionId, SessionState, StopId, ThreadId};
+    use crate::domain::{InferiorId, InferiorState, SessionId, SessionState, StopId, ThreadId};
+    use std::collections::BTreeMap;
 
     #[test]
     fn accepts_only_the_probe_breakpoint_and_scope() {
@@ -742,5 +768,32 @@ mod tests {
         });
 
         assert!(require_probe_hit(&json!({}), &baseline, &stopped, "7").is_err());
+    }
+
+    #[test]
+    fn accepts_a_probe_hit_from_an_already_running_inferior() {
+        let mut baseline = SessionState::creating(SessionId("sess_running_probe".into()));
+        baseline.execution_epoch = 3;
+        baseline.inferiors.insert(
+            "i1".into(),
+            InferiorState {
+                id: InferiorId("inf_running".into()),
+                backend_id: "i1".into(),
+                pid: Some(42),
+                generation: 1,
+                status: InferiorStatus::Running,
+                exit_code: None,
+                threads: BTreeMap::new(),
+            },
+        );
+        let mut stopped = baseline.clone();
+        stopped.stop_id = Some(StopId("stop_probe".into()));
+        stopped.inferiors.get_mut("i1").unwrap().status = InferiorStatus::Stopped;
+        stopped.stop_reason_detail = Some(StopReason::Breakpoint {
+            backend_number: Some("7".into()),
+            disposition: None,
+        });
+
+        require_probe_hit(&json!({}), &baseline, &stopped, "7").unwrap();
     }
 }

@@ -184,6 +184,8 @@ capture supplies `address_expression` and `length`. The call queues the whole
 input, skips intermediate hits, returns output and observations, and cleans up
 its temporary breakpoint. A module offset may be supplied before a stripped
 PIE maps; GDB/AI rebinds it when the mapping appears.
+For an already-running target, the call arms and waits without a separate
+interrupt or resume.
 `gdb_run` action `probe` remains an equivalent compatibility form.
 
 The result reports bounded `output` produced during the call, plus

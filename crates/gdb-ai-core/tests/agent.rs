@@ -235,6 +235,42 @@ async fn probe_and_experiment_capture_and_clean_up() {
         Some(2)
     );
 
+    let running = call(
+        &gateway,
+        &caller,
+        request(
+            "restart-running",
+            Some(&session_id),
+            "target.restart",
+            experiment.revision,
+            json!({
+                "lease_id": lease_id,
+                "stop": "none",
+                "wait": {"until": "running", "timeout_ms": 5000}
+            }),
+        ),
+    )
+    .await;
+    let running_probe = call(
+        &gateway,
+        &caller,
+        request(
+            "probe-running",
+            Some(&session_id),
+            "agent.probe",
+            running.revision,
+            json!({
+                "lease_id": lease_id,
+                "function": "report_input",
+                "input": {"text": "y"},
+                "capture": [{"stack": {"limit": 1}}],
+                "budget": {"max_calls": 4, "wall_time_ms": 5000}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(running_probe.result.as_ref().unwrap()["capture_count"], 1);
+
     let breakpoints = call(
         &gateway,
         &caller,
