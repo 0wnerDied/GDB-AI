@@ -205,6 +205,7 @@ pub(super) struct SessionWorker {
     log_output: ByteRing,
     next_token: u64,
     timed_out_tokens: HashSet<u64>,
+    interrupt_fallback_at: Option<tokio::time::Instant>,
     stream_limit: usize,
     command_timeout: Duration,
     values: BTreeMap<String, ValueBinding>,
@@ -350,6 +351,7 @@ impl SessionWorker {
             log_output,
             next_token: 1,
             timed_out_tokens: HashSet::new(),
+            interrupt_fallback_at: None,
             stream_limit: config.limits.tool_response_bytes,
             command_timeout: config.server.command_timeout(),
             values: BTreeMap::new(),
@@ -604,6 +606,9 @@ impl SessionWorker {
                     tracing::warn!(%error, "failed to rebind a pending module breakpoint");
                 }
             }
+            let interrupt_fallback = self
+                .interrupt_fallback_at
+                .unwrap_or_else(tokio::time::Instant::now);
             tokio::select! {
                 _ = journal_flush.tick() => {
                     if let Err(error) = self.journal.flush() {
@@ -651,6 +656,12 @@ impl SessionWorker {
                     if self.fatal {
                         let _ = self.backend.shutdown().await;
                         break;
+                    }
+                }
+                _ = tokio::time::sleep_until(interrupt_fallback), if self.interrupt_fallback_at.is_some() => {
+                    if let Err(error) = self.escalate_acknowledged_interrupt() {
+                        tracing::error!(%error, "failed to complete acknowledged interrupt");
+                        self.mark_failed();
                     }
                 }
             }
@@ -1593,6 +1604,9 @@ impl SessionWorker {
                     wake = wake.min(control.escalate_at);
                 }
             }
+            if let Some(interrupt_fallback) = self.interrupt_fallback_at {
+                wake = wake.min(interrupt_fallback);
+            }
 
             enum ExecutionInput {
                 Control(Option<ControlRequest>),
@@ -1713,6 +1727,7 @@ impl SessionWorker {
                 }
                 ExecutionInput::Deadline => {
                     let now = tokio::time::Instant::now();
+                    self.escalate_acknowledged_interrupt()?;
                     let should_escalate = pending_control
                         .as_ref()
                         .is_some_and(|control| !control.escalated && control.escalate_at <= now);
@@ -1822,17 +1837,37 @@ impl SessionWorker {
     }
 
     fn finish_interrupt(&mut self, result: Result<CommandReply>) -> Result<CommandReply> {
-        if result.is_ok()
-            && self
-                .reducer
-                .state()
-                .inferiors
-                .values()
-                .any(|inferior| inferior.status == InferiorStatus::Running)
-        {
-            self.backend.signal_interrupt()?;
+        if result.is_ok() && self.target_running() {
+            // 2026-09-04: Escalating as soon as GDB acknowledged an interrupt
+            // raced its queued stop notification, leaving a second SIGINT to
+            // poison the next resume. Give the ordered MI stop a bounded grace
+            // period and cancel the fallback as soon as state settles.
+            self.interrupt_fallback_at =
+                Some(tokio::time::Instant::now() + Duration::from_millis(250));
         }
         result
+    }
+
+    fn escalate_acknowledged_interrupt(&mut self) -> Result<()> {
+        let Some(deadline) = self.interrupt_fallback_at else {
+            return Ok(());
+        };
+        if deadline > tokio::time::Instant::now() {
+            return Ok(());
+        }
+        self.interrupt_fallback_at = None;
+        if self.target_running() {
+            self.backend.signal_interrupt()?;
+        }
+        Ok(())
+    }
+
+    fn target_running(&self) -> bool {
+        self.reducer
+            .state()
+            .inferiors
+            .values()
+            .any(|inferior| inferior.status == InferiorStatus::Running)
     }
 
     async fn execute_operation_until(
@@ -1930,6 +1965,9 @@ impl SessionWorker {
                         self.metrics.target_stop();
                     }
                     self.apply_event(event)?;
+                    if !self.target_running() {
+                        self.interrupt_fallback_at = None;
+                    }
                 }
                 Ok(Some((record, evidence_seq)))
             }

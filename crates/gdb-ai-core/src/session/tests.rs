@@ -843,6 +843,11 @@ async fn transaction_resume_is_owned_and_interrupt_acknowledgement_stops() {
         .wait(WaitUntil::Running, Duration::from_secs(2))
         .await
         .unwrap();
+    let late_stop = session
+        .wait(WaitUntil::Stopped, Duration::from_millis(350))
+        .await
+        .unwrap_err();
+    assert_eq!(late_stop.code, ErrorCode::Timeout);
     // A harmless successful reply models a remote stub acknowledging its MI
     // interrupt without producing the corresponding stop notification.
     session
