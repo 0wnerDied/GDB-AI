@@ -22,7 +22,22 @@ impl Gateway {
         value: &str,
         directory: bool,
     ) -> Result<std::path::PathBuf> {
-        let path = std::fs::canonicalize(value).map_err(|error| {
+        // 2026-09-04: Relative target paths were resolved from the server's
+        // process directory, so remote Agents could not name files inside an
+        // allowed workspace. Resolve them from the configured roots instead.
+        let requested = std::path::Path::new(value);
+        let candidate = if requested.is_relative() {
+            self.config
+                .security
+                .workspace_roots
+                .iter()
+                .map(|root| root.join(requested))
+                .find(|path| path.exists())
+                .unwrap_or_else(|| requested.to_owned())
+        } else {
+            requested.to_owned()
+        };
+        let path = std::fs::canonicalize(candidate).map_err(|error| {
             Error::new(
                 ErrorCode::InvalidArgument,
                 format!("cannot canonicalize path {value:?}: {error}"),
@@ -354,10 +369,12 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn workspace_file_paths_reject_special_files() {
+    fn workspace_file_paths_resolve_roots_and_reject_special_files() {
         let directory = tempdir().unwrap();
         let fifo = directory.path().join("source.fifo");
+        let target = directory.path().join("target.bin");
         nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        std::fs::write(&target, []).unwrap();
         let mut config = Config {
             artifacts: ArtifactConfig {
                 path: directory.path().join("artifacts"),
@@ -371,6 +388,7 @@ mod tests {
         config.security.workspace_roots = vec![directory.path().to_owned()];
         let gateway = Gateway::new(config).unwrap();
 
+        assert_eq!(gateway.workspace_path("target.bin", false).unwrap(), target);
         let error = gateway
             .workspace_path(&fifo.to_string_lossy(), false)
             .unwrap_err();
