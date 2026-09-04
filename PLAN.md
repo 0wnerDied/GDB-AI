@@ -454,6 +454,12 @@ The hand-written stateless client also failed four setup requests while adding
 duplicated protocol, method, and tool-name headers. Stateless HTTP now treats
 its already validated request metadata and JSON-RPC body as authoritative,
 without requiring the same routing fields in headers.
+A fresh minimal-client replay then completed discovery, create, and launch on
+the first request, confirming that fix. Two coalesced event waits each repeated
+the complete session registries even though the Agent needed only target state
+and the resumption cursor. Projected event waits now retain `event_seq` with a
+compact state summary; the canonical API keeps its full resynchronization
+snapshot.
 
 ### Blind kernel exploit-speed qualification
 
@@ -530,6 +536,8 @@ Complete only the shared fixes demonstrated by these runs:
   ordered semantic values without one Agent turn per address.
 - [x] Project direct restart under `gdb_run` so repeated exploit trials do not
   pair a first-instruction session restart with an immediate continue.
+- [x] Keep projected event resynchronization to its cursor and compact target
+  state instead of repeating every session registry.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

@@ -968,7 +968,7 @@ fn projected_mappings_keep_only_agent_address_semantics() {
 }
 
 #[test]
-fn coalesced_events_preserve_the_complete_resynchronization_state() {
+fn coalesced_events_preserve_the_compact_resynchronization_cursor() {
     let request = ApiRequest {
         api_version: API_VERSION.into(),
         request_id: "events".into(),
@@ -979,6 +979,7 @@ fn coalesced_events_preserve_the_complete_resynchronization_state() {
         parameters: json!({}),
     };
     let mut state = SessionState::creating(SessionId::parse("sess_test").unwrap());
+    state.event_seq = 47;
     state.limitations.push("resynchronization detail".into());
     let response = ApiResponse::success(
         &request,
@@ -988,9 +989,12 @@ fn coalesced_events_preserve_the_complete_resynchronization_state() {
 
     let result = tool_result(response, CanonicalMethod::EventsWait);
 
-    assert_eq!(
-        result["structuredContent"]["state"]["limitations"][0],
-        "resynchronization detail"
+    assert_eq!(result["structuredContent"]["result"]["event_seq"], 47);
+    assert_eq!(result["structuredContent"]["result"]["coalesced"], true);
+    assert!(
+        result["structuredContent"]["state"]
+            .get("limitations")
+            .is_none()
     );
     assert!(result["structuredContent"]["result"].get("state").is_none());
 }

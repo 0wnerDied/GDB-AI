@@ -646,16 +646,18 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         error,
         ..
     } = response;
-    let preserve_full_state = method == CanonicalMethod::EventsWait
-        && result
-            .as_ref()
-            .and_then(|result| result.get("coalesced"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        && state.is_some();
     // 2026-08-31: Remove only byte-identical nested command state here;
     // field-name removal also stripped explicitly requested target data.
     if let Some(Value::Object(result)) = result.as_mut() {
+        // 2026-09-05: Coalesced event replies copied every session registry to
+        // projected Agents. Preserve the resumption cursor and compact target
+        // state while the canonical API retains its full resync snapshot.
+        if method == CanonicalMethod::EventsWait
+            && result.get("coalesced").and_then(Value::as_bool) == Some(true)
+            && let Some(state) = state.as_ref()
+        {
+            result.insert("event_seq".into(), Value::from(state.event_seq));
+        }
         // 2026-08-31: Removing nested state by field name discarded the exact
         // state that satisfied execution.wait when the envelope had already
         // advanced. Only byte-equivalent state is redundant.
@@ -837,14 +839,7 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
     // 2026-08-31: MCP owns session routing and revisions. Echoing both after
     // every call consumed context without changing the next debugging action.
     if let Some(state) = state.as_ref() {
-        compact.insert(
-            "state".into(),
-            if preserve_full_state {
-                json!(state)
-            } else {
-                session_coordination_state(state)
-            },
-        );
+        compact.insert("state".into(), session_coordination_state(state));
     }
     if let Some(result) = result {
         compact.insert("result".into(), result);
