@@ -105,7 +105,9 @@ GDB_AI_KERNEL_RSP_ENDPOINT=127.0.0.1:1234 \
 
 When the stub is stopped in KPTI userspace, add
 `GDB_AI_KERNEL_EXPECT_PAGE_TABLE=paired-kernel`; the repeated bootstrap also
-checks that the temporary kernel CR3 was restored.
+checks that the temporary kernel CR3 was restored. Set
+`GDB_AI_KERNEL_COMMAND_TIMEOUT_MS=1000` to verify that the bounded kernel scan
+is not cut off by a shorter generic MI deadline.
 
 If that guest has a loaded module whose code can be triggered independently,
 add `GDB_AI_KERNEL_EXPECT_MODULE=name` and

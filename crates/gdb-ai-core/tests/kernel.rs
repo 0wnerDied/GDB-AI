@@ -647,6 +647,9 @@ async fn bootstraps_a_symbol_free_modern_kernel_over_qemu_rsp() {
     config.security.workspace_roots = vec![directory.path().to_owned()];
     config.security.remote_allowlist = vec![endpoint.clone()];
     config.security.kernel_enabled = true;
+    if let Ok(timeout) = std::env::var("GDB_AI_KERNEL_COMMAND_TIMEOUT_MS") {
+        config.server.command_timeout_ms = timeout.parse().unwrap();
+    }
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller {
         identity: "symbol-free-kernel-test".into(),

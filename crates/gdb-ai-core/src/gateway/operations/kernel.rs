@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use gdb_ai_mi::MiRecord;
 use serde_json::{Value, json};
@@ -23,6 +23,14 @@ use crate::{
 const X86_KERNEL_START: u64 = 0xffff_ffff_8000_0000;
 const X86_MODULE_START: u64 = 0xffff_ffff_c000_0000;
 const X86_MODULE_END: u64 = 0xffff_ffff_ff00_0000;
+const KERNEL_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn kernel_observation_timeout(configured: Duration) -> Duration {
+    // 2026-09-04: QEMU page-table walks and remote kernel image reads can
+    // exceed the generic MI deadline under TCG load. Keep those bounded
+    // observations alive so a legitimate scan cannot fence the session.
+    configured.max(KERNEL_OBSERVATION_TIMEOUT)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct KernelMapping {
@@ -150,6 +158,7 @@ fn kernel_cr3_script(body: &str) -> String {
 async fn qemu_memory_map(
     entry: &SessionEntry,
     kernel_page_table: bool,
+    timeout: Duration,
 ) -> Result<(Vec<KernelMapping>, u64)> {
     let body = "print('|'.join(line for line in gdb.execute('monitor info mem', to_string=True).splitlines() if line.startswith('ffffffff')))";
     let script = if kernel_page_table {
@@ -159,10 +168,11 @@ async fn qemu_memory_map(
     };
     let reply = entry
         .handle
-        .command(
+        .command_with_timeout(
             MiCommand::new("-interpreter-exec")?
                 .bare("console")?
                 .string(format!("python exec({})", serde_json::to_string(&script)?)),
+            timeout,
         )
         .await?;
     Ok((
@@ -412,7 +422,8 @@ impl Gateway {
         // of MiB of MI and journal data before the useful kernel
         // mappings. Capture it inside GDB and emit only global
         // kernel addresses so one semantic call stays bounded.
-        let (mut mappings, mut monitor_seq) = qemu_memory_map(entry, false).await?;
+        let timeout = kernel_observation_timeout(self.config.server.command_timeout());
+        let (mut mappings, mut monitor_seq) = qemu_memory_map(entry, false, timeout).await?;
         let mut kernel_page_table = false;
         // 2026-09-04: A stop inside a loadable module made the PC
         // mapping look like the kernel image. Select the first
@@ -420,7 +431,7 @@ impl Gateway {
         let image = if let Some(image) = select_kernel_image(&mappings) {
             image
         } else {
-            let (kernel_mappings, evidence_seq) = qemu_memory_map(entry, true).await?;
+            let (kernel_mappings, evidence_seq) = qemu_memory_map(entry, true, timeout).await?;
             let image = select_kernel_image(&kernel_mappings).ok_or_else(|| {
                 Error::new(
                     ErrorCode::CapabilityMissing,
@@ -487,10 +498,11 @@ impl Gateway {
         let command = format!("python exec({})", serde_json::to_string(&script)?);
         let reply = entry
             .handle
-            .command(
+            .command_with_timeout(
                 MiCommand::new("-interpreter-exec")?
                     .bare("console")?
                     .string(command),
+                kernel_observation_timeout(self.config.server.command_timeout()),
             )
             .await?;
         Ok((
@@ -1462,12 +1474,26 @@ impl Gateway {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde_json::json;
 
     use super::{
-        KernelMapping, kernel_module_text_offset, kernel_symbol_output, parse_qemu_memory_map,
-        requested_kernel_symbols, select_kernel_image,
+        KernelMapping, kernel_module_text_offset, kernel_observation_timeout, kernel_symbol_output,
+        parse_qemu_memory_map, requested_kernel_symbols, select_kernel_image,
     };
+
+    #[test]
+    fn preserves_longer_kernel_observation_deadlines() {
+        assert_eq!(
+            kernel_observation_timeout(Duration::from_secs(1)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            kernel_observation_timeout(Duration::from_secs(90)),
+            Duration::from_secs(90)
+        );
+    }
 
     #[test]
     fn parses_only_high_qemu_memory_mappings() {
