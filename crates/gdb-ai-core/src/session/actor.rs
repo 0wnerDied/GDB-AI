@@ -2044,14 +2044,16 @@ impl SessionWorker {
 
     fn apply_event_inner(&mut self, event: DomainEvent) -> Result<()> {
         let stopped = matches!(&event, DomainEvent::TargetStopped { .. });
-        if matches!(
-            &event,
-            DomainEvent::TargetStopped { .. }
-                | DomainEvent::InferiorExited { .. }
-                | DomainEvent::TargetDisconnected
-                | DomainEvent::TargetDetached
-                | DomainEvent::BackendExited { .. }
-        ) {
+        let attributed_exit = self.reducer.state().attributed_exit(&event);
+        if attributed_exit
+            || matches!(
+                &event,
+                DomainEvent::TargetStopped { .. }
+                    | DomainEvent::TargetDisconnected
+                    | DomainEvent::TargetDetached
+                    | DomainEvent::BackendExited { .. }
+            )
+        {
             self.active_resume_operation = None;
         }
         if let DomainEvent::BreakpointDeleted { backend_number } = &event {
@@ -2077,14 +2079,14 @@ impl SessionWorker {
         if matches!(&event, DomainEvent::TargetRunning { .. }) {
             self.inferior_output.reset();
         }
-        let invalidates_values = matches!(
-            &event,
-            DomainEvent::TargetRunning { .. }
-                | DomainEvent::InferiorExited { .. }
-                | DomainEvent::TargetDisconnected
-                | DomainEvent::TargetDetached
-                | DomainEvent::BackendExited { .. }
-        );
+        let invalidates_values = attributed_exit
+            || matches!(
+                &event,
+                DomainEvent::TargetRunning { .. }
+                    | DomainEvent::TargetDisconnected
+                    | DomainEvent::TargetDetached
+                    | DomainEvent::BackendExited { .. }
+            );
         let appended = self.journal.append_domain(event.clone());
         let journaled: JournaledEvent = self.journal_result(appended)?;
         let changed = self.reducer.apply(&journaled)?;

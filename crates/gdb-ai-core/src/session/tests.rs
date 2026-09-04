@@ -82,7 +82,7 @@ fn exit_wait_tracks_terminal_inferior_generations() {
         (
             3,
             DomainEvent::InferiorExited {
-                backend_id: "i1".into(),
+                backend_id: Some("i1".into()),
                 exit_code: Some("0".into()),
                 from_stop_record: true,
             },
@@ -133,7 +133,7 @@ fn exit_wait_tracks_terminal_inferior_generations() {
         .apply(&JournaledEvent::for_replay(
             5,
             DomainEvent::InferiorExited {
-                backend_id: "i2".into(),
+                backend_id: Some("i2".into()),
                 exit_code: Some("0".into()),
                 from_stop_record: true,
             },
@@ -162,7 +162,7 @@ fn exit_wait_tracks_terminal_inferior_generations() {
         (
             7,
             DomainEvent::InferiorExited {
-                backend_id: "i1".into(),
+                backend_id: Some("i1".into()),
                 exit_code: Some("0".into()),
                 from_stop_record: true,
             },

@@ -118,10 +118,10 @@ async fn wait_for_pty(
                 ..
             }))
             | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
-            Ok(Ok(PublishedEvent {
-                event: DomainEvent::InferiorExited { .. } | DomainEvent::BackendExited { .. },
-                ..
-            })) => {
+            Ok(Ok(PublishedEvent { event, .. }))
+                if matches!(event, DomainEvent::BackendExited { .. })
+                    || handle.state().attributed_exit(&event) =>
+            {
                 return Err(Error::new(
                     ErrorCode::InvalidState,
                     format!("inferior exited before I/O step {step} observed its prompt"),

@@ -142,6 +142,9 @@ impl StateReducer {
                 exit_code,
                 from_stop_record,
             } => {
+                let Some(backend_id) = self.state.attributed_inferior(backend_id.as_deref()) else {
+                    return false;
+                };
                 // 2026-08-29: A lost RSP connection is reported as a remote
                 // thread-group exit without an exit code. Treat it as a
                 // disconnect unless an earlier stopped record already proved
@@ -152,7 +155,7 @@ impl StateReducer {
                     && self
                         .state
                         .inferiors
-                        .get(backend_id)
+                        .get(&backend_id)
                         .is_none_or(|inferior| inferior.status != InferiorStatus::Exited);
                 // 2026-08-30: An unrelated inferior exit used to invalidate
                 // the current stopped inferior, while direct removal left a
@@ -160,12 +163,12 @@ impl StateReducer {
                 let invalidates_stop =
                     self.state
                         .inferiors
-                        .get(backend_id)
+                        .get(&backend_id)
                         .is_some_and(|inferior| {
                             self.state.stopped_inferior_id.as_ref() == Some(&inferior.id)
                         });
                 let seq = self.state.event_seq;
-                let inferior = self.ensure_inferior(backend_id, seq);
+                let inferior = self.ensure_inferior(&backend_id, seq);
                 inferior.status = if disconnected {
                     InferiorStatus::Disconnected
                 } else {
@@ -911,7 +914,7 @@ mod tests {
                 &mut reducer,
                 4,
                 DomainEvent::InferiorExited {
-                    backend_id: "i1".into(),
+                    backend_id: Some("i1".into()),
                     exit_code: None,
                     from_stop_record,
                 },
@@ -961,7 +964,7 @@ mod tests {
             &mut reducer,
             5,
             DomainEvent::InferiorExited {
-                backend_id: "i2".into(),
+                backend_id: Some("i2".into()),
                 exit_code: Some("0".into()),
                 from_stop_record: false,
             },
@@ -972,6 +975,21 @@ mod tests {
         apply(
             &mut reducer,
             6,
+            DomainEvent::InferiorExited {
+                backend_id: None,
+                exit_code: None,
+                from_stop_record: true,
+            },
+        );
+        assert_eq!(
+            reducer.state().inferiors["i1"].status,
+            InferiorStatus::Stopped
+        );
+        assert_eq!(reducer.state().stop_id, stop);
+
+        apply(
+            &mut reducer,
+            7,
             DomainEvent::InferiorRemoved {
                 backend_id: "i1".into(),
             },
@@ -1061,7 +1079,7 @@ mod tests {
             &mut reducer,
             4,
             DomainEvent::InferiorExited {
-                backend_id: "i1".into(),
+                backend_id: Some("i1".into()),
                 exit_code: Some("0270".into()),
                 from_stop_record: true,
             },

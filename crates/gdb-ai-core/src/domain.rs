@@ -591,6 +591,26 @@ impl SessionState {
             .frame
             .as_ref()
     }
+
+    pub(crate) fn attributed_inferior(&self, backend_id: Option<&str>) -> Option<String> {
+        if let Some(backend_id) = backend_id {
+            return Some(backend_id.to_owned());
+        }
+        // 2026-09-05: GDB can omit thread-group on an exit stop. Hardcoding
+        // i1 then killed a live parent when a followed child exited; infer only
+        // when exactly one inferior makes the attribution unambiguous.
+        let mut inferiors = self.inferiors.keys();
+        let backend_id = inferiors.next()?.clone();
+        inferiors.next().is_none().then_some(backend_id)
+    }
+
+    pub(crate) fn attributed_exit(&self, event: &DomainEvent) -> bool {
+        matches!(
+            event,
+            DomainEvent::InferiorExited { backend_id, .. }
+                if self.attributed_inferior(backend_id.as_deref()).is_some()
+        )
+    }
 }
 
 impl From<&SessionState> for WaitBaseline {
@@ -657,7 +677,7 @@ pub enum DomainEvent {
         backend_id: String,
     },
     InferiorExited {
-        backend_id: String,
+        backend_id: Option<String>,
         exit_code: Option<String>,
         #[serde(default)]
         from_stop_record: bool,

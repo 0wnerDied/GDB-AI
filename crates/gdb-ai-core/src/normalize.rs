@@ -51,7 +51,7 @@ fn stopped(results: &[MiResult]) -> Option<DomainEvent> {
     let backend_inferior = MiResult::find_str(results, "thread-group").map(str::to_owned);
     if raw_reason.starts_with("exited") {
         return Some(DomainEvent::InferiorExited {
-            backend_id: backend_inferior.unwrap_or_else(|| "i1".into()),
+            backend_id: backend_inferior,
             exit_code: MiResult::find_str(results, "exit-code").map(str::to_owned),
             from_stop_record: true,
         });
@@ -105,7 +105,7 @@ fn notification(class: &str, results: &[MiResult]) -> Option<DomainEvent> {
             backend_id: text(results, "id")?,
         }),
         "thread-group-exited" => Some(DomainEvent::InferiorExited {
-            backend_id: text(results, "id")?,
+            backend_id: Some(text(results, "id")?),
             exit_code: text(results, "exit-code"),
             from_stop_record: false,
         }),
@@ -230,6 +230,19 @@ mod tests {
                 }),
                 ..
             }) if number == "7.2" && disposition == "keep"
+        ));
+    }
+
+    #[test]
+    fn leaves_an_unscoped_exit_unattributed() {
+        let record =
+            parse_record(b"*stopped,reason=\"exited-normally\"", MiLimits::default()).unwrap();
+        assert!(matches!(
+            normalize(&record),
+            Some(DomainEvent::InferiorExited {
+                backend_id: None,
+                ..
+            })
         ));
     }
 
