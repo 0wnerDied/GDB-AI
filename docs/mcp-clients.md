@@ -198,7 +198,8 @@ interrupt or resume.
 The `input` field writes the inferior PTY. For socket or other external events,
 set `trigger.command` to a no-shell command array and optionally set its
 workspace `cwd`. GDB/AI starts it after the breakpoint is armed and the target
-runs, then reports its process status with the probe result.
+runs, then reports its process status and bounded nonempty stdout/stderr with
+the probe result. Each stream includes its total byte count and truncation state.
 `gdb_run` action `probe` remains an equivalent compatibility form.
 
 The result reports bounded `output` produced during the call, plus

@@ -5,11 +5,15 @@ use std::{
 use gdb_ai_mi::{MiResult, MiValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::process::{Child, Command};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::{Child, Command},
+    task::JoinHandle,
+};
 
 use super::{
     context::{context_options, require_stopped_context},
-    encoding::{hex_encode, parse_address},
+    encoding::{byte_content, hex_encode, parse_address},
     evaluation::{safe_evaluate_command, validate_expression},
     execution::{append_turn_output, feed_inferior, turn_input},
     lifecycle::validate_argv,
@@ -42,25 +46,81 @@ struct ProbeTrigger {
 struct ProbeTriggerProcess {
     child: Child,
     pid: u32,
+    stdout: JoinHandle<std::io::Result<TriggerOutput>>,
+    stderr: JoinHandle<std::io::Result<TriggerOutput>>,
 }
 
 impl ProbeTriggerProcess {
     async fn finish(mut self) -> Value {
-        let status = match self.child.try_wait() {
-            Ok(Some(status)) => return trigger_status(self.pid, status, false),
-            Ok(None) => self.child.kill().await,
-            Err(error) => {
-                return json!({"pid": self.pid, "cleanup_error": error.to_string()});
-            }
-        };
-        match status {
-            Ok(()) => match self.child.wait().await {
-                Ok(status) => trigger_status(self.pid, status, true),
+        let mut result = match self.child.try_wait() {
+            Ok(Some(status)) => trigger_status(self.pid, status, false),
+            Ok(None) => match self.child.kill().await {
+                Ok(()) => match self.child.wait().await {
+                    Ok(status) => trigger_status(self.pid, status, true),
+                    Err(error) => json!({"pid": self.pid, "cleanup_error": error.to_string()}),
+                },
                 Err(error) => json!({"pid": self.pid, "cleanup_error": error.to_string()}),
             },
-            Err(error) => json!({"pid": self.pid, "cleanup_error": error.to_string()}),
-        }
+            Err(error) => {
+                let _ = self.child.kill().await;
+                json!({"pid": self.pid, "cleanup_error": error.to_string()})
+            }
+        };
+        let (stdout, stderr) = tokio::join!(self.stdout, self.stderr);
+        append_trigger_output(&mut result, "stdout", stdout);
+        append_trigger_output(&mut result, "stderr", stderr);
+        result
     }
+}
+
+const MAX_TRIGGER_STREAM_BYTES: usize = 64 * 1024;
+
+struct TriggerOutput {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+}
+
+// 2026-09-05: Discarding trigger streams forced network Agents to launch a
+// second debug session just to read one HTTP response. Drain each pipe while
+// retaining a bounded prefix so one probe returns the trigger evidence safely.
+async fn capture_trigger_output(
+    mut input: impl AsyncRead + Unpin,
+) -> std::io::Result<TriggerOutput> {
+    let mut bytes = Vec::with_capacity(MAX_TRIGGER_STREAM_BYTES + 1);
+    let prefix = (&mut input)
+        .take((MAX_TRIGGER_STREAM_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    let tail = tokio::io::copy(&mut input, &mut tokio::io::sink()).await? as usize;
+    let total_bytes = prefix.saturating_add(tail);
+    bytes.truncate(MAX_TRIGGER_STREAM_BYTES);
+    Ok(TriggerOutput { bytes, total_bytes })
+}
+
+fn append_trigger_output(
+    result: &mut Value,
+    name: &str,
+    output: std::result::Result<std::io::Result<TriggerOutput>, tokio::task::JoinError>,
+) {
+    let output = match output {
+        Ok(Ok(output)) if output.total_bytes > 0 => output,
+        Ok(Ok(_)) => return,
+        Ok(Err(error)) => {
+            result[format!("{name}_error")] = Value::String(error.to_string());
+            return;
+        }
+        Err(error) => {
+            result[format!("{name}_error")] = Value::String(error.to_string());
+            return;
+        }
+    };
+    let mut value = byte_content(output.bytes);
+    value.insert("total_bytes".into(), json!(output.total_bytes));
+    value.insert(
+        "truncated".into(),
+        json!(output.total_bytes > MAX_TRIGGER_STREAM_BYTES),
+    );
+    result[name] = Value::Object(value);
 }
 
 fn trigger_status(pid: u32, status: std::process::ExitStatus, terminated: bool) -> Value {
@@ -79,13 +139,13 @@ fn start_probe_trigger(trigger: ProbeTrigger, cwd: Option<PathBuf>) -> Result<Pr
     command
         .args(&trigger.command[1..])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         Error::new(
             ErrorCode::TargetUnavailable,
             format!("cannot start probe trigger {program:?}: {error}"),
@@ -97,7 +157,14 @@ fn start_probe_trigger(trigger: ProbeTrigger, cwd: Option<PathBuf>) -> Result<Pr
             "probe trigger started without a process identifier",
         )
     })?;
-    Ok(ProbeTriggerProcess { child, pid })
+    let stdout = tokio::spawn(capture_trigger_output(child.stdout.take().unwrap()));
+    let stderr = tokio::spawn(capture_trigger_output(child.stderr.take().unwrap()));
+    Ok(ProbeTriggerProcess {
+        child,
+        pid,
+        stdout,
+        stderr,
+    })
 }
 
 #[derive(Clone, Deserialize)]
@@ -948,6 +1015,33 @@ mod tests {
     use super::*;
     use crate::domain::{InferiorId, InferiorState, SessionId, SessionState, StopId, ThreadId};
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn returns_bounded_trigger_output() {
+        let written = MAX_TRIGGER_STREAM_BYTES + 7;
+        let mut trigger = start_probe_trigger(
+            ProbeTrigger {
+                command: vec!["/usr/bin/printf".into(), "x".repeat(written)],
+                cwd: None,
+            },
+            None,
+        )
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while trigger.child.try_wait().unwrap().is_none() {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
+        let result = trigger.finish().await;
+        assert_eq!(result["stdout"]["total_bytes"], written);
+        assert_eq!(result["stdout"]["truncated"], true);
+        assert_eq!(
+            result["stdout"]["text"].as_str().map(str::len),
+            Some(MAX_TRIGGER_STREAM_BYTES)
+        );
+        assert!(result.get("stderr").is_none());
+        assert_eq!(result["success"], true);
+    }
 
     #[test]
     fn accepts_only_the_probe_breakpoint_and_scope() {
