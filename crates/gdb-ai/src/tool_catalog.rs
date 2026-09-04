@@ -249,7 +249,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_io",
-        description: "Open-ended PTY I/O, EOF, or resize.",
+        description: "PTY reads, prompt-synchronized writes, EOF, or resize.",
         discriminator: Some("action"),
         actions: IO_ACTIONS,
         read_only: false,
@@ -648,6 +648,16 @@ mod tests {
         assert_eq!(
             read["properties"]["max_bytes"]["default"],
             DEFAULT_MCP_IO_READ_BYTES
+        );
+        let write = io["inputSchema"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| branch["properties"]["action"]["const"] == "write")
+            .unwrap();
+        assert_eq!(
+            write["properties"]["steps"]["items"]["properties"]["wait_for"]["type"],
+            "string"
         );
         let session = tools
             .iter()

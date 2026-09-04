@@ -354,6 +354,18 @@ out and the Agent correctly switched to a persistent breakpoint while fixing
 the payload. The final exploit derives every runtime address from a target
 leak and module offsets; it contains no absolute process address.
 
+A fresh matched source-free stripped-PIE comparison then reached the same
+runtime OOB write and three-process crash proof in both arms. Native GDB took
+17m58s; the default projected interface took about 23 minutes and 116 calls.
+The structured arm spent 101 calls preparing one prompt-driven menu because a
+single queued transcript was consumed by the target's broad reads, and a probe
+memory capture rejected a valid decimal register address. The trace-driven
+replay now performs all 101 prompt-synchronized writes in one transaction.
+Twelve release replays completed it in 0.01--0.61s and completed create,
+launch, resume, setup, module-offset probe, and close in six projected calls.
+Every replay recovered the exact `INT_MIN` index without embedding an absolute
+runtime address.
+
 ### Blind kernel exploit-speed qualification
 
 A concurrent source-free ring-1 run exposed a different adoption gap. Native
@@ -412,8 +424,14 @@ Complete only the shared fixes demonstrated by these runs:
 - [x] Run a fresh blind natural-adoption replay against the current release,
   verify direct module-relative debugging and no absolute exploit address, and
   record bounded-probe fallback separately from interface failure.
-- [ ] Repeat a matched native/GDB-AI comparison on a new runtime-dependent
+- [x] Repeat a matched native/GDB-AI comparison on a new runtime-dependent
   userland target after the adoption gate passes.
+- [x] Accept unsigned decimal addresses returned for bare GDB register
+  expressions so same-stop memory capture does not require a literal-address
+  retry.
+- [x] Let one projected PTY write gate ordered input steps on exact target
+  output, avoiding one Agent round trip per prompt without pre-queuing answers
+  that a broad target read can consume.
 - [x] Finish the concurrent blind ring-1 qualification, measuring stop
   attribution, guest symbol/module discovery, reconnects, primitive and exploit
   wall time without supplying source.

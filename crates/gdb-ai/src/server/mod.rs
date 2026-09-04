@@ -100,8 +100,8 @@ const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; 
 excludes program; use first_instruction for stripped executables. MCP manages leases and \
 revisions. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
 stop/exit when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
-accepted/running only for later I/O. Reuse the session with \
-restart; gdb_probe batches input, skips ignore_count hits, captures memory, and \
+accepted/running only for later I/O. Use gdb_io write steps with wait_for for prompt-driven \
+menus. Reuse the session with restart; gdb_probe batches input, skips ignore_count hits, captures memory, and \
 returns output in one call; run external triggers concurrently. Use gdb_batch for current-stop views and gdb_inspect view=crash \
 profile=brief for triage. Query a returned operation_id after timeout. Close when done.";
 

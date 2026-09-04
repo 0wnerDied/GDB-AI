@@ -100,6 +100,10 @@ defaults, null frame fields, and a complete ready snapshot that repeats the
 same `stop_id`; abnormal values remain explicit.
 The inferior PTY starts in raw mode, so `data_base64` input reaches the target
 without terminal flow-control, signal, newline, or echo transformations.
+`inferior_io.write` also accepts ordered `steps`; an optional `wait_for`
+substring gates each step's exact text or binary payload on PTY output produced
+after the transaction begins. The timeout bounds the whole sequence, which
+prevents broad target reads from consuming answers intended for later prompts.
 `send_eof` requires a stopped inferior, switches to canonical mode, and queues
 an EOF boundary for resume. A later ordinary write restores raw mode.
 The `output.evidence` setting selects an `ephemeral_ring`, a retained

@@ -216,6 +216,16 @@ const INFERIOR_INPUT_OBJECT: ObjectContract =
     ObjectContract::new(INFERIOR_INPUT_FIELDS, 0, &["text", "data_base64"]);
 const INFERIOR_INPUT_KIND: ParameterKind = ParameterKind::Shape(&INFERIOR_INPUT_OBJECT);
 
+const IO_WRITE_STEP_FIELDS: &[ParameterField] = &[
+    optional("wait_for", ParameterKind::String),
+    optional("text", ParameterKind::String),
+    optional("data_base64", ParameterKind::String),
+];
+const IO_WRITE_STEP_OBJECT: ObjectContract =
+    ObjectContract::new(IO_WRITE_STEP_FIELDS, 0, &["text", "data_base64"]);
+const IO_WRITE_STEP_KIND: ParameterKind = ParameterKind::Shape(&IO_WRITE_STEP_OBJECT);
+const IO_WRITE_STEPS_KIND: ParameterKind = ParameterKind::ArrayOf(&IO_WRITE_STEP_KIND);
+
 const ENDPOINT_FIELDS: &[ParameterField] = &[
     required("host", ParameterKind::String),
     required("port", ParameterKind::Positive),
@@ -814,8 +824,10 @@ impl CanonicalMethod {
             InferiorIoWrite => MethodContract::plain(vec![
                 optional("text", String),
                 optional("data_base64", String),
+                optional("steps", IO_WRITE_STEPS_KIND),
+                optional("timeout_ms", Positive),
             ])
-            .exactly_one(&["text", "data_base64"]),
+            .exactly_one(&["text", "data_base64", "steps"]),
             InferiorIoResize => MethodContract::plain(vec![
                 required("rows", Unsigned),
                 required("columns", Unsigned),
@@ -1017,6 +1029,10 @@ mod tests {
                 json!({"action": "continue", "inspect": [{"view": "stack", "extra": true}]}),
             ),
             (
+                CanonicalMethod::InferiorIoWrite,
+                json!({"steps": [{"wait_for": "name: ", "text": "A", "data_base64": "QQ=="}]}),
+            ),
+            (
                 CanonicalMethod::SignalUpdate,
                 json!({"signals": {"SIGUSR1": {"stop": true, "print": true}}}),
             ),
@@ -1064,6 +1080,15 @@ mod tests {
             .validate_parameters(&json!({
                 "wait": {"until": "settled"},
                 "inspect": [{"view": "stack", "limit": 4}]
+            }))
+            .unwrap();
+        CanonicalMethod::InferiorIoWrite
+            .validate_parameters(&json!({
+                "steps": [
+                    {"text": "1\n"},
+                    {"wait_for": "index: ", "data_base64": "MAo="}
+                ],
+                "timeout_ms": 1000
             }))
             .unwrap();
         CanonicalMethod::SignalUpdate
@@ -1135,6 +1160,10 @@ mod tests {
             (
                 CanonicalMethod::InferiorIoWrite,
                 json!({"text": "A", "data_base64": "QQ=="}),
+            ),
+            (
+                CanonicalMethod::InferiorIoWrite,
+                json!({"text": "A", "steps": [{"text": "B"}]}),
             ),
             (
                 CanonicalMethod::ExecutionControl,

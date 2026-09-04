@@ -176,7 +176,9 @@ For the shortest reliable local crash-or-exit loop:
    `inspect: [{"view": "crash", "profile": "brief"}]` when stopped crash
    context is needed in the same call.
 4. Use `gdb_session` action `restart` for the next attempt instead of creating
-   another session. Batch deterministic commands into one PTY write.
+   another session. Batch deterministic input into one PTY write; when target
+   reads can swallow later answers, use ordered write `steps` and gate each
+   later step with its `wait_for` prompt.
 
 For a counted one-shot breakpoint, use `gdb_probe` with `input`,
 `ignore_count`, and bounded expression, stack, or memory captures. A memory
@@ -204,6 +206,12 @@ and reserve `gdb_io` for open-ended interaction. An MCP `gdb_io` read with no
 `max_bytes` returns at most 4096 bytes; request a larger bound only when the
 additional output is needed. Projected tools do not expose lease or revision
 fields and bind omitted reads to the current stop.
+
+A `gdb_io` write may replace one `text` or `data_base64` payload with `steps`.
+Each step contains one payload and an optional `wait_for` substring. Matching
+starts at the PTY position when the call begins, so omit `wait_for` on the
+first step when the inferior is already waiting at its current prompt. The
+single `timeout_ms` bounds the complete transaction.
 
 Advanced targets, mutations, variable objects, tracking, and kernel operations
 appear only when the server is started with `--advanced-tools`. Raw GDB access

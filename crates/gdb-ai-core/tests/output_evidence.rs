@@ -143,6 +143,25 @@ async fn preserves_binary_pty_input_and_eof_in_an_owned_artifact() {
         .unwrap()
         .0
         .clone();
+    let resumed = successful(
+        gateway
+            .dispatch(
+                request(
+                    "resume-for-input",
+                    Some(&session_id),
+                    "execution.control",
+                    interrupted.revision,
+                    json!({
+                        "action": "continue",
+                        "lease_id": lease,
+                        "stop_id": stop_id,
+                        "wait": {"until": "running", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
     let input = successful(
         gateway
             .dispatch(
@@ -150,13 +169,49 @@ async fn preserves_binary_pty_input_and_eof_in_an_owned_artifact() {
                     "input",
                     Some(&session_id),
                     "inferior_io.write",
-                    interrupted.revision,
-                    json!({"lease_id": lease, "data_base64": "E0FCQw=="}),
+                    resumed.revision,
+                    json!({
+                        "lease_id": lease,
+                        "steps": [
+                            {"data_base64": "E0FCQw=="},
+                            {"wait_for": "ABC", "text": ""}
+                        ],
+                        "timeout_ms": 5000
+                    }),
                 ),
                 &caller,
             )
             .await,
     );
+    assert_eq!(input.result.as_ref().unwrap()["steps_completed"], 2);
+    assert_eq!(input.result.as_ref().unwrap()["written"], 4);
+    let interrupted = successful(
+        gateway
+            .dispatch(
+                request(
+                    "interrupt-for-eof",
+                    Some(&session_id),
+                    "execution.control",
+                    input.revision,
+                    json!({
+                        "action": "interrupt",
+                        "lease_id": lease,
+                        "wait": {"until": "snapshot", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let stop_id = interrupted
+        .state
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
     let eof = successful(
         gateway
             .dispatch(
@@ -164,7 +219,7 @@ async fn preserves_binary_pty_input_and_eof_in_an_owned_artifact() {
                     "eof",
                     Some(&session_id),
                     "inferior_io.send_eof",
-                    input.revision,
+                    interrupted.revision,
                     json!({"lease_id": lease}),
                 ),
                 &caller,
