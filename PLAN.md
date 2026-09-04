@@ -475,6 +475,11 @@ runtime evidence earlier with fewer debugging actions. One projected attempt
 to add module and mapping views at a probe hit was rejected, then repeated as a
 probe plus a separate batch. Probe `inspect` now reads those views at the hit;
 `continue_to_stop` retains its following-stop semantics.
+Default discovery also repeated the complete probe schema under both
+`gdb_run` and the dedicated `gdb_probe`, despite the replay using only the
+dedicated path. Removing the equivalent run alias reduced one measured
+`tools/list` response from 22,679 to 19,851 bytes (12.5%) without removing a
+debugging operation.
 
 ### Blind kernel exploit-speed qualification
 
@@ -555,6 +560,8 @@ Complete only the shared fixes demonstrated by these runs:
   state instead of repeating every session registry.
 - [x] Let a probe capture bounded inspection views at its own hit instead of
   rejecting the request and forcing a separate current-stop batch.
+- [x] Keep one projected probe path instead of repeating its complete schema
+  under both the run tool and the dedicated probe tool.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

@@ -289,7 +289,6 @@ stripped PIE maps; its temporary breakpoint is rebound and removed internally.
 For a stopped stripped x86-64 kernel, `kernel_module_offset` resolves a loaded
 module's live text base and runs the same probe without a separate bootstrap,
 address calculation, or raw GDB command.
-`gdb_run` action `probe` remains an equivalent compatibility form.
 `gdb_memory` action `artifact` pages bytes from an artifact URI returned by a
 large result; use `next_offset` until `truncated` is false.
 Its `read` action accepts exactly one of `address` or `address_expression`; the

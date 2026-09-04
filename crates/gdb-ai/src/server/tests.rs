@@ -235,22 +235,6 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     assert_eq!(observed_wait.method, CanonicalMethod::ExecutionWait);
     assert_eq!(observed_wait.parameters["inspect"][0]["view"], "stack");
 
-    let current_probe = map_tool(
-        "gdb_run",
-        json!({
-            "action": "probe",
-            "session_id": "sess_test",
-            "function": "malloc"
-        }),
-        false,
-        false,
-        6,
-    )
-    .unwrap();
-    assert_eq!(current_probe.method, CanonicalMethod::AgentProbe);
-    assert_eq!(current_probe.parameters["accept_current_stop"], true);
-    assert!(current_probe.parameters.get("action").is_none());
-
     let direct_probe = map_tool(
         "gdb_probe",
         json!({

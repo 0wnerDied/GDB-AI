@@ -75,9 +75,8 @@ const RUN_ACTIONS: &[ToolAction] = &[
     action!("next_instruction", ExecutionControl),
     action!("until", ExecutionControl),
     action!("wait", ExecutionWait),
-    // 2026-09-01: Keeping the existing stop-and-capture operation behind the
-    // advanced catalog forced Agents to recreate it with several core calls.
-    action!("probe", AgentProbe),
+    // 2026-09-05: The dedicated probe tool made this alias repeat its complete
+    // schema in discovery and gave Agents two equivalent paths. Keep one path.
 ];
 const BREAKPOINT_ACTIONS: &[ToolAction] = &[
     action!("create", BreakpointCreate),
@@ -172,7 +171,7 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_run",
         // 2026-09-01: Blind Agents rebuilt probe workflows or selected an
         // exit-only wait even though one default turn already handles both.
-        description: "Run with exact input/output; action=restart relaunches directly to running, while continue and step wait for stop-or-exit by default. Probe restart=true replaces separate restart/continue, then can trigger, capture, and continue_to_stop for crash inspection.",
+        description: "Run with exact input/output; restart relaunches directly to running, while continue and step wait for stop-or-exit and can return same-stop inspect views.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,
@@ -639,7 +638,7 @@ mod tests {
         );
         assert_eq!(
             method_for_tool("gdb_run", Some("probe"), false, false),
-            Some(CanonicalMethod::AgentProbe)
+            None
         );
         assert_eq!(
             method_for_tool("gdb_probe", None, false, false),
@@ -840,12 +839,10 @@ mod tests {
             1
         );
         assert!(control["properties"]["inspect"].is_object());
-        let probe = run["inputSchema"]["oneOf"]
-            .as_array()
-            .unwrap()
+        let probe = &tools
             .iter()
-            .find(|branch| branch["properties"]["action"]["const"] == "probe")
-            .unwrap();
+            .find(|tool| tool["name"] == "gdb_probe")
+            .unwrap()["inputSchema"];
         assert!(probe["properties"]["input"].is_object());
         assert_eq!(probe["properties"]["input"]["minProperties"], 1);
         assert_eq!(probe["properties"]["input"]["maxProperties"], 1);
