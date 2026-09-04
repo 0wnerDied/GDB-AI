@@ -1,6 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_mi::{MiRecord, MiResult};
-use memchr::memmem::Finder;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -17,7 +16,7 @@ use crate::{
     domain::{DomainEvent, TrackingDefinition, TrackingId},
     gateway::Gateway,
     protocol::ApiRequest,
-    session::SessionHandle,
+    session::{CommandReply, SessionHandle},
 };
 
 fn memory_contents(record: &MiRecord, maximum: usize) -> Result<Vec<u8>> {
@@ -257,24 +256,49 @@ fn search_pattern(parameters: &Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn find_memory_matches(bytes: &[u8], pattern: &[u8], maximum: usize) -> (Vec<usize>, bool) {
-    let finder = Finder::new(pattern);
-    let mut matches = Vec::with_capacity(maximum.min(128));
-    let mut cursor = 0;
-    while cursor <= bytes.len().saturating_sub(pattern.len()) {
-        let Some(relative) = finder.find(&bytes[cursor..]) else {
-            break;
-        };
-        let offset = cursor + relative;
-        matches.push(offset);
-        if matches.len() > maximum {
-            break;
+fn last_hex_address(text: &str) -> Option<u64> {
+    let suffix = text.rsplit_once("0x")?.1;
+    let digits = suffix.bytes().take_while(u8::is_ascii_hexdigit).count();
+    u64::from_str_radix(&suffix[..digits], 16).ok()
+}
+
+fn find_memory_result(
+    reply: &CommandReply,
+    start: u64,
+    length: usize,
+    maximum: usize,
+) -> (Vec<String>, bool, usize, bool) {
+    let mut console = Vec::new();
+    let mut diagnostics = Vec::new();
+    for record in &reply.stream_records {
+        match record {
+            MiRecord::ConsoleStream(bytes) => console.extend(bytes),
+            MiRecord::LogStream(bytes) => diagnostics.extend(bytes),
+            _ => {}
         }
-        cursor = offset + 1;
     }
-    let truncated = matches.len() > maximum;
+    let console = String::from_utf8_lossy(&console);
+    let end = start.saturating_add(length.saturating_sub(1) as u64);
+    let mut matches = console
+        .lines()
+        .filter_map(|line| line.split_ascii_whitespace().next())
+        .filter(|token| token.starts_with("0x"))
+        .filter_map(|token| parse_address(token).ok())
+        .filter(|address| (start..=end).contains(address))
+        .map(|address| format!("0x{address:016x}"))
+        .collect::<Vec<_>>();
+    let truncated = matches.len() > maximum || reply.stream_truncated;
     matches.truncate(maximum);
-    (matches, truncated)
+    let diagnostics = String::from_utf8_lossy(&diagnostics);
+    let partial = diagnostics.contains("halting search");
+    let searched_length = if partial {
+        last_hex_address(&diagnostics)
+            .and_then(|address| address.checked_sub(start))
+            .map_or(0, |length_read| length_read.min(length as u64) as usize)
+    } else {
+        length
+    };
+    (matches, truncated, searched_length, partial)
 }
 
 impl Gateway {
@@ -459,10 +483,10 @@ impl Gateway {
         require_stopped_context(&request.parameters, &state)?;
         let start = crate::domain::Address::parse(&string(&request.parameters, "start")?)?;
         let length = unsigned(&request.parameters, "length")? as usize;
-        if length == 0 || length > self.config.limits.memory_read_bytes {
+        if length == 0 {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
-                "memory search length is outside configured limits",
+                "memory search length must be positive",
             ));
         }
         let pattern = search_pattern(&request.parameters)?;
@@ -473,30 +497,41 @@ impl Gateway {
             .unwrap_or(100)
             .clamp(1, 1_000) as usize;
         let start_number = parse_address(start.as_str())?;
-        let (bytes, evidence_seq) =
-            read_memory_bytes(&entry.handle, &state, start_number, length, true).await?;
-        // 2026-08-30: Comparing every window with a caller-controlled 64 KiB
-        // pattern made worst-case 16 MiB searches approach O(n*m). Reuse the
-        // linear-time finder and retain the existing overlapping-match policy.
-        let (offsets, truncated) = find_memory_matches(&bytes, &pattern, max_results);
-        let matches = offsets
-            .into_iter()
-            .map(|offset| format!("0x{:016x}", start_number + offset as u64))
-            .collect::<Vec<_>>();
-        // 2026-08-28: Exactly max_results matches was incorrectly reported as
-        // truncated. Read one sentinel match before setting the flag.
-        // 2026-08-28: Search permits a bounded short read, but callers could
-        // only infer it from two lengths. Mark partial evidence explicitly.
-        let partial = bytes.len() < length;
+        validate_memory_range(start_number, length)?;
+        let pattern = pattern
+            .iter()
+            .map(|byte| format!("0x{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        // 2026-09-04: Reading a large search range through 64 KiB MI chunks
+        // made one GDB operation thousands of service round trips. Let GDB
+        // scan it in place and bound its address output with one sentinel.
+        let command = MiCommand::new("-interpreter-exec")?
+            .bare("console")?
+            .string(format!(
+                "find /b /{} {}, +{}, {pattern}",
+                max_results + 1,
+                start.as_str(),
+                length
+            ));
+        let reply = entry
+            .handle
+            .stable_observation(
+                &state,
+                Box::pin(async { entry.handle.command(command).await }),
+            )
+            .await?;
+        let (matches, truncated, searched_length, partial) =
+            find_memory_result(&reply, start_number, length, max_results);
         Ok(json!({
             "stop_id": state.stop_id,
             "start": start,
             "requested_length": length,
-            "searched_length": bytes.len(),
+            "searched_length": searched_length,
             "matches": matches,
             "partial": partial,
             "truncated": truncated,
-            "evidence_seq": evidence_seq
+            "evidence_seq": reply.evidence_seq
         }))
     }
 
@@ -587,19 +622,7 @@ mod tests {
     use crate::ErrorCode;
     use gdb_ai_mi::{MiLimits, parse_record};
 
-    use super::{
-        find_memory_matches, memory_contents, require_complete_read, validate_memory_range,
-    };
-
-    #[test]
-    fn memory_matcher_preserves_overlaps_and_truncation() {
-        assert_eq!(
-            find_memory_matches(b"aaaa", b"aa", 8),
-            (vec![0, 1, 2], false)
-        );
-        assert_eq!(find_memory_matches(b"aaaa", b"aa", 2), (vec![0, 1], true));
-        assert_eq!(find_memory_matches(b"abcdef", b"z", 8), (Vec::new(), false));
-    }
+    use super::{memory_contents, require_complete_read, validate_memory_range};
 
     #[test]
     fn memory_blocks_stop_at_the_first_unreadable_gap() {

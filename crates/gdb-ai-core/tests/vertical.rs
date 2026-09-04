@@ -784,7 +784,8 @@ async fn local_debugging_vertical_slice() {
                     None,
                     json!({
                         "start": address,
-                        "length": 4,
+                        "length": 16 * 1024 * 1024 + 1,
+                        "max_results": 1,
                         "pattern": {"hex": "07000000"},
                         "stop_id": second_stop
                     }),
@@ -794,7 +795,10 @@ async fn local_debugging_vertical_slice() {
             .await,
     );
     assert_eq!(search.result.as_ref().unwrap()["stop_id"], second_stop);
-    assert_eq!(search.result.as_ref().unwrap()["partial"], false);
+    assert_eq!(
+        search.result.as_ref().unwrap()["requested_length"],
+        16 * 1024 * 1024 + 1
+    );
     assert_eq!(
         search.result.as_ref().unwrap()["matches"]
             .as_array()
