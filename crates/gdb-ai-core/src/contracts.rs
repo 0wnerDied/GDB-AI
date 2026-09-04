@@ -627,7 +627,6 @@ impl CanonicalMethod {
                 optional("cwd", String),
                 optional("environment", ENVIRONMENT_KIND),
                 optional("environment_mode", Enum(&["clean", "inherited"])),
-                optional("runtime", Enum(&["auto", "system"])),
                 optional("aslr", Enum(&["preserve", "disable"])),
                 optional(
                     "stop",

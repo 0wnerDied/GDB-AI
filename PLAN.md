@@ -375,13 +375,12 @@ in 15m22s with 51 calls across ten sessions. The native first primitive came
 from static analysis and ordinary socket traffic before GDB started, so it is
 not evidence that the CLI debugger itself was faster.
 
-The projected trace spent 18 calls discovering that an incomplete sibling
-runtime needed the supplied versioned library but not its incompatible libc,
-and nine calls repeated state already returned by the preceding operation.
-Automatic hybrid runtime selection now removes the launch trial-and-error and
-reports the exact dependency sources. Existing `restart` removes seven calls
-from three-process replay; the remaining measured split is probe capture
-followed by a separate run-to-crash inspection.
+The projected trace spent 18 calls diagnosing an executable whose supplied
+runtime was not prepared before launch, and nine calls repeated state already
+returned by the preceding operation. Runtime binding now remains an explicit
+pre-debugging responsibility instead of changing the target inside GDB/AI.
+Existing `restart` removes seven calls from three-process replay; the remaining
+measured split is probe capture followed by a separate run-to-crash inspection.
 
 ### Blind kernel exploit-speed qualification
 
@@ -451,10 +450,6 @@ Complete only the shared fixes demonstrated by these runs:
 - [x] Let one projected PTY write gate ordered input steps on exact target
   output, avoiding one Agent round trip per prompt without pre-queuing answers
   that a broad target read can consume.
-- [x] Select a complete sibling ELF loader/library set through a session-local
-  patched copy, preserving the original target, PIE symbols, and restart flow.
-- [x] Prefer every sibling ELF dependency by SONAME, including libc, while
-  using the system only for absent files and reporting every runtime choice.
 - [x] Finish the concurrent blind ring-1 qualification, measuring stop
   attribution, guest symbol/module discovery, reconnects, primitive and exploit
   wall time without supplying source.

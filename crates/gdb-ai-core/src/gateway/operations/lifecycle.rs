@@ -1,14 +1,12 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    io::Read,
+    collections::BTreeMap,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, atomic::Ordering},
 };
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::process::Command;
 
 use super::{
     context::{WaitSpec, apply_wait, apply_wait_baseline, wait_if_requested, wait_spec},
@@ -394,7 +392,6 @@ impl Gateway {
             cwd: Option<String>,
             environment: BTreeMap<String, String>,
             environment_mode: String,
-            runtime: String,
             aslr: String,
             stop: StartPolicy,
             follow_fork: String,
@@ -410,7 +407,6 @@ impl Gateway {
                     cwd: None,
                     environment: BTreeMap::new(),
                     environment_mode: "clean".into(),
-                    runtime: "auto".into(),
                     aslr: "preserve".into(),
                     stop: StartPolicy::FirstInstruction,
                     follow_fork: "parent".into(),
@@ -440,12 +436,6 @@ impl Gateway {
         environment.extend(parameters.environment);
         validate_environment(&environment)?;
         validate_argv(&parameters.argv)?;
-        if !matches!(parameters.runtime.as_str(), "auto" | "system") {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                "runtime must be auto or system",
-            ));
-        }
         // 2026-08-28: Launch canonicalized program before applying the
         // requested cwd, so an otherwise valid relative executable failed.
         let requested_cwd = parameters
@@ -494,20 +484,6 @@ impl Gateway {
         });
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
-        let requested_runtime = parameters.runtime.clone();
-        let bundled_runtime = if requested_runtime == "auto" {
-            prepare_bundled_runtime(
-                &program,
-                entry.handle.session_directory(),
-                baseline.revision,
-            )
-            .await?
-        } else {
-            None
-        };
-        let debug_program = bundled_runtime
-            .as_ref()
-            .map_or(program.as_path(), |runtime| runtime.program.as_path());
         let aslr = parameters.aslr.clone();
         let disable_randomization = match aslr.as_str() {
             "preserve" => "off",
@@ -548,7 +524,7 @@ impl Gateway {
         };
         let mut setup = vec![
             MiCommand::new("-file-exec-and-symbols")?
-                .string(debug_program.as_os_str().as_encoded_bytes()),
+                .string(program.as_os_str().as_encoded_bytes()),
             MiCommand::new("-environment-cd")?.string(cwd.as_os_str().as_encoded_bytes()),
             // 2026-08-28: Clearing GDB's own environment did not clear the
             // inferior environment. Enforce environment_mode=clean explicitly.
@@ -611,22 +587,13 @@ impl Gateway {
             .await?;
         let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
-        // 2026-09-05: System fallback was represented by an absent field, so
-        // Agents could not tell which runtime actually launched the target.
-        // Always report the decision made for the requested runtime mode.
-        let runtime = bundled_runtime.as_ref().map_or_else(
-            || json!({"mode": "system", "requested": requested_runtime}),
-            |runtime| runtime.summary.clone(),
-        );
-        let result = json!({
+        Ok(json!({
             "command": reply,
             "state": state,
             "capabilities": capabilities,
             "start_policy": start_policy.as_str(),
-            "aslr": {"requested": aslr, "backend_managed": aslr_managed},
-            "runtime": runtime
-        });
-        Ok(result)
+            "aslr": {"requested": aslr, "backend_managed": aslr_managed}
+        }))
     }
 
     pub(super) async fn target_attach(&self, request: &ApiRequest) -> Result<Value> {
@@ -1013,237 +980,6 @@ fn validate_launch_program(program: &Path) -> Result<()> {
     Ok(())
 }
 
-struct BundledRuntime {
-    program: PathBuf,
-    summary: Value,
-}
-
-async fn prepare_bundled_runtime(
-    program: &Path,
-    session_directory: &Path,
-    revision: u64,
-) -> Result<Option<BundledRuntime>> {
-    // 2026-09-05: Launch ignored complete challenge runtimes beside the
-    // executable, making Agents patch the target before every debug session.
-    // Patch only a session-local copy so GDB retains normal PIE symbol and
-    // breakpoint relocation while the supplied loader and libraries are used.
-    let parent = program.parent().unwrap_or(Path::new("/"));
-    let entries = match std::fs::read_dir(parent) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(None),
-    };
-    let runtime_files = entries
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| elf_file(path))
-        .collect::<Vec<_>>();
-    if runtime_files.is_empty() {
-        return Ok(None);
-    }
-    let interpreter = match Command::new("patchelf")
-        .arg("--print-interpreter")
-        .arg(program)
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_owned()
-        }
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::new(
-                ErrorCode::TargetUnavailable,
-                "sibling ELF runtime detected but patchelf is unavailable",
-            )
-            .with_details(json!({"candidates": runtime_files})));
-        }
-        Err(error) => {
-            return Err(Error::new(
-                ErrorCode::TargetUnavailable,
-                format!("cannot inspect launch runtime: {error}"),
-            ));
-        }
-    };
-    let Some(interpreter_soname) = Path::new(&interpreter)
-        .file_name()
-        .and_then(|name| name.to_str())
-    else {
-        return Ok(None);
-    };
-    let needed = Command::new("patchelf")
-        .arg("--print-needed")
-        .arg(program)
-        .output()
-        .await
-        .map_err(|error| {
-            Error::new(
-                ErrorCode::TargetUnavailable,
-                format!("cannot inspect launch dependencies: {error}"),
-            )
-        })?;
-    if !needed.status.success() {
-        return Ok(None);
-    }
-    let needed = String::from_utf8_lossy(&needed.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut candidates = BTreeMap::<String, BTreeSet<PathBuf>>::new();
-    for path in runtime_files {
-        let Ok(path) = std::fs::canonicalize(path) else {
-            continue;
-        };
-        if path == program || !path.is_file() {
-            continue;
-        }
-        let Ok(output) = Command::new("patchelf")
-            .arg("--print-soname")
-            .arg(&path)
-            .output()
-            .await
-        else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        let soname = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !soname.is_empty() {
-            candidates.entry(soname).or_default().insert(path);
-        }
-    }
-    let bundled_loader = unique_soname_candidate(&candidates, interpreter_soname, "loader")?;
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    // 2026-09-05: Skipping a supplied libc when its loader was absent changed
-    // the target ABI silently. Every unambiguous sibling SONAME must win;
-    // only dependencies absent from the attachment may use the host runtime.
-    let bundled_libraries = candidates
-        .keys()
-        .filter(|soname| soname.as_str() != interpreter_soname)
-        .cloned()
-        .collect::<Vec<_>>();
-    let system_libraries = needed
-        .iter()
-        .filter(|name| !candidates.contains_key(*name))
-        .cloned()
-        .collect::<Vec<_>>();
-    let use_bundled_loader = bundled_loader.is_some();
-    let loader = bundled_loader.unwrap_or_else(|| PathBuf::from(&interpreter));
-
-    let runtime_directory = session_directory.join(format!("runtime-{revision}"));
-    let library_directory = runtime_directory.join("lib");
-    std::fs::create_dir_all(&library_directory)?;
-    // 2026-09-05: A SONAME match still failed at launch when the versioned
-    // attachment lacked the DT_NEEDED filename. Stage aliases for every
-    // unambiguous sibling without changing the supplied files.
-    for (soname, matches) in &candidates {
-        if matches.len() != 1 {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!("sibling runtime has ambiguous library for {soname:?}"),
-            )
-            .with_details(json!({"soname": soname, "candidates": matches})));
-        }
-        if Path::new(soname).components().count() != 1 {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!("sibling runtime SONAME must be a file name: {soname:?}"),
-            ));
-        }
-        let link = library_directory.join(soname);
-        if let Err(error) = std::fs::remove_file(&link)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(error.into());
-        }
-        std::os::unix::fs::symlink(matches.first().unwrap(), link)?;
-    }
-    let file_name = program.file_name().ok_or_else(|| {
-        Error::new(
-            ErrorCode::InvalidArgument,
-            "launch program has no file name",
-        )
-    })?;
-    let prepared = runtime_directory.join(file_name);
-    let patched = Command::new("patchelf")
-        .arg("--no-sort")
-        .arg("--output")
-        .arg(&prepared)
-        .arg("--set-interpreter")
-        .arg(&loader)
-        .arg("--force-rpath")
-        .arg("--set-rpath")
-        .arg(&library_directory)
-        .arg(program)
-        .output()
-        .await
-        .map_err(|error| {
-            Error::new(
-                ErrorCode::TargetUnavailable,
-                format!("cannot prepare bundled launch runtime: {error}"),
-            )
-        })?;
-    if !patched.status.success() {
-        let message = String::from_utf8_lossy(&patched.stderr);
-        return Err(Error::new(
-            ErrorCode::TargetUnavailable,
-            format!(
-                "patchelf could not prepare bundled runtime: {}",
-                message.trim()
-            ),
-        ));
-    }
-    std::fs::set_permissions(&prepared, program.metadata()?.permissions())?;
-    Ok(Some(BundledRuntime {
-        program: prepared.clone(),
-        summary: json!({
-            "mode": if system_libraries.is_empty() && use_bundled_loader {
-                "bundled"
-            } else {
-                "hybrid"
-            },
-            "requested": "auto",
-            "prepared_program": prepared,
-            "loader": loader,
-            "loader_source": if use_bundled_loader { "bundled" } else { "system" },
-            "library_path": library_directory,
-            "libraries": needed,
-            "bundled_libraries": bundled_libraries,
-            "system_libraries": system_libraries,
-        }),
-    }))
-}
-
-fn unique_soname_candidate(
-    candidates: &BTreeMap<String, BTreeSet<PathBuf>>,
-    soname: &str,
-    kind: &str,
-) -> Result<Option<PathBuf>> {
-    let Some(matches) = candidates.get(soname) else {
-        return Ok(None);
-    };
-    if matches.len() != 1 {
-        return Err(Error::new(
-            ErrorCode::InvalidArgument,
-            format!("bundled runtime has ambiguous {kind} for {soname:?}"),
-        )
-        .with_details(json!({"soname": soname, "candidates": matches})));
-    }
-    Ok(matches.first().cloned())
-}
-
-fn elf_file(path: &Path) -> bool {
-    let mut magic = [0; 4];
-    std::fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut magic))
-        .is_ok()
-        && magic == *b"\x7fELF"
-}
-
 pub(super) fn remote_endpoint(parameters: &Value) -> Result<String> {
     let endpoint = parameters
         .get("endpoint")
@@ -1360,93 +1096,6 @@ pub(super) fn parse_process_start_time(stat: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn stages_every_matching_sibling_library() {
-        use std::process::Command as StdCommand;
-
-        if ["cc", "ldd", "patchelf"]
-            .iter()
-            .any(|command| StdCommand::new(command).arg("--version").output().is_err())
-        {
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let library_source = directory.path().join("library.c");
-        let program_source = directory.path().join("program.c");
-        let library = directory.path().join("libfixture.so.1.2");
-        let program = directory.path().join("program");
-        std::fs::write(&library_source, "int fixture(void) { return 42; }\n").unwrap();
-        std::fs::write(
-            &program_source,
-            "extern int fixture(void); int main(void) { return fixture() != 42; }\n",
-        )
-        .unwrap();
-        assert!(
-            StdCommand::new("cc")
-                .args(["-shared", "-fPIC", "-Wl,-soname,libfixture.so.1"])
-                .arg(&library_source)
-                .arg("-o")
-                .arg(&library)
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            StdCommand::new("cc")
-                .args(["-fPIE", "-pie"])
-                .arg(&program_source)
-                .arg(&library)
-                .arg("-o")
-                .arg(&program)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let libraries = StdCommand::new("ldd").arg(&program).output().unwrap();
-        assert!(libraries.status.success());
-        let libc = String::from_utf8(libraries.stdout)
-            .unwrap()
-            .lines()
-            .find_map(|line| {
-                let mut fields = line.split_whitespace();
-                (fields.next() == Some("libc.so.6"))
-                    .then(|| fields.nth(1).map(PathBuf::from))
-                    .flatten()
-            })
-            .unwrap();
-        let supplied_libc = directory.path().join("libc-supplied.so.6.999");
-        std::fs::copy(libc, &supplied_libc).unwrap();
-        let original = std::fs::read(&program).unwrap();
-
-        let runtime = prepare_bundled_runtime(&program, &directory.path().join("session"), 1)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(runtime.summary["mode"], "hybrid");
-        assert_eq!(runtime.summary["loader_source"], "system");
-        assert_eq!(
-            runtime.summary["bundled_libraries"],
-            json!(["libc.so.6", "libfixture.so.1"])
-        );
-        assert_eq!(runtime.summary["system_libraries"], json!([]));
-        let library_path = Path::new(runtime.summary["library_path"].as_str().unwrap());
-        assert_eq!(
-            std::fs::canonicalize(library_path.join("libfixture.so.1")).unwrap(),
-            library
-        );
-        assert_eq!(
-            std::fs::canonicalize(library_path.join("libc.so.6")).unwrap(),
-            supplied_libc
-        );
-        assert!(
-            StdCommand::new(&runtime.program)
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert_eq!(std::fs::read(program).unwrap(), original);
-    }
 
     #[test]
     fn parses_and_revalidates_attach_identity() {

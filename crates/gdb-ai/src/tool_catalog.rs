@@ -152,7 +152,9 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_session",
         // 2026-09-04: Agents combined create with target fields and guessed
         // remote parameter names. State the lifecycle split beside the schema.
-        description: "Create once, then launch program with argument-only argv; auto prefers every sibling ELF library by SONAME and reports supplied versus system dependencies; system opts out. Relative paths use workspace roots; use first_instruction for stripped executables. Remote uses connect_remote with endpoint and optional executable.",
+        // 2026-09-05: Runtime auto-detection changed the binary under test.
+        // Make caller-owned patching explicit without adding a launch mode.
+        description: "Create a session with action/profile only, then launch a program unchanged with argument-only argv; patch its runtime first when needed. Relative paths use workspace roots; use first_instruction for stripped executables. Remote uses connect_remote with endpoint and optional executable.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,

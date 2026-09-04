@@ -6,7 +6,7 @@ RUN cargo build --locked --release -p gdb-ai
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap gdb gdbserver patchelf python3 \
+    && apt-get install -y --no-install-recommends bubblewrap gdb gdbserver python3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/gdb-ai /usr/bin/gdb-ai
 COPY gdb-extension /usr/lib/gdb-ai

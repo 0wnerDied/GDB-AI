@@ -524,13 +524,6 @@
               "program": {
                 "type": "string"
               },
-              "runtime": {
-                "enum": [
-                  "auto",
-                  "system"
-                ],
-                "type": "string"
-              },
               "stop": {
                 "enum": [
                   "first_instruction",
