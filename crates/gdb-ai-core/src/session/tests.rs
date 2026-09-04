@@ -116,7 +116,19 @@ fn exit_wait_ignores_an_already_terminal_inferior() {
     stopped.event_seq += 1;
     stopped.stop_id = Some(StopId("stop_new".into()));
     stopped.inferiors.get_mut("i2").unwrap().status = InferiorStatus::Stopped;
+    stopped.snapshot = Some(crate::domain::SnapshotRef {
+        snapshot_id: "snapshot_new".into(),
+        stop_id: stopped.stop_id.clone().unwrap(),
+        status: crate::domain::SnapshotStatus::Ready,
+        partial: false,
+    });
     assert_eq!(settled_by(&stopped, Some(&baseline)), Some("stopped"));
+    assert_eq!(
+        wait_timeout_result(stopped.clone(), WaitUntil::Snapshot, Some(&baseline), None)
+            .unwrap()
+            .stop_id,
+        stopped.stop_id
+    );
     reducer
         .apply(&JournaledEvent::for_replay(
             5,

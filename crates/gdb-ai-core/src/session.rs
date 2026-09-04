@@ -882,9 +882,18 @@ impl SessionHandle {
                 })?;
             }
         };
-        tokio::time::timeout(timeout.max(Duration::from_millis(1)), wait)
-            .await
-            .map_err(|_| Error::new(ErrorCode::Timeout, "state wait timed out").retryable())?
+        match tokio::time::timeout(timeout.max(Duration::from_millis(1)), wait).await {
+            Ok(result) => result,
+            // 2026-09-04: A stop and the timer can become ready in the same
+            // scheduler turn. Recheck the published state before reporting a
+            // timeout so an already-ready snapshot is never hidden from Agents.
+            Err(_) => wait_timeout_result(
+                state.borrow().clone(),
+                until,
+                baseline.as_ref(),
+                expected_execution_epoch,
+            ),
+        }
     }
 
     pub async fn read_output(
@@ -1047,6 +1056,21 @@ fn wait_satisfied(state: &SessionState, until: WaitUntil, baseline: Option<&Wait
                     .is_none_or(|baseline| Some(&snapshot.stop_id) != baseline.stop_id.as_ref())
         }),
         WaitUntil::Exited => exited_after(state, baseline),
+    }
+}
+
+fn wait_timeout_result(
+    state: SessionState,
+    until: WaitUntil,
+    baseline: Option<&WaitBaseline>,
+    expected_execution_epoch: Option<u64>,
+) -> Result<SessionState> {
+    if expected_execution_epoch.is_none_or(|expected| state.execution_epoch == expected)
+        && wait_satisfied(&state, until, baseline)
+    {
+        Ok(state)
+    } else {
+        Err(Error::new(ErrorCode::Timeout, "state wait timed out").retryable())
     }
 }
 
