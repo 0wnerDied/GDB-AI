@@ -231,14 +231,27 @@ pub(crate) fn live_module_offset(
     let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {
         return Ok(None);
     };
-    module_offset_from_maps(&maps, module, offset)
+    let module = if Path::new(module).is_absolute() {
+        module.to_owned()
+    } else {
+        format!("/proc/{pid}/cwd/{module}")
+    };
+    module_offset_from_maps(&maps, &module, offset)
 }
 
 fn module_offset_from_maps(maps: &str, module: &str, offset: u64) -> Result<Option<String>> {
-    let requested_name = Path::new(module).file_name();
+    let requested_path = Path::new(module);
+    let requested_name = requested_path.file_name();
+    // 2026-09-04: GDB reports a library's SONAME symlink while proc maps
+    // records its resolved backing file. Match the canonical target path so
+    // the module identifier exposed in session state remains directly usable.
+    let canonical_module = std::fs::canonicalize(requested_path).ok();
     for mapping in maps.lines().filter_map(parse_proc_map) {
         let path = mapping["path"].as_str().unwrap_or("");
-        if path != module && requested_name != Path::new(path).file_name() {
+        if path != module
+            && requested_name != Path::new(path).file_name()
+            && canonical_module.as_deref() != Some(Path::new(path))
+        {
             continue;
         }
         let Some(start) = mapping["start"]
@@ -285,6 +298,25 @@ mod mapping_tests {
         assert_eq!(
             module_offset_from_maps(maps, "other", 0x1c9c).unwrap(),
             None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_module_offsets_through_soname_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let backing = directory.path().join("libsample.so.1.2");
+        let soname = directory.path().join("libsample.so.1");
+        std::fs::write(&backing, []).unwrap();
+        std::os::unix::fs::symlink(&backing, &soname).unwrap();
+        let maps = format!(
+            "70000000-70001000 r--p 00000000 00:21 1 {}\n",
+            backing.display()
+        );
+
+        assert_eq!(
+            module_offset_from_maps(&maps, soname.to_str().unwrap(), 0xef40).unwrap(),
+            Some("0x000000007000ef40".into())
         );
     }
 
