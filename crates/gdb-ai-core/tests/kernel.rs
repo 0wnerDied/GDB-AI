@@ -27,6 +27,30 @@ impl Drop for ChildGuard {
     }
 }
 
+#[test]
+fn rejects_incidental_kernel_module_names() {
+    if !support::require_commands(&["gdb"]) {
+        return;
+    }
+    let script =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/gateway/operations/kernel_symbols.py");
+    let gdb = std::env::var_os("GDB_AI_GDB_PATH").unwrap_or_else(|| "gdb".into());
+    let output = Command::new(gdb)
+        .args(["-nx", "-batch", "-x"])
+        .arg(script)
+        .args([
+            "-ex",
+            "python assert _module_name(b'6T\\0\\x01' + b'\\0' * 52, 0) is None; assert _module_name(b'sample_mod\\0', 0) is None; assert _module_name(b'sample_mod\\0' + b'\\0' * 45, 0) == 'sample_mod'",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "module-name parser check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn kernel_artifacts() -> Option<(PathBuf, PathBuf, PathBuf)> {
     let image = std::env::var_os("GDB_AI_KERNEL_IMAGE").map(PathBuf::from);
     let symbols = std::env::var_os("GDB_AI_KERNEL_VMLINUX").map(PathBuf::from);

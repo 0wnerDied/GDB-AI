@@ -249,11 +249,20 @@ def _module_span(address, size, ranges):
 
 
 def _module_name(data, offset):
-    end = data.find(b"\x00", offset, offset + 56)
+    limit = offset + 56
+    if limit > len(data):
+        return None
+    end = data.find(b"\x00", offset, limit)
     if end < 0:
         return None
     value = data[offset:end]
-    if len(value) < 2 or re.fullmatch(rb"[A-Za-z0-9_-]+", value) is None:
+    # 2026-09-04: With one loaded module, incidental short ASCII could win the
+    # RANDSTRUCT offset scan. Require the fixed module name field's zero fill.
+    if (
+        len(value) < 2
+        or any(data[end + 1:limit])
+        or re.fullmatch(rb"[A-Za-z0-9_-]+", value) is None
+    ):
         return None
     return value.decode("ascii")
 

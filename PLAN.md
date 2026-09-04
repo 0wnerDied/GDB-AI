@@ -385,6 +385,10 @@ A text-relative one-call probe then resolved a loaded distribution module,
 armed the dynamic breakpoint, captured its externally triggered execution, and
 cleaned up in 2.30s and 2.09s across two fresh KASLR boots. The legacy Linux
 6.1 `core_layout` path hit the same one-call probe without typed symbols.
+A blind single-module boot also exposed an incidental two-byte ASCII field as
+the inferred module name. The parser now requires the complete fixed-size name
+field and its zero padding; a focused GDB-Python regression rejects both the
+nonzero-padded and truncated candidates.
 
 Complete only the shared fixes demonstrated by these runs:
 
@@ -422,6 +426,8 @@ Complete only the shared fixes demonstrated by these runs:
   measured Linux 5.15 through 7.2 layouts, returning only semantic facts.
 - [x] Resolve stripped module identity and validated memory segments in the
   existing one-call bootstrap, including measured randomized layouts.
+- [x] Reject incomplete or nonzero-padded module-name candidates before the
+  randomized-layout offset scan selects them.
 - [x] Let one `gdb_probe` resolve a stripped kernel module text offset, run,
   capture the attributed hit, and clean up without raw GDB or fixed addresses.
 - [ ] Adopt page-walk semantics only when they beat the native workflow on a
