@@ -243,6 +243,8 @@ stripped PIE maps; its temporary breakpoint is rebound and removed internally.
 large result; use `next_offset` until `truncated` is false.
 Its `read` action accepts exactly one of `address` or `address_expression`; the
 latter resolves a GDB expression and reads the resulting address at one stop.
+`gdb_inspect` view `modules` includes both GDB's shared-library records and a
+bounded local mapping page, so a loader-launched main executable remains visible.
 If consistency is unknown or lost, the owner can attempt
 recovery or use `gdb_session` action `force_abort` to terminate resources
 without claiming a clean shutdown.

@@ -174,8 +174,14 @@ impl Gateway {
                 let reply = self
                     .inspection_command(&entry, request, "-file-list-shared-libraries", vec![])
                     .await?;
+                // 2026-09-04: GDB's shared-library command omits the main
+                // executable, forcing Agents to request mappings before they
+                // can use a target module offset. Include the bounded local
+                // mapping page in the same view.
+                let mapped_files = mappings(&state, 0, 64.min(self.config.limits.value_children))?;
                 Ok(json!({
                     "modules": normalized_modules(&reply.record),
+                    "mapped_files": mapped_files,
                     "evidence_seq": reply.evidence_seq
                 }))
             }

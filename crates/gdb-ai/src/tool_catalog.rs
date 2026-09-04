@@ -195,7 +195,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_inspect",
-        description: "Read one bounded view at a stop.",
+        description: "Read one bounded view at a stop; modules includes main-executable mappings.",
         discriminator: Some("view"),
         actions: INSPECTION_ACTIONS,
         read_only: true,

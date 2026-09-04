@@ -740,6 +740,27 @@ async fn local_debugging_vertical_slice() {
         expression_memory.result.as_ref().unwrap()["address"],
         Address::parse(&address).unwrap().as_str()
     );
+    let modules = successful(
+        gateway
+            .dispatch(
+                request(
+                    "modules-with-executable",
+                    Some(&session_id),
+                    "inspection.get",
+                    None,
+                    json!({"view": "modules", "stop_id": second_stop}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(
+        modules.result.as_ref().unwrap()["mapped_files"]["mappings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|mapping| mapping["path"].as_str() == executable.to_str())
+    );
     let unmapped = gateway
         .dispatch(
             request(
