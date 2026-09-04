@@ -95,7 +95,30 @@ impl StateReducer {
             DomainEvent::BackendExited { .. } => self.fail_backend(),
             DomainEvent::InferiorAdded { backend_id, pid } => {
                 let seq = self.state.event_seq;
+                let session_id = self.state.session_id.clone();
                 let inferior = self.ensure_inferior(backend_id, seq);
+                // 2026-09-04: GDB reuses a thread-group after exit, which
+                // carried its terminal code and handles into the next launch.
+                // A PID-bearing add for a new process starts a clean generation.
+                if pid.is_some()
+                    && (inferior.pid != *pid
+                        || matches!(
+                            inferior.status,
+                            InferiorStatus::Exited
+                                | InferiorStatus::Detached
+                                | InferiorStatus::Disconnected
+                        ))
+                {
+                    *inferior = InferiorState {
+                        id: InferiorId::from_backend(&session_id, seq, backend_id),
+                        backend_id: backend_id.clone(),
+                        pid: None,
+                        generation: seq,
+                        status: InferiorStatus::Empty,
+                        exit_code: None,
+                        threads: Default::default(),
+                    };
+                }
                 inferior.pid = *pid;
                 if pid.is_some() && inferior.status == InferiorStatus::Empty {
                     inferior.status = InferiorStatus::Connecting;
@@ -1010,6 +1033,55 @@ mod tests {
         );
         assert_eq!(reducer.state().execution_epoch, 1);
         assert_eq!(reducer.state().revision, revision);
+    }
+
+    #[test]
+    fn reused_backend_inferior_starts_a_clean_generation() {
+        let mut reducer =
+            StateReducer::new(SessionState::creating(SessionId("sess_restart".into())));
+        apply(&mut reducer, 1, DomainEvent::BackendStarted);
+        apply(
+            &mut reducer,
+            2,
+            DomainEvent::InferiorAdded {
+                backend_id: "i1".into(),
+                pid: Some(42),
+            },
+        );
+        apply(
+            &mut reducer,
+            3,
+            DomainEvent::ThreadCreated {
+                backend_inferior: "i1".into(),
+                backend_thread: "1".into(),
+            },
+        );
+        let first_id = reducer.state().inferiors["i1"].id.clone();
+        apply(
+            &mut reducer,
+            4,
+            DomainEvent::InferiorExited {
+                backend_id: "i1".into(),
+                exit_code: Some("0270".into()),
+                from_stop_record: true,
+            },
+        );
+        apply(
+            &mut reducer,
+            5,
+            DomainEvent::InferiorAdded {
+                backend_id: "i1".into(),
+                pid: Some(43),
+            },
+        );
+
+        let restarted = &reducer.state().inferiors["i1"];
+        assert_ne!(restarted.id, first_id);
+        assert_eq!(restarted.generation, 5);
+        assert_eq!(restarted.pid, Some(43));
+        assert_eq!(restarted.status, InferiorStatus::Connecting);
+        assert_eq!(restarted.exit_code, None);
+        assert!(restarted.threads.is_empty());
     }
 
     #[test]
