@@ -383,6 +383,25 @@ Existing `restart` removes seven calls from three-process replay.
 `continue_to_stop` removes the remaining probe-capture/run-to-crash split while
 preserving the first capture and returning bounded crash inspection.
 
+A stricter source-free follow-up treated runtime patching as a caller-owned
+precondition and required a network-derived, address-independent control proof
+across three fresh processes. Native GDB completed that proof in 28m39s with
+one debugger and 82 entered command or confirmation lines, including socket
+clients launched through GDB. An independent replay reproduced all three
+controlled exits. The projected arm found stable heap and library leaks plus
+the correct live object relationships, but did not obtain controlled behavior
+before the 60-minute cutoff. It made 75 successful API requests across two
+sessions; its earlier repeated crashes were correctly excluded from the final
+score because their fatal address was not selected by the input.
+
+The projected trace exposed two concrete adoption costs. Its create
+description advertised a profile hidden from ordinary callers and caused one
+guaranteed policy retry; the description now directs Agents to the usable
+default. Seventeen candidate trials each issued separate restart and resume
+calls before a probe. `gdb_probe restart=true` now owns that complete retry and
+removes those 34 calls. Neither fix is credited retroactively, and neither
+would by itself have supplied the missing heap-staging exploitation insight.
+
 ### Blind kernel exploit-speed qualification
 
 A concurrent source-free ring-1 run exposed a different adoption gap. Native
