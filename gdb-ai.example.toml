@@ -61,9 +61,9 @@ sessions = ".gdb-ai/sessions"
 [security]
 default_profile = "lab_mutation"
 workspace_roots = ["."]
-remote_allowlist = []
+remote_allowlist = [] # Empty accepts any GDB remote endpoint; entries restrict it.
 attach_allowlist = []
 sandbox = "disabled" # Set auto or required to enable bubblewrap hardening.
-kernel_enabled = false
+kernel_enabled = true
 monitor_allowlist = []
 # source_map = [{ from = "/build/src", to = "/workspace/src" }]

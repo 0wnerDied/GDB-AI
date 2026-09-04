@@ -268,8 +268,10 @@ impl SessionWorker {
                     &config.output,
                     SandboxOptions {
                         mode: config.security.sandbox,
-                        allow_network: profile == Profile::RawAdmin
-                            && !config.security.remote_allowlist.is_empty(),
+                        // 2026-09-04: Lab sessions may connect GDB remote
+                        // targets, so optional sandboxing must preserve their
+                        // network rather than silently isolating the stub.
+                        allow_network: matches!(profile, Profile::LabMutation | Profile::RawAdmin),
                     },
                 )
                 .await?,

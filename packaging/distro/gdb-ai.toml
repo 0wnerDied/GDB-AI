@@ -46,3 +46,4 @@ remote_allowlist = []
 attach_allowlist = []
 environment_allowlist = []
 sandbox = "auto"
+kernel_enabled = true

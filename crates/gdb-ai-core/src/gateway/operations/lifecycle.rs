@@ -661,7 +661,12 @@ impl Gateway {
         }
         let endpoint = remote_endpoint(&request.parameters)?;
         let wait = wait_spec(&request.parameters)?;
-        if !self.config.security.remote_allowlist.contains(&endpoint) {
+        // 2026-09-04: An empty allowlist made the default remote-debugging
+        // interface unusable. Empty now means unrestricted; entries opt in to
+        // exact endpoint restriction.
+        if !self.config.security.remote_allowlist.is_empty()
+            && !self.config.security.remote_allowlist.contains(&endpoint)
+        {
             return Err(Error::new(
                 ErrorCode::PolicyDenied,
                 "endpoint is not in security.remote_allowlist",

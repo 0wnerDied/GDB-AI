@@ -151,7 +151,7 @@ async fn connects_to_allowlisted_gdbserver() {
 }
 
 #[tokio::test]
-async fn remote_disconnect_invalidates_live_target_state() {
+async fn default_remote_connection_invalidates_state_on_disconnect() {
     if !support::require_commands(&["gdb", "gdbserver", "cc"]) {
         return;
     }
@@ -194,16 +194,14 @@ async fn remote_disconnect_invalidates_live_target_state() {
         },
         ..Config::default()
     };
-    config.security.default_profile = Profile::RawAdmin;
     config.security.workspace_roots = vec![directory.path().to_owned()];
-    config.security.remote_allowlist = vec![endpoint.clone()];
     // 2026-08-29: Loaded CI runners can deliver GDB's disconnect notification
     // after five seconds, so observe it for the configured command deadline.
     let disconnect_timeout = config.server.command_timeout();
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller {
         identity: "disconnect-test".into(),
-        admin: true,
+        admin: false,
     };
     let created = gateway
         .dispatch(

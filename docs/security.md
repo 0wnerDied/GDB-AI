@@ -11,7 +11,8 @@ paths resolve from those roots rather than the server process directory.
 Remote connections that name an executable also set GDB's working directory
 to its parent, so subsequent raw console file paths resolve there.
 Bubblewrap hardening is disabled by default. Operators may select `auto` or
-`required` when its filesystem and network namespaces are wanted.
+`required` for filesystem isolation. Observation profiles also isolate the
+network; `lab_mutation` and `raw_admin` retain it for remote GDB targets.
 
 Profiles separate offline observation, live observation, debug control,
 laboratory mutation, and raw administration. Raw access also requires an
@@ -20,9 +21,11 @@ surface after that authorization; raw MI cannot bypass workspace, attach,
 remote endpoint, inferior TTY, startup-setting, or process-lifecycle policy.
 
 The default local profile is `lab_mutation`, which permits ordinary inferior
-input and debugger mutations needed by exploit Agents. Operators may configure
-`debug_control`, `live_observer`, or `offline_core` when a read/control-only
-deployment is required; `raw_admin` remains explicit.
+input, debugger mutations, and remote GDB connections needed by exploit Agents.
+An empty `security.remote_allowlist` accepts any parsed GDB remote endpoint; a
+nonempty list restricts connections to those exact IP-address-and-port entries.
+Operators may configure `debug_control`, `live_observer`, or `offline_core`
+when a read/control-only deployment is required; `raw_admin` remains explicit.
 
 Memory reads are classified by the server. Core and proven ordinary local
 mappings remain read effects. `lab_mutation` and `raw_admin` profiles accept

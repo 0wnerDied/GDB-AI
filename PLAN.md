@@ -428,6 +428,9 @@ Complete only the shared fixes demonstrated by these runs:
   existing one-call bootstrap, including measured randomized layouts.
 - [x] Reject incomplete or nonzero-padded module-name candidates before the
   randomized-layout offset scan selects them.
+- [x] Let the default lab profile connect remote stubs, treat a configured
+  endpoint list as an opt-in restriction, and enable kernel inspection without
+  an administrative profile retry.
 - [x] Let one `gdb_probe` resolve a stripped kernel module text offset, run,
   capture the attributed hit, and clean up without raw GDB or fixed addresses.
 - [ ] Adopt page-walk semantics only when they beat the native workflow on a

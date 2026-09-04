@@ -50,12 +50,15 @@ impl Profile {
             Self::OfflineCore | Self::LiveObserver => effect == Effect::Read,
             Self::DebugControl => matches!(effect, Effect::Read | Effect::Control),
             Self::LabMutation => {
+                // 2026-09-04: Classifying remote GDB as administrative network
+                // access forced exploit Agents through a failing profile retry.
                 matches!(
                     effect,
                     Effect::Read
                         | Effect::VolatileTargetRead
                         | Effect::Control
                         | Effect::TargetMutation
+                        | Effect::Network
                 )
             }
             Self::RawAdmin => true,
@@ -168,6 +171,7 @@ mod tests {
                 .is_err()
         );
         assert!(Profile::LabMutation.authorize(Effect::Raw).is_err());
+        assert!(Profile::LabMutation.authorize(Effect::Network).is_ok());
         assert!(Profile::RawAdmin.authorize(Effect::Raw).is_ok());
         assert!(
             Profile::OfflineCore

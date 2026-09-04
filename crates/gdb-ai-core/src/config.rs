@@ -353,7 +353,9 @@ impl Default for SecurityConfig {
             // starts under load. Local Agent sessions start directly unless
             // an operator explicitly enables hardening.
             sandbox: SandboxMode::Disabled,
-            kernel_enabled: false,
+            // 2026-09-04: The advertised kernel tools failed in the default
+            // Agent configuration. Keep the provider ready for remote stubs.
+            kernel_enabled: true,
             monitor_allowlist: Vec::new(),
         }
     }
@@ -392,6 +394,7 @@ mod tests {
             Profile::LabMutation
         );
         assert_eq!(Config::default().security.sandbox, SandboxMode::Disabled);
+        assert!(Config::default().security.kernel_enabled);
         assert_eq!(
             default_state_directory(Some("/state".into()), Some("/home/user".into())),
             PathBuf::from("/state/gdb-ai")

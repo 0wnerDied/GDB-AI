@@ -1,9 +1,10 @@
 # Linux kernel debugging
 
-The conditional `linux-kernel` provider runs above the ordinary GDB/MI remote
-target. Typed task traversal requires a trusted, matching `vmlinux`. An x86-64
-QEMU stub can also provide the bounded symbol-free bootstrap and module views
-below. GDB/AI does not auto-load target scripts or invent typed symbols.
+The `linux-kernel` provider is enabled by default and runs above the ordinary
+GDB/MI remote target. Set `security.kernel_enabled=false` to disable it. Typed
+task traversal requires a trusted, matching `vmlinux`. An x86-64 QEMU stub can
+also provide the bounded symbol-free bootstrap and module views below. GDB/AI
+does not auto-load target scripts or invent typed symbols.
 
 `gdb_kernel` exposes two actions:
 
