@@ -1,12 +1,13 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     os::unix::fs::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
 };
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::process::Command;
 
 use super::{
     context::{WaitSpec, apply_wait, apply_wait_baseline, wait_if_requested, wait_spec},
@@ -392,6 +393,7 @@ impl Gateway {
             cwd: Option<String>,
             environment: BTreeMap<String, String>,
             environment_mode: String,
+            runtime: String,
             aslr: String,
             stop: StartPolicy,
             follow_fork: String,
@@ -407,6 +409,7 @@ impl Gateway {
                     cwd: None,
                     environment: BTreeMap::new(),
                     environment_mode: "clean".into(),
+                    runtime: "auto".into(),
                     aslr: "preserve".into(),
                     stop: StartPolicy::FirstInstruction,
                     follow_fork: "parent".into(),
@@ -436,6 +439,12 @@ impl Gateway {
         environment.extend(parameters.environment);
         validate_environment(&environment)?;
         validate_argv(&parameters.argv)?;
+        if !matches!(parameters.runtime.as_str(), "auto" | "system") {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "runtime must be auto or system",
+            ));
+        }
         // 2026-08-28: Launch canonicalized program before applying the
         // requested cwd, so an otherwise valid relative executable failed.
         let requested_cwd = parameters
@@ -484,6 +493,19 @@ impl Gateway {
         });
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
+        let bundled_runtime = if parameters.runtime == "auto" {
+            prepare_bundled_runtime(
+                &program,
+                entry.handle.session_directory(),
+                baseline.revision,
+            )
+            .await?
+        } else {
+            None
+        };
+        let debug_program = bundled_runtime
+            .as_ref()
+            .map_or(program.as_path(), |runtime| runtime.program.as_path());
         let aslr = parameters.aslr.clone();
         let disable_randomization = match aslr.as_str() {
             "preserve" => "off",
@@ -524,7 +546,7 @@ impl Gateway {
         };
         let mut setup = vec![
             MiCommand::new("-file-exec-and-symbols")?
-                .string(program.as_os_str().as_encoded_bytes()),
+                .string(debug_program.as_os_str().as_encoded_bytes()),
             MiCommand::new("-environment-cd")?.string(cwd.as_os_str().as_encoded_bytes()),
             // 2026-08-28: Clearing GDB's own environment did not clear the
             // inferior environment. Enforce environment_mode=clean explicitly.
@@ -587,13 +609,17 @@ impl Gateway {
             .await?;
         let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
-        Ok(json!({
+        let mut result = json!({
             "command": reply,
             "state": state,
             "capabilities": capabilities,
             "start_policy": start_policy.as_str(),
             "aslr": {"requested": aslr, "backend_managed": aslr_managed}
-        }))
+        });
+        if let Some(runtime) = bundled_runtime {
+            result["runtime"] = runtime.summary;
+        }
+        Ok(result)
     }
 
     pub(super) async fn target_attach(&self, request: &ApiRequest) -> Result<Value> {
@@ -978,6 +1004,226 @@ fn validate_launch_program(program: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+struct BundledRuntime {
+    program: PathBuf,
+    summary: Value,
+}
+
+async fn prepare_bundled_runtime(
+    program: &Path,
+    session_directory: &Path,
+    revision: u64,
+) -> Result<Option<BundledRuntime>> {
+    // 2026-09-05: Launch ignored complete challenge runtimes beside the
+    // executable, making Agents patch the target before every debug session.
+    // Patch only a session-local copy so GDB retains normal PIE symbol and
+    // breakpoint relocation while the supplied loader and libraries are used.
+    let parent = program.parent().unwrap_or(Path::new("/"));
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(None),
+    };
+    let runtime_files = entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(runtime_candidate_name)
+        })
+        .collect::<Vec<_>>();
+    let has_loader = runtime_files.iter().any(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(loader_candidate_name)
+    });
+    let has_library = runtime_files.iter().any(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(".so") && !loader_candidate_name(name))
+    });
+    if !has_loader || !has_library {
+        return Ok(None);
+    }
+    let interpreter = match Command::new("patchelf")
+        .arg("--print-interpreter")
+        .arg(program)
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::new(
+                ErrorCode::TargetUnavailable,
+                "bundled loader detected but patchelf is unavailable",
+            )
+            .with_details(json!({"candidates": runtime_files})));
+        }
+        Err(error) => {
+            return Err(Error::new(
+                ErrorCode::TargetUnavailable,
+                format!("cannot inspect launch runtime: {error}"),
+            ));
+        }
+    };
+    let Some(interpreter_soname) = Path::new(&interpreter)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return Ok(None);
+    };
+    let needed = Command::new("patchelf")
+        .arg("--print-needed")
+        .arg(program)
+        .output()
+        .await
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::TargetUnavailable,
+                format!("cannot inspect launch dependencies: {error}"),
+            )
+        })?;
+    if !needed.status.success() {
+        return Ok(None);
+    }
+    let needed = String::from_utf8_lossy(&needed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut candidates = BTreeMap::<String, BTreeSet<PathBuf>>::new();
+    for path in runtime_files {
+        let Ok(path) = std::fs::canonicalize(path) else {
+            continue;
+        };
+        if path == program || !path.is_file() {
+            continue;
+        }
+        let Ok(output) = Command::new("patchelf")
+            .arg("--print-soname")
+            .arg(&path)
+            .output()
+            .await
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let soname = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !soname.is_empty() {
+            candidates.entry(soname).or_default().insert(path);
+        }
+    }
+    let loader = unique_soname_candidate(&candidates, interpreter_soname, "loader")?;
+    let Some(loader) = loader else {
+        return Ok(None);
+    };
+    for name in &needed {
+        if unique_soname_candidate(&candidates, name, "library")?.is_none() {
+            return Ok(None);
+        }
+    }
+
+    let runtime_directory = session_directory.join(format!("runtime-{revision}"));
+    let library_directory = runtime_directory.join("lib");
+    std::fs::create_dir_all(&library_directory)?;
+    // 2026-09-05: A SONAME match still failed at launch when the versioned
+    // attachment lacked the DT_NEEDED filename. Stage aliases for every
+    // unambiguous sibling without changing the supplied files.
+    for (soname, matches) in &candidates {
+        if matches.len() != 1 || Path::new(soname).components().count() != 1 {
+            continue;
+        }
+        let link = library_directory.join(soname);
+        if let Err(error) = std::fs::remove_file(&link)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+        std::os::unix::fs::symlink(matches.first().unwrap(), link)?;
+    }
+    let file_name = program.file_name().ok_or_else(|| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            "launch program has no file name",
+        )
+    })?;
+    let prepared = runtime_directory.join(file_name);
+    let patched = Command::new("patchelf")
+        .arg("--no-sort")
+        .arg("--output")
+        .arg(&prepared)
+        .arg("--set-interpreter")
+        .arg(&loader)
+        .arg("--force-rpath")
+        .arg("--set-rpath")
+        .arg(&library_directory)
+        .arg(program)
+        .output()
+        .await
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::TargetUnavailable,
+                format!("cannot prepare bundled launch runtime: {error}"),
+            )
+        })?;
+    if !patched.status.success() {
+        let message = String::from_utf8_lossy(&patched.stderr);
+        return Err(Error::new(
+            ErrorCode::TargetUnavailable,
+            format!(
+                "patchelf could not prepare bundled runtime: {}",
+                message.trim()
+            ),
+        ));
+    }
+    std::fs::set_permissions(&prepared, program.metadata()?.permissions())?;
+    Ok(Some(BundledRuntime {
+        program: prepared.clone(),
+        summary: json!({
+            "mode": "bundled",
+            "prepared_program": prepared,
+            "loader": loader,
+            "library_path": library_directory,
+            "libraries": needed,
+        }),
+    }))
+}
+
+fn unique_soname_candidate(
+    candidates: &BTreeMap<String, BTreeSet<PathBuf>>,
+    soname: &str,
+    kind: &str,
+) -> Result<Option<PathBuf>> {
+    let Some(matches) = candidates.get(soname) else {
+        return Ok(None);
+    };
+    if matches.len() != 1 {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            format!("bundled runtime has ambiguous {kind} for {soname:?}"),
+        )
+        .with_details(json!({"soname": soname, "candidates": matches})));
+    }
+    Ok(matches.first().cloned())
+}
+
+fn runtime_candidate_name(name: &str) -> bool {
+    name.contains(".so") || loader_candidate_name(name)
+}
+
+fn loader_candidate_name(name: &str) -> bool {
+    name.starts_with("ld-")
+        || name.starts_with("ld-linux")
+        || name.starts_with("ld-musl")
+        || name.starts_with("ld.so")
 }
 
 pub(super) fn remote_endpoint(parameters: &Value) -> Result<String> {

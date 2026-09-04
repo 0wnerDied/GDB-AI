@@ -97,7 +97,8 @@ impl RpcFault {
 // trigger and rebuilt the operation around socket traffic. State that an
 // external trigger runs concurrently with the blocking probe call.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; launch; argv \
-excludes program; use first_instruction for stripped executables. MCP manages leases and \
+excludes program; auto uses a complete sibling loader/library set; use runtime=system to opt out; \
+use first_instruction for stripped executables. MCP manages leases and \
 revisions. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
 stop/exit when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
 accepted/running only for later I/O. Use gdb_io write steps with wait_for for prompt-driven \

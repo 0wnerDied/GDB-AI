@@ -396,3 +396,178 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
             .any(|breakpoint| breakpoint.id.0 == public_id && !breakpoint.pending)
     );
 }
+
+#[tokio::test]
+async fn launches_a_complete_bundled_runtime_without_losing_pie_breakpoints() {
+    if !support::require_commands(&["gdb", "cc", "ldd", "patchelf"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let executable = directory.path().join("bundled-pie");
+    let source = directory.path().join("bundled-pie.c");
+    std::fs::write(
+        &source,
+        "volatile int calls;\n__attribute__((noinline)) void marker(void) { calls++; }\nint main(void) { marker(); return calls != 1; }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-fPIE", "-pie", "-O0", "-g"])
+            .arg(source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let original = std::fs::read(&executable).unwrap();
+    let interpreter = Command::new("patchelf")
+        .arg("--print-interpreter")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(interpreter.status.success());
+    let interpreter =
+        std::fs::canonicalize(String::from_utf8(interpreter.stdout).unwrap().trim()).unwrap();
+    let libraries = Command::new("ldd").arg(&executable).output().unwrap();
+    assert!(libraries.status.success());
+    let libc = String::from_utf8(libraries.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some("libc.so.6"))
+                .then(|| fields.nth(1).map(std::path::PathBuf::from))
+                .flatten()
+        })
+        .map(std::fs::canonicalize)
+        .unwrap()
+        .unwrap();
+    let bundled_loader = directory.path().join("ld-bundled.so");
+    let bundled_libc = directory.path().join("libc-bundled.so.6.999");
+    std::fs::copy(interpreter, &bundled_loader).unwrap();
+    std::fs::copy(libc, &bundled_libc).unwrap();
+
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("bundled-runtime-test");
+    let created = call(
+        &gateway,
+        &caller,
+        request("create-bundled", None, "session.create", None, json!({})),
+    )
+    .await;
+    let session_id = created.session_id.clone().unwrap();
+    let lease_id = created.result.as_ref().unwrap()["write_lease"]["lease_id"]
+        .as_str()
+        .unwrap();
+    macro_rules! invoke {
+        ($id:literal, $method:literal, $revision:expr, $parameters:expr) => {
+            call(
+                &gateway,
+                &caller,
+                request($id, Some(&session_id), $method, $revision, $parameters),
+            )
+            .await
+        };
+    }
+    let launched = invoke!(
+        "launch-bundled",
+        "target.launch",
+        created.revision,
+        json!({
+            "lease_id": lease_id,
+            "program": executable,
+            "stop": "first_instruction",
+            "wait": {"until": "snapshot", "timeout_ms": 5000}
+        })
+    );
+    let runtime = &launched.result.as_ref().unwrap()["runtime"];
+    assert_eq!(std::fs::read(&executable).unwrap(), original);
+    assert_eq!(runtime["mode"], "bundled");
+    assert_eq!(runtime["loader"].as_str(), bundled_loader.to_str());
+    assert_eq!(runtime["libraries"], json!(["libc.so.6"]));
+    assert_eq!(
+        std::fs::canonicalize(
+            std::path::Path::new(runtime["library_path"].as_str().unwrap()).join("libc.so.6")
+        )
+        .unwrap(),
+        bundled_libc
+    );
+    assert!(
+        runtime["prepared_program"]
+            .as_str()
+            .unwrap()
+            .ends_with("/bundled-pie")
+    );
+    let breakpoint = invoke!(
+        "break-bundled",
+        "breakpoint.create",
+        launched.revision,
+        json!({"lease_id": lease_id, "function": "marker"})
+    );
+    let first = invoke!(
+        "continue-bundled",
+        "execution.control",
+        breakpoint.revision,
+        json!({
+            "action": "continue",
+            "lease_id": lease_id,
+            "stop_id": launched.state.as_ref().unwrap().stop_id.clone(),
+            "wait": {"until": "snapshot", "timeout_ms": 5000}
+        })
+    );
+    assert_eq!(
+        first.state.as_ref().unwrap().stop_reason.as_deref(),
+        Some("breakpoint-hit")
+    );
+    let pid = first
+        .state
+        .as_ref()
+        .unwrap()
+        .inferiors
+        .values()
+        .find_map(|inferior| inferior.pid)
+        .unwrap();
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap();
+    assert!(
+        maps.lines()
+            .any(|line| line.ends_with(&format!(" {}", bundled_libc.display())))
+    );
+    let restarted = invoke!(
+        "restart-bundled",
+        "target.restart",
+        first.revision,
+        json!({
+            "lease_id": lease_id,
+            "stop": "first_instruction",
+            "wait": {"until": "snapshot", "timeout_ms": 5000}
+        })
+    );
+    let second = invoke!(
+        "continue-restarted-bundled",
+        "execution.control",
+        restarted.revision,
+        json!({
+            "action": "continue",
+            "lease_id": lease_id,
+            "stop_id": restarted.state.as_ref().unwrap().stop_id.clone(),
+            "wait": {"until": "snapshot", "timeout_ms": 5000}
+        })
+    );
+    assert_eq!(
+        second.state.as_ref().unwrap().stop_reason.as_deref(),
+        Some("breakpoint-hit")
+    );
+    gateway.shutdown().await;
+}

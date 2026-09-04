@@ -432,6 +432,8 @@ Complete only the shared fixes demonstrated by these runs:
 - [x] Let one projected PTY write gate ordered input steps on exact target
   output, avoiding one Agent round trip per prompt without pre-queuing answers
   that a broad target read can consume.
+- [x] Select a complete sibling ELF loader/library set through a session-local
+  patched copy, preserving the original target, PIE symbols, and restart flow.
 - [x] Finish the concurrent blind ring-1 qualification, measuring stop
   attribution, guest symbol/module discovery, reconnects, primitive and exploit
   wall time without supplying source.

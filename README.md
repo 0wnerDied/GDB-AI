@@ -116,7 +116,8 @@ inferior restoration after GDB death.
   not depend on the host glibc version
 - Bubblewrap for optional mount/network hardening (`auto` reports absence;
   `required` fails closed); it is not a complete untrusted-code sandbox
-- A C compiler for integration tests
+- A C compiler and `patchelf` for integration tests and automatic sibling
+  loader/library selection
 - Optional: gdbserver, Python-enabled GDB, Node.js 18 or newer
 - AArch64 RSP integration: gdb-multiarch, qemu-user, and an AArch64 C compiler
 - AArch64 system integration: Docker, qemu-system-aarch64,
@@ -249,7 +250,13 @@ The timeout covers the whole sequence. Success returns `steps_completed` and
 `written`; a missing prompt reports its zero-based `step_index`, accumulated
 write count, output cursor, and bounded observed PTY tail.
 For `gdb_session` launch, `program` names the executable and `argv` contains
-only the arguments that follow it.
+only the arguments that follow it. The default `runtime: "auto"` uses a
+session-local patched copy when the program directory contains exactly one
+loader matching its ELF interpreter and exactly one matching library for every
+direct dependency. The response reports the selected loader, library path,
+dependencies, and prepared program. The original executable is unchanged, and
+`restart` reuses the prepared copy. Incomplete bundles and static executables
+keep the system runtime; set `runtime: "system"` to disable detection.
 Projected terminal state reports `exit_code` as a decimal integer instead of
 GDB/MI's octal text.
 A standalone `gdb_batch` accepts explicit names when the same view is needed

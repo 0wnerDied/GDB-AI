@@ -30,11 +30,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bubblewrap gcc gcc-aarch64-linux-gnu gdb gdb-multiarch \
-            gdbserver qemu-user
+            gdbserver patchelf qemu-user
       - name: Verify debugger prerequisites
         run: |
           gdb --version
           gdbserver --version
+          patchelf --version
           gcc --version
           output=$(printf '1-gdb-exit\n' | gdb -q -nx --interpreter=mi4)
           grep -q '1\^exit' <<<"$output"
