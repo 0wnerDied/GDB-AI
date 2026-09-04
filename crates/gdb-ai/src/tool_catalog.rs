@@ -150,7 +150,9 @@ const RAW_ACTIONS: &[ToolAction] = &[action!("mi", RawMi), action!("console", Ra
 const TOOLS: &[ToolProjection] = &[
     ToolProjection {
         name: "gdb_session",
-        description: "Manage sessions and targets; use first_instruction for stripped executables.",
+        // 2026-09-04: An Agent repeated the executable in argv because the
+        // launch convention appeared only in initialization instructions.
+        description: "Manage sessions and targets; launch program names the executable and argv contains only its arguments; use first_instruction for stripped executables.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,

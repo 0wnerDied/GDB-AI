@@ -226,6 +226,8 @@ views from its resulting stop in the same `gdb_run` call; each view is its
 result key. Successful input adds no echo; a stalled write reports exact
 `written` and `remaining` byte counts without wedging the session. Use
 `gdb_io` for open-ended interaction.
+For `gdb_session` launch, `program` names the executable and `argv` contains
+only the arguments that follow it.
 Projected terminal state reports `exit_code` as a decimal integer instead of
 GDB/MI's octal text.
 A standalone `gdb_batch` accepts explicit names when the same view is needed
