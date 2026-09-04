@@ -369,6 +369,11 @@ layout, full version, and per-CPU current tasks in 2.65s. The first GDB/AI
 symbol-free bootstrap now returns the exact image range and version plus four
 module mapping candidates in 1.14s. Internal filtering reduced three semantic
 views from a 64 MiB journal failure to 65 KiB while keeping the target facts.
+The combined one-call bootstrap also returns exact requested symbols and all
+CPU tasks. Fresh official x86-64 distribution kernels spanning Linux 5.15,
+6.1, 6.6, 6.12, and 7.2 completed it in 1.60s, 1.15s, 2.13s, 2.08s, and 3.05s.
+Every symbol address matched the independent GEF decoder; a second KASLR boot
+changed every kernel base and passed again, excluding fixed runtime addresses.
 
 Complete only the shared fixes demonstrated by these runs:
 
@@ -402,9 +407,11 @@ Complete only the shared fixes demonstrated by these runs:
 - [ ] Detect matching Linux `CONFIG_GDB_SCRIPTS` helpers and project the proven
   `lx-symbols`, module, task, dmesg, current/per-CPU, and address-translation
   semantics as bounded kernel views; keep the typed provider as the fallback.
-- [ ] Adopt GEF's proven symbol-free current-task, module-identity, page-walk,
-  and kallsyms semantics incrementally when each beats the native workflow on
-  a blind target; do not import its UI or compatibility surface wholesale.
+- [x] Decode exact requested kallsyms and per-CPU current tasks inside GDB for
+  measured Linux 5.15 through 7.2 layouts, returning only semantic facts.
+- [ ] Adopt GEF's module-identity and page-walk semantics only when each beats
+  the native workflow on a blind target; do not import its UI or compatibility
+  surface wholesale.
 - [ ] Detect KGDB/KDB separately from a QEMU gdbstub. Normalize read-oriented
   `monitor` process, module, and dmesg results while GDB remains the sole run
   controller, as required by the upstream debugger contract.

@@ -308,7 +308,7 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_kernel",
         // 2026-09-04: Agents guessed `what` and promoted view names to actions.
         // Spell out the two-field inspection shape beside its strict schema.
-        description: "Use action=inspect plus view=bootstrap|capabilities|version|base|current_task|init_task|tasks|modules|stack|panic; bootstrap returns compact symbol-free QEMU kernel facts in one call; action=monitor takes command.",
+        description: "Use action=inspect plus view=bootstrap|symbols|capabilities|version|base|current_task|init_task|tasks|modules|stack|panic; symbols requires names=[...], while bootstrap may take names to return layout, exact kallsyms, and current tasks together; action=monitor takes command.",
         discriminator: Some("action"),
         actions: KERNEL_ACTIONS,
         read_only: false,

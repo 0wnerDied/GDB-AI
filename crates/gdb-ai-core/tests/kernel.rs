@@ -597,3 +597,121 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn bootstraps_a_symbol_free_modern_kernel_over_qemu_rsp() {
+    let Some(endpoint) = std::env::var_os("GDB_AI_KERNEL_RSP_ENDPOINT") else {
+        eprintln!("skipped symbol-free kernel integration; RSP endpoint is not configured");
+        return;
+    };
+    if !support::require_commands(&["gdb"]) {
+        return;
+    }
+    let endpoint = endpoint.to_string_lossy().into_owned();
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.default_profile = Profile::RawAdmin;
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    config.security.remote_allowlist = vec![endpoint.clone()];
+    config.security.kernel_enabled = true;
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller {
+        identity: "symbol-free-kernel-test".into(),
+        admin: true,
+    };
+
+    let created = call(
+        &gateway,
+        &caller,
+        request("create", None, "session.create", None, json!({})),
+    )
+    .await;
+    let session_id = created.session_id.as_deref().unwrap();
+    let lease_id = created.result.as_ref().unwrap()["write_lease"]["lease_id"]
+        .as_str()
+        .unwrap();
+    let connected = call(
+        &gateway,
+        &caller,
+        request(
+            "connect",
+            Some(session_id),
+            "target.connect_remote",
+            created.revision,
+            json!({
+                "lease_id": lease_id,
+                "mode": "remote",
+                "endpoint": endpoint,
+                "wait": {"until": "snapshot", "timeout_ms": 5000}
+            }),
+        ),
+    )
+    .await;
+    let stop_id = connected.state.as_ref().unwrap().stop_id.as_ref().unwrap();
+    let layout = call(
+        &gateway,
+        &caller,
+        request(
+            "layout",
+            Some(session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "bootstrap", "stop_id": stop_id}),
+        ),
+    )
+    .await;
+    let layout = layout.result.as_ref().unwrap();
+    assert!(
+        layout["version"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("Linux version "))
+    );
+    assert!(
+        layout["image_segments"]
+            .as_array()
+            .is_some_and(|segments| !segments.is_empty())
+    );
+
+    let started = std::time::Instant::now();
+    let bootstrap = call(
+        &gateway,
+        &caller,
+        request(
+            "bootstrap",
+            Some(session_id),
+            "kernel.inspect",
+            None,
+            json!({
+                "view": "bootstrap",
+                "stop_id": stop_id,
+                "names": ["_stext", "commit_creds", "prepare_kernel_cred"]
+            }),
+        ),
+    )
+    .await;
+    let result = bootstrap.result.as_ref().unwrap();
+    assert_eq!(result["missing_symbols"], json!([]));
+    assert_eq!(result["symbols"].as_array().unwrap().len(), 3);
+    assert!(
+        result["current_tasks"]
+            .as_array()
+            .is_some_and(|tasks| !tasks.is_empty()),
+        "bootstrap must recover at least the selected CPU task: {result}"
+    );
+    assert!(result["symbols"].as_array().unwrap().iter().all(|symbol| {
+        symbol["address"]
+            .as_str()
+            .is_some_and(|address| address.starts_with("0x"))
+    }));
+    eprintln!("symbol-free bootstrap elapsed: {:?}", started.elapsed());
+    gateway.shutdown().await;
+}

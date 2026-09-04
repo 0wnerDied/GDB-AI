@@ -47,13 +47,20 @@ impl KernelMapping {
 }
 
 #[derive(Debug)]
-struct KernelBootstrap {
+struct KernelImageContext {
     pc: u64,
     image: KernelMapping,
-    version_address: Option<u64>,
-    version: Option<String>,
+    image_mappings: Vec<KernelMapping>,
     module_candidates: Vec<KernelMapping>,
     module_candidates_truncated: bool,
+    evidence_seq: u64,
+}
+
+#[derive(Debug)]
+struct KernelBootstrap {
+    context: KernelImageContext,
+    version_address: Option<u64>,
+    version: Option<String>,
     evidence_seq: u64,
 }
 
@@ -80,7 +87,7 @@ fn parse_qemu_memory_map(output: &[u8]) -> Vec<KernelMapping> {
     mappings
 }
 
-fn select_kernel_image(mappings: &[KernelMapping]) -> Option<KernelMapping> {
+fn kernel_image_mappings(mappings: &[KernelMapping]) -> Vec<KernelMapping> {
     mappings
         .iter()
         .filter(|mapping| {
@@ -89,8 +96,20 @@ fn select_kernel_image(mappings: &[KernelMapping]) -> Option<KernelMapping> {
                 && mapping.size() >= 1024 * 1024
                 && !mapping.permissions.contains('w')
         })
-        .min_by_key(|mapping| mapping.start)
         .cloned()
+        .collect()
+}
+
+fn select_kernel_image(mappings: &[KernelMapping]) -> Option<KernelMapping> {
+    let mappings = kernel_image_mappings(mappings);
+    // 2026-09-04: Some distro kernels place text and rodata in separate
+    // mappings. Treat their complete span as the image while preserving each
+    // readable segment for searches, so gaps cannot hide version or kallsyms.
+    Some(KernelMapping {
+        start: mappings.first()?.start,
+        end: mappings.last()?.end,
+        permissions: "-r-".into(),
+    })
 }
 
 fn command_output(reply: &crate::session::CommandReply) -> Vec<u8> {
@@ -101,6 +120,52 @@ fn command_output(reply: &crate::session::CommandReply) -> Vec<u8> {
         }
     }
     output
+}
+
+const KERNEL_SYMBOL_PREFIX: &str = "gdbai-kernel-symbols:";
+
+fn kernel_symbol_output(output: &[u8]) -> Result<Value> {
+    let output = String::from_utf8_lossy(output);
+    let start = output
+        .find(KERNEL_SYMBOL_PREFIX)
+        .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB omitted kernel symbol facts"))?
+        + KERNEL_SYMBOL_PREFIX.len();
+    let end = output[start..]
+        .find(['\r', '\n'])
+        .map_or(output.len(), |end| start + end);
+    let value: Value = serde_json::from_str(&output[start..end])?;
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return Err(Error::new(ErrorCode::CapabilityMissing, error));
+    }
+    Ok(value)
+}
+
+fn requested_kernel_symbols(parameters: &Value, required: bool) -> Result<Vec<String>> {
+    let Some(values) = parameters.get("names") else {
+        return if required {
+            Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "names is required for the symbols view",
+            ))
+        } else {
+            Ok(Vec::new())
+        };
+    };
+    let names = values
+        .as_array()
+        .expect("kernel names passed contract validation")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if names.is_empty() || names.len() > 64 || names.iter().any(String::is_empty) {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "names must contain between 1 and 64 non-empty symbol names",
+        ));
+    }
+    Ok(names)
 }
 
 async fn kernel_current_text(
@@ -174,6 +239,131 @@ async fn kernel_address(
 }
 
 impl Gateway {
+    async fn kernel_image_context(
+        &self,
+        entry: &SessionEntry,
+        parameters: &Value,
+        state: &crate::domain::SessionState,
+    ) -> Result<KernelImageContext> {
+        let names_reply = entry
+            .handle
+            .command(MiCommand::new("-data-list-register-names")?)
+            .await?;
+        let names = result_string_list(&names_reply.record, "register-names");
+        if find_register_name(&names, "gs_base").is_none() {
+            return Err(Error::new(
+                ErrorCode::CapabilityMissing,
+                "symbol-free bootstrap currently requires an x86-64 QEMU target",
+            ));
+        }
+        let (cs, cs_seq) = kernel_address(entry, parameters, state, "$cs").await?;
+        if cs & 3 == 3 {
+            return Err(Error::new(
+                ErrorCode::CapabilityMissing,
+                "symbol-free bootstrap requires a stop in kernel context",
+            ));
+        }
+        let (pc, pc_seq) = kernel_address(entry, parameters, state, "$pc").await?;
+        // 2026-09-04: Forwarding `monitor info mem` produced tens
+        // of MiB of MI and journal data before the useful kernel
+        // mappings. Capture it inside GDB and emit only global
+        // kernel addresses so one semantic call stays bounded.
+        let monitor = entry
+            .handle
+            .command(
+                MiCommand::new("-interpreter-exec")?
+                    .bare("console")?
+                    .string(
+                        "python import gdb; print('|'.join(line for line in gdb.execute('monitor info mem', to_string=True).splitlines() if line.startswith('ffffffff')))"
+                    ),
+            )
+            .await?;
+        let output = command_output(&monitor);
+        let mappings = parse_qemu_memory_map(&output);
+        let image_mappings = kernel_image_mappings(&mappings);
+        // 2026-09-04: A stop inside a loadable module made the PC
+        // mapping look like the kernel image. Select the first
+        // large read-only core mapping independently of stop site.
+        let image = select_kernel_image(&mappings).ok_or_else(|| {
+            Error::new(
+                ErrorCode::CapabilityMissing,
+                "QEMU did not report a symbol-free kernel image mapping",
+            )
+        })?;
+        let mut module_candidates = mappings
+            .into_iter()
+            .filter(|mapping| {
+                mapping.start >= X86_MODULE_START
+                    && mapping.end <= X86_MODULE_END
+                    && (mapping.end <= image.start || mapping.start >= image.end)
+            })
+            .collect::<Vec<_>>();
+        let module_candidates_truncated = module_candidates.len() > 128;
+        module_candidates.truncate(128);
+        Ok(KernelImageContext {
+            pc,
+            image,
+            image_mappings,
+            module_candidates,
+            module_candidates_truncated,
+            evidence_seq: names_reply
+                .evidence_seq
+                .max(cs_seq)
+                .max(pc_seq)
+                .max(monitor.evidence_seq),
+        })
+    }
+
+    async fn scan_kernel_symbols(
+        &self,
+        entry: &SessionEntry,
+        image_mappings: &[KernelMapping],
+        names: &[String],
+    ) -> Result<(Value, u64)> {
+        let names = serde_json::to_string(names)?;
+        let ranges = serde_json::to_string(
+            &image_mappings
+                .iter()
+                .map(|mapping| [mapping.start, mapping.end])
+                .collect::<Vec<_>>(),
+        )?;
+        let script = format!(
+            "{}\n_gdbai_kernel_symbols({ranges}, {names})",
+            include_str!("kernel_symbols.py"),
+        );
+        let command = format!("python exec({})", serde_json::to_string(&script)?);
+        let reply = entry
+            .handle
+            .command(
+                MiCommand::new("-interpreter-exec")?
+                    .bare("console")?
+                    .string(command),
+            )
+            .await?;
+        Ok((
+            kernel_symbol_output(&command_output(&reply))?,
+            reply.evidence_seq,
+        ))
+    }
+
+    async fn symbol_free_kernel_facts(
+        &self,
+        entry: &SessionEntry,
+        parameters: &Value,
+        state: &crate::domain::SessionState,
+        names: &[String],
+    ) -> Result<(KernelImageContext, Value, u64)> {
+        // 2026-09-04: Symbol-less guests previously forced Agents to transfer
+        // raw maps and rebuild kallsyms manually. Keep discovery and exact-name
+        // resolution behind one stopped-state observation.
+        let context = self.kernel_image_context(entry, parameters, state).await?;
+        let (facts, evidence_seq) = self
+            .scan_kernel_symbols(entry, &context.image_mappings, names)
+            .await?;
+        let evidence_seq = context.evidence_seq.max(evidence_seq);
+        Ok((context, facts, evidence_seq))
+    }
+
     async fn kernel_bootstrap(
         &self,
         entry: &SessionEntry,
@@ -185,128 +375,70 @@ impl Gateway {
             .stable_observation(
                 state,
                 Box::pin(async {
-                    let names_reply = entry
-                        .handle
-                        .command(MiCommand::new("-data-list-register-names")?)
-                        .await?;
-                    let names = result_string_list(&names_reply.record, "register-names");
-                    if find_register_name(&names, "gs_base").is_none() {
-                        return Err(Error::new(
-                            ErrorCode::CapabilityMissing,
-                            "symbol-free bootstrap currently requires an x86-64 QEMU target",
-                        ));
-                    }
-                    let (cs, cs_seq) = kernel_address(entry, parameters, state, "$cs").await?;
-                    if cs & 3 == 3 {
-                        return Err(Error::new(
-                            ErrorCode::CapabilityMissing,
-                            "symbol-free bootstrap requires a stop in kernel context",
-                        ));
-                    }
-                    let (pc, pc_seq) = kernel_address(entry, parameters, state, "$pc").await?;
-                    // 2026-09-04: Forwarding `monitor info mem` produced tens
-                    // of MiB of MI and journal data before the useful kernel
-                    // mappings. Capture it inside GDB and emit only global
-                    // kernel addresses so one semantic call stays bounded.
-                    let monitor = entry
-                        .handle
-                        .command(
-                            MiCommand::new("-interpreter-exec")?
-                                .bare("console")?
-                                .string(
-                                    "python import gdb; print('|'.join(line for line in gdb.execute('monitor info mem', to_string=True).splitlines() if line.startswith('ffffffff')))"
-                                ),
-                        )
-                        .await?;
-                    let output = command_output(&monitor);
-                    let mappings = parse_qemu_memory_map(&output);
-                    // 2026-09-04: A stop inside a loadable module made the PC
-                    // mapping look like the kernel image. Select the first
-                    // large read-only core mapping independently of stop site.
-                    let image = select_kernel_image(&mappings).ok_or_else(|| {
-                        Error::new(
-                            ErrorCode::CapabilityMissing,
-                            "QEMU did not report a symbol-free kernel image mapping",
-                        )
-                    })?;
-
+                    let context = self.kernel_image_context(entry, parameters, state).await?;
                     let needle = b"Linux version ";
                     let pattern = needle
                         .iter()
                         .map(|byte| format!("0x{byte:02x}"))
                         .collect::<Vec<_>>()
                         .join(",");
-                    let image_length = usize::try_from(image.end - image.start).map_err(|_| {
-                        Error::new(ErrorCode::OutputLimit, "kernel image mapping is too large")
-                    })?;
-                    let find = entry
-                        .handle
-                        .command(
-                            MiCommand::new("-interpreter-exec")?
-                                .bare("console")?
-                                .string(format!(
-                                    "find /b /9 0x{:x}, +{}, {pattern}",
-                                    image.start, image_length
-                                )),
-                        )
-                        .await?;
-                    let (matches, _, _, _) =
-                        find_memory_result(&find, image.start, image_length, 8);
                     let mut version_address = None;
                     let mut version = None;
-                    let mut version_seq = find.evidence_seq;
+                    let mut version_seq = context.evidence_seq;
                     // 2026-09-04: The image can retain a shorter banner
                     // template before the populated linux_banner. Prefer the
                     // longest bounded match so version reports runtime text.
-                    for address in matches
-                        .iter()
-                        .filter_map(|address| parse_address(address).ok())
-                    {
-                        let length = usize::try_from((image.end - address).min(512)).unwrap_or(512);
-                        let (bytes, evidence_seq) =
-                            read_memory_bytes(&entry.handle, state, address, length, true).await?;
-                        let end = bytes
+                    for mapping in &context.image_mappings {
+                        let length = usize::try_from(mapping.size()).map_err(|_| {
+                            Error::new(ErrorCode::OutputLimit, "kernel image mapping is too large")
+                        })?;
+                        let find = entry
+                            .handle
+                            .command(
+                                MiCommand::new("-interpreter-exec")?
+                                    .bare("console")?
+                                    .string(format!(
+                                        "find /b /9 0x{:x}, +{}, {pattern}",
+                                        mapping.start, length
+                                    )),
+                            )
+                            .await?;
+                        let (matches, _, _, _) =
+                            find_memory_result(&find, mapping.start, length, 8);
+                        version_seq = version_seq.max(find.evidence_seq);
+                        for address in matches
                             .iter()
-                            .position(|byte| *byte == 0)
-                            .unwrap_or(bytes.len());
-                        let candidate = String::from_utf8_lossy(&bytes[..end])
-                            .trim_end_matches(['\r', '\n'])
-                            .to_owned();
-                        if candidate.starts_with("Linux version ")
-                            && version
-                                .as_ref()
-                                .is_none_or(|current: &String| candidate.len() > current.len())
+                            .filter_map(|address| parse_address(address).ok())
                         {
-                            version_address = Some(address);
-                            version = Some(candidate);
+                            let length =
+                                usize::try_from((mapping.end - address).min(512)).unwrap_or(512);
+                            let (bytes, evidence_seq) =
+                                read_memory_bytes(&entry.handle, state, address, length, true)
+                                    .await?;
+                            let end = bytes
+                                .iter()
+                                .position(|byte| *byte == 0)
+                                .unwrap_or(bytes.len());
+                            let candidate = String::from_utf8_lossy(&bytes[..end])
+                                .trim_end_matches(['\r', '\n'])
+                                .to_owned();
+                            if candidate.starts_with("Linux version ")
+                                && version
+                                    .as_ref()
+                                    .is_none_or(|current: &String| candidate.len() > current.len())
+                            {
+                                version_address = Some(address);
+                                version = Some(candidate);
+                            }
+                            version_seq = version_seq.max(evidence_seq);
                         }
-                        version_seq = version_seq.max(evidence_seq);
                     }
 
-                    let mut module_candidates = mappings
-                        .into_iter()
-                        .filter(|mapping| {
-                            mapping.start >= X86_MODULE_START
-                                && mapping.end <= X86_MODULE_END
-                                && (mapping.end <= image.start || mapping.start >= image.end)
-                        })
-                        .collect::<Vec<_>>();
-                    let module_candidates_truncated = module_candidates.len() > 128;
-                    module_candidates.truncate(128);
                     Ok(KernelBootstrap {
-                        pc,
-                        image,
+                        evidence_seq: context.evidence_seq.max(version_seq),
+                        context,
                         version_address,
                         version,
-                        module_candidates,
-                        module_candidates_truncated,
-                        evidence_seq: names_reply
-                            .evidence_seq
-                            .max(cs_seq)
-                            .max(pc_seq)
-                            .max(monitor.evidence_seq)
-                            .max(find.evidence_seq)
-                            .max(version_seq),
                     })
                 }),
             )
@@ -315,7 +447,7 @@ impl Gateway {
 
     fn kernel_bootstrap_result(
         &self,
-        bootstrap: KernelBootstrap,
+        bootstrap: &KernelBootstrap,
         state: &crate::domain::SessionState,
     ) -> Value {
         let warnings = bootstrap
@@ -328,12 +460,13 @@ impl Gateway {
             "view": "bootstrap",
             "architecture": "x86-64",
             "mode": "kernel",
-            "pc": format!("0x{:016x}", bootstrap.pc),
-            "image": bootstrap.image.json(),
+            "pc": format!("0x{:016x}", bootstrap.context.pc),
+            "image": bootstrap.context.image.json(),
+            "image_segments": bootstrap.context.image_mappings.iter().map(KernelMapping::json).collect::<Vec<_>>(),
             "version": bootstrap.version,
             "version_address": bootstrap.version_address.map(|address| format!("0x{address:016x}")),
-            "module_candidates": bootstrap.module_candidates.iter().map(KernelMapping::json).collect::<Vec<_>>(),
-            "module_candidates_truncated": bootstrap.module_candidates_truncated,
+            "module_candidates": bootstrap.context.module_candidates.iter().map(KernelMapping::json).collect::<Vec<_>>(),
+            "module_candidates_truncated": bootstrap.context.module_candidates_truncated,
             "partial": !warnings.is_empty(),
             "warnings": warnings,
             "stop_id": state.stop_id,
@@ -359,20 +492,101 @@ impl Gateway {
         let view = string(&request.parameters, "view")?;
         match view.as_str() {
             "bootstrap" => {
-                let bootstrap = self
-                    .kernel_bootstrap(&entry, &request.parameters, &state)
-                    .await?;
-                Ok(self.kernel_bootstrap_result(bootstrap, &state))
+                let names = requested_kernel_symbols(&request.parameters, false)?;
+                if names.is_empty() {
+                    let bootstrap = self
+                        .kernel_bootstrap(&entry, &request.parameters, &state)
+                        .await?;
+                    return Ok(self.kernel_bootstrap_result(&bootstrap, &state));
+                }
+                entry
+                    .handle
+                    .stable_observation(
+                        &state,
+                        Box::pin(async {
+                            let (context, facts, evidence_seq) = self
+                                .symbol_free_kernel_facts(
+                                    &entry,
+                                    &request.parameters,
+                                    &state,
+                                    &names,
+                                )
+                                .await?;
+                            let version_address = facts["version_address"]
+                                .as_str()
+                                .map(parse_address)
+                                .transpose()?;
+                            let bootstrap = KernelBootstrap {
+                                context,
+                                version_address,
+                                version: facts["version"].as_str().map(str::to_owned),
+                                evidence_seq,
+                            };
+                            let mut result = self.kernel_bootstrap_result(&bootstrap, &state);
+                            result["symbols"] = facts["symbols"].clone();
+                            result["missing_symbols"] = facts["missing"].clone();
+                            result["current_tasks"] = facts["current_tasks"].clone();
+                            result["kallsyms"] = facts["kallsyms"].clone();
+                            Ok(result)
+                        }),
+                    )
+                    .await
             }
-            "current_task" | "init_task" => {
+            "current_task" => {
                 // 2026-08-28: Linux current is a C macro, while current_task
                 // is an unrelocated per-CPU offset. Resolve the live pointer
                 // from the architecture register and keep task output bounded.
-                let (value, evidence_seq) = if view == "current_task" {
-                    kernel_current_text(&entry, &request.parameters, &state).await?
-                } else {
-                    kernel_text(&entry, &request.parameters, &state, "&init_task").await?
-                };
+                let current = kernel_current_text(&entry, &request.parameters, &state).await;
+                if let Err(error) = &current
+                    && error.code == ErrorCode::GdbError
+                {
+                    return entry
+                        .handle
+                        .stable_observation(
+                            &state,
+                            Box::pin(async {
+                                let (_, facts, evidence_seq) = self
+                                    .symbol_free_kernel_facts(
+                                        &entry,
+                                        &request.parameters,
+                                        &state,
+                                        &[],
+                                    )
+                                    .await?;
+                                let tasks = facts["current_tasks"].as_array().ok_or_else(|| {
+                                    Error::new(
+                                        ErrorCode::CapabilityMissing,
+                                        "kallsyms did not resolve any current task",
+                                    )
+                                })?;
+                                let task = tasks
+                                    .iter()
+                                    .find(|task| task["selected"] == true)
+                                    .or_else(|| tasks.first())
+                                    .ok_or_else(|| {
+                                        Error::new(
+                                            ErrorCode::CapabilityMissing,
+                                            "kallsyms did not resolve any current task",
+                                        )
+                                    })?;
+                                Ok(json!({
+                                    "view": view,
+                                    "value": task["task"],
+                                    "task": task,
+                                    "tasks": tasks,
+                                    "stop_id": state.stop_id,
+                                    "source": {
+                                        "provider": "linux-kernel",
+                                        "version": LINUX_KERNEL_PROVIDER_VERSION,
+                                        "mechanism": "runtime-kallsyms+gs-base"
+                                    },
+                                    "evidence_seq": evidence_seq
+                                }))
+                            }),
+                        )
+                        .await;
+                }
+                let (value, evidence_seq) = current?;
                 Ok(json!({
                     "view": view,
                     "value": value,
@@ -384,6 +598,103 @@ impl Gateway {
                     },
                     "evidence_seq": evidence_seq
                 }))
+            }
+            "init_task" => {
+                let init_task =
+                    kernel_text(&entry, &request.parameters, &state, "&init_task").await;
+                if let Err(error) = &init_task
+                    && error.code == ErrorCode::GdbError
+                {
+                    return entry
+                        .handle
+                        .stable_observation(
+                            &state,
+                            Box::pin(async {
+                                let (_, facts, evidence_seq) = self
+                                    .symbol_free_kernel_facts(
+                                        &entry,
+                                        &request.parameters,
+                                        &state,
+                                        &["init_task".to_owned()],
+                                    )
+                                    .await?;
+                                let value = facts["symbols"]
+                                    .as_array()
+                                    .and_then(|symbols| symbols.first())
+                                    .and_then(|symbol| symbol["address"].as_str())
+                                    .ok_or_else(|| {
+                                        Error::new(
+                                            ErrorCode::CapabilityMissing,
+                                            "runtime kallsyms did not contain init_task",
+                                        )
+                                    })?;
+                                Ok(json!({
+                                    "view": view,
+                                    "value": value,
+                                    "stop_id": state.stop_id,
+                                    "source": {
+                                        "provider": "linux-kernel",
+                                        "version": LINUX_KERNEL_PROVIDER_VERSION,
+                                        "mechanism": "runtime-kallsyms"
+                                    },
+                                    "evidence_seq": evidence_seq
+                                }))
+                            }),
+                        )
+                        .await;
+                }
+                let (value, evidence_seq) = init_task?;
+                Ok(json!({
+                    "view": view,
+                    "value": value,
+                    "stop_id": state.stop_id,
+                    "source": {
+                        "provider": "linux-kernel",
+                        "version": LINUX_KERNEL_PROVIDER_VERSION,
+                        "mechanism": "gdb-expression"
+                    },
+                    "evidence_seq": evidence_seq
+                }))
+            }
+            "symbols" => {
+                let names = requested_kernel_symbols(&request.parameters, true)?;
+                entry
+                    .handle
+                    .stable_observation(
+                        &state,
+                        Box::pin(async {
+                            let (context, facts, evidence_seq) = self
+                                .symbol_free_kernel_facts(
+                                    &entry,
+                                    &request.parameters,
+                                    &state,
+                                    &names,
+                                )
+                                .await?;
+                            let missing = facts["missing"].clone();
+                            let partial =
+                                missing.as_array().is_some_and(|values| !values.is_empty());
+                            Ok(json!({
+                                "view": view,
+                                "architecture": "x86-64",
+                                "image": context.image.json(),
+                                "image_segments": context.image_mappings.iter().map(KernelMapping::json).collect::<Vec<_>>(),
+                                "symbols": facts["symbols"],
+                                "missing": missing,
+                                "current_tasks": facts["current_tasks"],
+                                "kallsyms": facts["kallsyms"],
+                                "partial": partial,
+                                "stop_id": state.stop_id,
+                                "source": {
+                                    "provider": "linux-kernel",
+                                    "version": LINUX_KERNEL_PROVIDER_VERSION,
+                                    "mechanism": "runtime-kallsyms"
+                                },
+                                "evidence_seq": evidence_seq
+                            }))
+                        }),
+                    )
+                    .await
             }
             "version" => {
                 let symbol =
@@ -437,9 +748,9 @@ impl Gateway {
                         .await?;
                     return Ok(json!({
                         "view": view,
-                        "address": format!("0x{:016x}", bootstrap.image.start),
-                        "end": format!("0x{:016x}", bootstrap.image.end),
-                        "size": bootstrap.image.end - bootstrap.image.start,
+                        "address": format!("0x{:016x}", bootstrap.context.image.start),
+                        "end": format!("0x{:016x}", bootstrap.context.image.end),
+                        "size": bootstrap.context.image.end - bootstrap.context.image.start,
                         "symbol": null,
                         "stop_id": state.stop_id,
                         "source": {
@@ -480,12 +791,14 @@ impl Gateway {
                     } else {
                         ("unknown", "unavailable")
                     };
-                let symbols =
+                let typed_symbols =
                     match kernel_address(&entry, &request.parameters, &state, "&init_task").await {
                         Ok(symbols) => Some(symbols),
                         Err(error) if error.code == ErrorCode::GdbError => None,
                         Err(error) => return Err(error),
                     };
+                let runtime_kallsyms =
+                    architecture == "x86-64" && matches!(state.target_origin, TargetOrigin::Remote);
                 Ok(json!({
                     "view": view,
                     "architecture": architecture,
@@ -495,13 +808,21 @@ impl Gateway {
                         _ => "native",
                     },
                     "symbols": {
-                        "status": if symbols.is_some() { "supported" } else { "unsupported" },
-                        "mode": "trusted-vmlinux"
+                        "status": if typed_symbols.is_some() {
+                            "supported"
+                        } else if runtime_kallsyms {
+                            "conditional"
+                        } else {
+                            "unsupported"
+                        },
+                        "mode": if typed_symbols.is_some() {
+                            "trusted-vmlinux"
+                        } else {
+                            "runtime-kallsyms"
+                        }
                     },
                     "bootstrap": {
-                        "status": if architecture == "x86-64"
-                            && matches!(state.target_origin, TargetOrigin::Remote)
-                        {
+                        "status": if runtime_kallsyms {
                             "conditional"
                         } else {
                             "unsupported"
@@ -511,7 +832,7 @@ impl Gateway {
                     "current_task": {
                         "status": if current_task == "unavailable" {
                             "unsupported"
-                        } else if symbols.is_some() {
+                        } else if typed_symbols.is_some() {
                             "supported"
                         } else {
                             "conditional"
@@ -527,7 +848,7 @@ impl Gateway {
                         "allowlist": self.config.security.monitor_allowlist.clone()
                     },
                     "limitations": [
-                        "symbol-free heuristic discovery is not enabled",
+                        "symbol-free kallsyms is verified on Linux 5.15, 6.1, 6.6, 6.12, and 7.2 x86-64 distribution kernels",
                         "QEMU monitor support is confirmed only by an allowlisted command"
                     ],
                     "stop_id": state.stop_id,
@@ -536,7 +857,7 @@ impl Gateway {
                         "version": LINUX_KERNEL_PROVIDER_VERSION,
                         "mechanism": "target-probe"
                     },
-                    "evidence_seq": symbols
+                    "evidence_seq": typed_symbols
                         .map(|(_, evidence_seq)| evidence_seq)
                         .unwrap_or(names_reply.evidence_seq)
                 }))
@@ -877,13 +1198,19 @@ impl Gateway {
 
 #[cfg(test)]
 mod tests {
-    use super::{KernelMapping, parse_qemu_memory_map, select_kernel_image};
+    use serde_json::json;
+
+    use super::{
+        KernelMapping, kernel_symbol_output, parse_qemu_memory_map, requested_kernel_symbols,
+        select_kernel_image,
+    };
 
     #[test]
     fn parses_only_high_qemu_memory_mappings() {
         let mappings = parse_qemu_memory_map(
             b"noise\n0000000000400000-0000000000410000 0000000000010000 ur-\n\
               ffffffff81200000-ffffffff82f00000 0000000001d00000 -r-|\
+              ffffffff83000000-ffffffff84000000 0000000001000000 -r-|\
               ffffffffc0010000-ffffffffc0011000 0000000000001000 -rw\n",
         );
 
@@ -896,12 +1223,40 @@ mod tests {
                     permissions: "-r-".into(),
                 },
                 KernelMapping {
+                    start: 0xffff_ffff_8300_0000,
+                    end: 0xffff_ffff_8400_0000,
+                    permissions: "-r-".into(),
+                },
+                KernelMapping {
                     start: 0xffff_ffff_c001_0000,
                     end: 0xffff_ffff_c001_1000,
                     permissions: "-rw".into(),
                 },
             ]
         );
-        assert_eq!(select_kernel_image(&mappings), Some(mappings[0].clone()));
+        assert_eq!(
+            select_kernel_image(&mappings),
+            Some(KernelMapping {
+                start: mappings[0].start,
+                end: mappings[1].end,
+                permissions: "-r-".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn extracts_only_the_compact_kernel_symbol_payload() {
+        let value = kernel_symbol_output(
+            b"console noise\ngdbai-kernel-symbols:{\"symbols\":[{\"name\":\"commit_creds\"}]}\n",
+        )
+        .unwrap();
+        assert_eq!(value["symbols"][0]["name"], "commit_creds");
+
+        let names = requested_kernel_symbols(
+            &json!({"names": ["prepare_kernel_cred", "commit_creds", "commit_creds"]}),
+            true,
+        )
+        .unwrap();
+        assert_eq!(names, ["commit_creds", "prepare_kernel_cred"]);
     }
 }
