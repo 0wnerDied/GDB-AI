@@ -16,9 +16,12 @@ use crate::{
     Error, ErrorCode, Result,
     artifact::ArtifactStore,
     config::StorageConfig,
-    domain::{OperationRecord, SessionId, SessionState, TrackingDefinition, WriteLease},
+    domain::{
+        OperationRecord, SessionId, SessionLifecycle, SessionState, TrackingDefinition, WriteLease,
+    },
     policy::{Effect, Profile},
     protocol::ApiResponse,
+    reducer::StateReducer,
 };
 
 pub struct Store {
@@ -248,6 +251,49 @@ impl Store {
                 serde_json::from_str(&json).map_err(Into::into)
             })
             .collect()
+        })
+    }
+
+    pub fn fail_abandoned_sessions(&self) -> Result<usize> {
+        let now = unix_ms();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let states = {
+                let mut statement = transaction
+                    .prepare("SELECT id, state_json FROM sessions")
+                    .map_err(sql_error)?;
+                statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(sql_error)?
+                    .map(|row| row.map_err(sql_error))
+                    .collect::<Result<Vec<_>>>()?
+            };
+            let mut failed = 0;
+            for (id, json) in states {
+                let state: SessionState = serde_json::from_str(&json)?;
+                if matches!(
+                    state.lifecycle,
+                    SessionLifecycle::Closed | SessionLifecycle::Failed
+                ) {
+                    continue;
+                }
+                let mut reducer = StateReducer::new(state);
+                reducer.fail_closed();
+                transaction
+                    .execute(
+                        "UPDATE sessions SET state_json=?1, updated_unix_ms=?2 WHERE id=?3",
+                        params![serde_json::to_string(reducer.state())?, now, id],
+                    )
+                    .map_err(sql_error)?;
+                failed += 1;
+            }
+            transaction
+                .execute("DELETE FROM leases", [])
+                .map_err(sql_error)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(failed)
         })
     }
 

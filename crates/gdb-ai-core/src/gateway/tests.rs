@@ -692,6 +692,52 @@ async fn isolates_active_and_persisted_sessions_by_principal() {
     );
 }
 
+#[tokio::test]
+async fn restart_marks_persisted_live_session_failed() {
+    let directory = tempdir().unwrap();
+    let config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    let session_id = crate::domain::SessionId("sess_abandoned".into());
+    let mut state = crate::domain::SessionState::creating(session_id.clone());
+    state.lifecycle = crate::domain::SessionLifecycle::Active;
+    state.backend = crate::domain::BackendHealth::Healthy;
+    let store = Store::open_with_storage(&config.persistence.sqlite, &config.storage).unwrap();
+    store
+        .upsert_session(&state, crate::policy::Profile::DebugControl)
+        .unwrap();
+    store
+        .set_session_owner(&session_id, "restart-test")
+        .unwrap();
+    drop(store);
+
+    let gateway = Gateway::new(config).unwrap();
+    let response = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "list-after-restart".into(),
+                session_id: None,
+                method: crate::protocol::CanonicalMethod::SessionList,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &Caller::local("restart-test"),
+        )
+        .await;
+    let state = &response.result.unwrap()[0];
+    assert_eq!(state["lifecycle"], "FAILED");
+    assert_eq!(state["backend"], "DEAD");
+}
+
 #[test]
 fn bounds_the_complete_response_envelope() {
     let directory = tempdir().unwrap();

@@ -104,6 +104,11 @@ impl Gateway {
             &config.persistence.sqlite,
             &config.storage,
         )?);
+        // 2026-09-05: A daemon killed before actor shutdown left persisted
+        // ACTIVE/HEALTHY sessions and leases that looked controllable after
+        // restart. The exclusive storage lock proves no old actor remains, so
+        // apply the shared backend-failure transition before exposing state.
+        store.fail_abandoned_sessions()?;
         let artifacts = ArtifactStore::new(&config.artifacts.path)?;
         artifacts.cleanup_temporary_publications()?;
         let metrics = Arc::new(Metrics::default());
