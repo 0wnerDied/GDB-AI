@@ -480,6 +480,12 @@ Default discovery also repeated the complete probe schema under both
 dedicated path. Removing the equivalent run alias reduced one measured
 `tools/list` response from 22,679 to 19,851 bytes (12.5%) without removing a
 debugging operation.
+That replay also attempted protocol initialization before its first debugger
+call despite using a sessionless client. HTTP now defaults requests without an
+MCP session ID to the current stateless protocol, while explicit metadata and
+established stateful sessions retain validation. A minimal live client completed
+both `tools/list` and `tools/call` on their first requests without initialization,
+protocol headers, or `_meta`.
 
 ### Blind kernel exploit-speed qualification
 
@@ -562,6 +568,8 @@ Complete only the shared fixes demonstrated by these runs:
   rejecting the request and forcing a separate current-stop batch.
 - [x] Keep one projected probe path instead of repeating its complete schema
   under both the run tool and the dedicated probe tool.
+- [x] Default sessionless HTTP requests to the current stateless protocol so a
+  one-shot Agent client does not negotiate a stateful session before debugging.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

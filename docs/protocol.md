@@ -63,8 +63,9 @@ Streamable HTTP supports two version-specific request paths over the same
 endpoint and canonical dispatcher. MCP `2025-11-25` stores the negotiated
 version in a transport session and requires it in
 `Mcp-Protocol-Version` on every later POST or DELETE. Stateless MCP
-`2026-07-28` needs neither initialization nor `Mcp-Session-Id`; each request
-instead carries `io.modelcontextprotocol/protocolVersion` and
+`2026-07-28` needs neither initialization nor `Mcp-Session-Id`. Sessionless
+HTTP requests default to that protocol; callers may explicitly carry
+`io.modelcontextprotocol/protocolVersion` and
 `io.modelcontextprotocol/clientCapabilities` under `_meta`. Stateless results
 include `resultType`, and discovery results carry private cache hints. POST
 requests advertise `application/json` and `text/event-stream`; responses use

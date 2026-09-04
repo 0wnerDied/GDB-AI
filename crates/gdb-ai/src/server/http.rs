@@ -202,7 +202,7 @@ async fn http_mcp(
         );
     };
     let mut params = object.remove("params").unwrap_or_else(|| json!({}));
-    if uses_stateless_http(&headers, &params) {
+    if uses_stateless_http(&headers, &params, &method) {
         return http_mcp_stateless(state, id, &method, params).await;
     }
     if method == "initialize" {
@@ -470,15 +470,11 @@ async fn http_mcp_stateless(
     method: &str,
     mut params: Value,
 ) -> Response {
-    // 2026-09-05: Mirroring the protocol, method, and tool name in headers
-    // caused four blind-client retries even though routing and authorization
-    // already use the parsed JSON body. Validated request metadata is the
-    // single stateless protocol binding.
-    let validation = stateless_request(&params).and_then(|stateless| {
-        stateless
-            .then_some(())
-            .ok_or_else(|| RpcFault::invalid("2026-07-28 request metadata is required"))
-    });
+    // 2026-09-05: Requiring protocol metadata before discovery caused blind
+    // Agents to build a stateful session first. A sessionless HTTP request
+    // defaults to the current stateless protocol; explicit metadata is still
+    // validated before dispatch.
+    let validation = stateless_request(&params).map(|_| ());
     if let Err(error) = validation {
         let mut response = json_http_response_for(
             rpc_fault(id.unwrap_or(Value::Null), error),
@@ -874,17 +870,19 @@ fn http_protocol_version_matches(headers: &HeaderMap, expected: &str) -> bool {
     supplied.next().is_none() && version.as_bytes() == expected.as_bytes()
 }
 
-fn uses_stateless_http(headers: &HeaderMap, params: &Value) -> bool {
+fn uses_stateless_http(headers: &HeaderMap, params: &Value, method: &str) -> bool {
+    // 2026-09-05: Default stateless routing must not let an invalid version
+    // header escape an explicitly identified, already negotiated HTTP session.
+    if headers.get("mcp-session-id").is_some() {
+        return false;
+    }
     // 2026-08-30: Select the transport era from this request alone; modern
     // clients do not create a protocol session that can retain negotiation.
     params
         .get("_meta")
         .and_then(|metadata| metadata.get("io.modelcontextprotocol/protocolVersion"))
         .is_some()
-        || headers
-            .get_all("mcp-protocol-version")
-            .iter()
-            .any(|version| version.as_bytes() != MCP_VERSION.as_bytes())
+        || method != "initialize"
 }
 
 fn accepts_mcp_responses(headers: &HeaderMap) -> bool {
@@ -1264,7 +1262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streamable_http_accepts_stateless_mcp_requests() {
+    async fn streamable_http_defaults_sessionless_requests_to_stateless_mcp() {
         let directory = tempdir().unwrap();
         let config = Config {
             artifacts: ArtifactConfig {
@@ -1298,6 +1296,21 @@ mod tests {
             "io.modelcontextprotocol/protocolVersion": STATELESS_MCP_VERSION,
             "io.modelcontextprotocol/clientCapabilities": {}
         });
+        let rejected = http_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "tools/list",
+                "params": {"_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "invalid",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }}
+            })),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
         let discovered = http_mcp(
             State(state.clone()),
             headers.clone(),
@@ -1305,7 +1318,7 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "server/discover",
-                "params": {"_meta": metadata}
+                "params": {}
             })),
         )
         .await;
@@ -1348,7 +1361,6 @@ mod tests {
                 "id": 3,
                 "method": "tools/call",
                 "params": {
-                    "_meta": metadata,
                     "name": "gdb_session",
                     "arguments": {"action": "list"}
                 }
