@@ -182,13 +182,14 @@ async fn qemu_memory_map(
 }
 
 const KERNEL_SYMBOL_PREFIX: &str = "gdbai-kernel-symbols:";
+const KERNEL_PAGE_TABLE_PREFIX: &str = "gdbai-kernel-page-table:";
 
-fn kernel_symbol_output(output: &[u8]) -> Result<Value> {
+fn prefixed_json_output(output: &[u8], prefix: &str, missing: &str) -> Result<Value> {
     let output = String::from_utf8_lossy(output);
     let start = output
-        .find(KERNEL_SYMBOL_PREFIX)
-        .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB omitted kernel symbol facts"))?
-        + KERNEL_SYMBOL_PREFIX.len();
+        .find(prefix)
+        .ok_or_else(|| Error::new(ErrorCode::GdbError, missing))?
+        + prefix.len();
     let end = output[start..]
         .find(['\r', '\n'])
         .map_or(output.len(), |end| start + end);
@@ -197,6 +198,22 @@ fn kernel_symbol_output(output: &[u8]) -> Result<Value> {
         return Err(Error::new(ErrorCode::CapabilityMissing, error));
     }
     Ok(value)
+}
+
+fn kernel_symbol_output(output: &[u8]) -> Result<Value> {
+    prefixed_json_output(
+        output,
+        KERNEL_SYMBOL_PREFIX,
+        "GDB omitted kernel symbol facts",
+    )
+}
+
+fn kernel_page_table_output(output: &[u8]) -> Result<Value> {
+    prefixed_json_output(
+        output,
+        KERNEL_PAGE_TABLE_PREFIX,
+        "GDB omitted the kernel page-table walk",
+    )
 }
 
 fn requested_kernel_symbols(parameters: &Value, required: bool) -> Result<Vec<String>> {
@@ -671,6 +688,50 @@ impl Gateway {
         })
     }
 
+    async fn kernel_page_table(
+        &self,
+        entry: &SessionEntry,
+        parameters: &Value,
+        state: &crate::domain::SessionState,
+    ) -> Result<Value> {
+        let expression = string(parameters, "address_expression")?;
+        entry
+            .handle
+            .stable_observation(
+                state,
+                Box::pin(async {
+                    let script = format!(
+                        "{}\n_gdbai_kernel_page_table({})",
+                        include_str!("kernel_page_table.py"),
+                        serde_json::to_string(&expression)?,
+                    );
+                    let reply = entry
+                        .handle
+                        .command_with_timeout(
+                            MiCommand::new("-interpreter-exec")?
+                                .bare("console")?
+                                .string(format!(
+                                    "python exec({})",
+                                    serde_json::to_string(&script)?
+                                )),
+                            kernel_observation_timeout(self.config.server.command_timeout()),
+                        )
+                        .await?;
+                    let mut result = kernel_page_table_output(&command_output(&reply))?;
+                    result["view"] = Value::String("page_table".into());
+                    result["stop_id"] = json!(state.stop_id);
+                    result["source"] = json!({
+                        "provider": "linux-kernel",
+                        "version": LINUX_KERNEL_PROVIDER_VERSION,
+                        "mechanism": "qemu-rsp-physical-page-walk"
+                    });
+                    result["evidence_seq"] = Value::from(reply.evidence_seq);
+                    Ok(result)
+                }),
+            )
+            .await
+    }
+
     pub(super) async fn kernel_inspect(&self, request: &ApiRequest) -> Result<Value> {
         if !self.config.security.kernel_enabled {
             return Err(Error::new(
@@ -982,6 +1043,10 @@ impl Gateway {
                     "evidence_seq": evidence_seq
                 }))
             }
+            "page_table" => {
+                self.kernel_page_table(&entry, &request.parameters, &state)
+                    .await
+            }
             "tasks" => self.kernel_tasks(request, &entry, &state).await,
             "modules" => self.kernel_modules(request, &entry, &state).await,
             "capabilities" => {
@@ -1035,6 +1100,14 @@ impl Gateway {
                             "unsupported"
                         },
                         "mechanism": "QEMU monitor info mem"
+                    },
+                    "page_table": {
+                        "status": if runtime_kallsyms {
+                            "conditional"
+                        } else {
+                            "unsupported"
+                        },
+                        "mechanism": "QEMU RSP physical-memory mode"
                     },
                     "current_task": {
                         "status": if current_task == "unavailable" {
@@ -1479,8 +1552,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        KernelMapping, kernel_module_text_offset, kernel_observation_timeout, kernel_symbol_output,
-        parse_qemu_memory_map, requested_kernel_symbols, select_kernel_image,
+        KernelMapping, kernel_module_text_offset, kernel_observation_timeout,
+        kernel_page_table_output, kernel_symbol_output, parse_qemu_memory_map,
+        requested_kernel_symbols, select_kernel_image,
     };
 
     #[test]
@@ -1556,6 +1630,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(names, ["commit_creds", "prepare_kernel_cred"]);
+
+        let page_table = kernel_page_table_output(
+            b"console noise\ngdbai-kernel-page-table:{\"mapped\":true,\"page_size\":4096}\n",
+        )
+        .unwrap();
+        assert_eq!(page_table["page_size"], 4096);
     }
 
     #[test]

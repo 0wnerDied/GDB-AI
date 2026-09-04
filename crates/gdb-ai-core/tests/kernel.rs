@@ -711,6 +711,38 @@ async fn bootstraps_a_symbol_free_modern_kernel_over_qemu_rsp() {
         assert_eq!(layout["page_table"], expected);
     }
 
+    let page_table = call(
+        &gateway,
+        &caller,
+        request(
+            "page-table",
+            Some(session_id),
+            "kernel.inspect",
+            None,
+            json!({
+                "view": "page_table",
+                "address_expression": layout["image"]["start"],
+                "stop_id": stop_id
+            }),
+        ),
+    )
+    .await;
+    let page_table = page_table.result.as_ref().unwrap();
+    assert_eq!(page_table["mapped"], true);
+    assert!(
+        page_table["physical_address"]
+            .as_str()
+            .is_some_and(|address| address.starts_with("0x"))
+    );
+    assert!(
+        page_table["levels"]
+            .as_array()
+            .is_some_and(|levels| (3..=5).contains(&levels.len()))
+    );
+    if let Ok(expected) = std::env::var("GDB_AI_KERNEL_EXPECT_PAGE_TABLE") {
+        assert_eq!(page_table["root_source"], expected);
+    }
+
     let started = std::time::Instant::now();
     let bootstrap = call(
         &gateway,

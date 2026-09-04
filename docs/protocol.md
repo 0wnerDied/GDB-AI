@@ -123,8 +123,9 @@ count, current resumption cursor, and a status resource for resynchronization.
 `STREAM_CLOSED` instead means the session event source has terminated.
 
 The conditional `kernel.inspect` contract accepts `bootstrap`, `symbols`,
-`capabilities`, `version`, `base`, `current_task`, `init_task`, `tasks`,
-`modules`, `stack`, and `panic`.
+`page_table`, `capabilities`, `version`, `base`, `current_task`, `init_task`,
+`tasks`, `modules`, `stack`, and `panic`. The `page_table` view requires an
+`address_expression`.
 `kernel.monitor` remains an audited mutation restricted by the configured
 first-word allowlist. These contracts are generated into both the canonical
 schema and the `gdb_kernel` MCP projection; they are not GDB/MI extensions.

@@ -19,6 +19,7 @@ The `inspect` views are:
 | --- | --- |
 | `bootstrap` | Symbol-free x86-64 image; optional `names` also return exact symbols, current tasks, and loaded modules |
 | `symbols` | Exact requested runtime kallsyms and per-CPU current tasks |
+| `page_table` | x86-64 virtual-to-physical walk, raw entries, page size, and effective permissions |
 | `capabilities` | Architecture, transport, symbol mode, task strategy, and monitor limits |
 | `version` | Bounded `linux_banner` text |
 | `base` | Runtime `_text` address for synchronized symbols |
@@ -42,6 +43,13 @@ observation and restores the original CR3 before returning. The `base` and
 `version` views use the same fallback automatically. When `bootstrap` includes
 `names`, the same in-GDB scan also follows the kernel module list and correlates
 each module's memory layout with those mappings.
+
+`page_table` accepts one `address_expression` such as `$pc`, a symbol, or a
+runtime address. On an x86-64 QEMU stub it returns every 4-level or 5-level
+entry, resolves 4 KiB, 2 MiB, and 1 GiB leaves, and reports the final physical
+address plus effective user, writable, and executable permissions. A missing
+kernel mapping under KPTI is retried through the paired kernel PGD. QEMU's
+physical-memory RSP mode is restored before the call returns.
 
 `symbols` decodes the in-memory compressed kallsyms table inside GDB and returns
 only exact names requested by the Agent. It also derives every CPU's current

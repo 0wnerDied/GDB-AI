@@ -437,8 +437,8 @@ Complete only the shared fixes demonstrated by these runs:
   paired kernel PGD, restoring CR3 within every bounded observation.
 - [x] Let bounded QEMU page-table and runtime-symbol observations outlive the
   generic MI deadline under TCG load without fencing the session.
-- [ ] Adopt page-walk semantics only when they beat the native workflow on a
-  blind target; do not import GEF's UI or compatibility surface wholesale.
+- [x] Replace the native multi-command page-table workflow with one x86-64
+  virtual-to-physical walk; do not import GEF's UI or compatibility surface.
 - [ ] Detect KGDB/KDB separately from a QEMU gdbstub. Normalize read-oriented
   `monitor` process, module, and dmesg results while GDB remains the sole run
   controller, as required by the upstream debugger contract.

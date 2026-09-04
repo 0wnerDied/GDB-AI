@@ -4174,6 +4174,9 @@
               "accept_latest_revision": {
                 "type": "boolean"
               },
+              "address_expression": {
+                "type": "string"
+              },
               "around": {
                 "additionalProperties": false,
                 "properties": {
@@ -4259,6 +4262,7 @@
                   "capabilities",
                   "version",
                   "base",
+                  "page_table",
                   "symbols",
                   "current_task",
                   "init_task",
