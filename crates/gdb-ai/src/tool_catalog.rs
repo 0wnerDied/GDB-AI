@@ -154,7 +154,10 @@ const TOOLS: &[ToolProjection] = &[
         // remote parameter names. State the lifecycle split beside the schema.
         // 2026-09-05: Runtime auto-detection changed the binary under test.
         // Make caller-owned patching explicit without adding a launch mode.
-        description: "Create a session with action/profile only, then launch a program unchanged with argument-only argv; patch its runtime first when needed. Relative paths use workspace roots; use first_instruction for stripped executables. Remote uses connect_remote with endpoint and optional executable.",
+        // 2026-09-05: Advertising a profile that ordinary projected callers
+        // cannot select caused a guaranteed create retry. The default already
+        // permits exploit debugging, so expose only the actionable lifecycle.
+        description: "Create a session with action only, then launch a program unchanged with argument-only argv; patch its runtime first when needed. Relative paths use workspace roots; use first_instruction for stripped executables. Remote uses connect_remote with endpoint and optional executable.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,
@@ -683,6 +686,17 @@ mod tests {
             .find(|branch| branch["properties"]["action"]["const"] == "create")
             .unwrap();
         assert!(create["properties"].get("session_id").is_none());
+        let default_tools = super::tools(false, false);
+        let default_session = default_tools
+            .iter()
+            .find(|tool| tool["name"] == "gdb_session")
+            .unwrap();
+        assert!(
+            !default_session["description"]
+                .as_str()
+                .unwrap()
+                .contains("profile")
+        );
     }
 
     #[test]
