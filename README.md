@@ -203,7 +203,7 @@ modes without claiming legacy HTTP+SSE.
 | `gdb_evaluate` | Side-effect-denied one-shot expression evaluation |
 | `gdb_memory` | Bounded stop-consistent literal or expression-addressed memory reads |
 | `gdb_disassemble` | Normalized bounded instructions with source and bytes |
-| `gdb_io` | PTY reads, prompt-synchronized writes, MI streams, `send_eof`, and resize |
+| `gdb_io` | Inferior PTY I/O plus separate GDB/MI target, console, and log streams |
 | `gdb_events` | Finite event waits |
 
 `--advanced-tools` additionally projects `gdb_values`, `gdb_registers`,
@@ -227,6 +227,8 @@ views from its resulting stop in the same `gdb_run` call; each view is its
 result key. Successful input adds no echo; a stalled write reports exact
 `written` and `remaining` byte counts without wedging the session. Use
 `gdb_io` for open-ended interaction.
+Inferior stdin, stdout, and stderr use the default `stream: "pty"`;
+`stream: "target"` means GDB/MI `@` output rather than inferior stdout.
 For prompt-driven menus whose broad reads would consume later queued answers,
 one `gdb_io` write can supply ordered `steps`. The first step may write
 immediately; each later `wait_for` must occur in new PTY output before that

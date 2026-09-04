@@ -254,7 +254,9 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_io",
-        description: "PTY reads, prompt-synchronized writes, EOF, or resize.",
+        // 2026-09-05: Agents read stream=target as inferior stdout and needed
+        // another call. Name the MI stream boundary while preserving the API.
+        description: "Inferior stdin/stdout/stderr use pty (the read default); target is GDB/MI @-stream output, while console and log are GDB streams. Writes, EOF, and resize act on the inferior PTY.",
         discriminator: Some("action"),
         actions: IO_ACTIONS,
         read_only: false,

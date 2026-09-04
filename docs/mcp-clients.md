@@ -212,6 +212,8 @@ and reserve `gdb_io` for open-ended interaction. An MCP `gdb_io` read with no
 `max_bytes` returns at most 4096 bytes; request a larger bound only when the
 additional output is needed. Projected tools do not expose lease or revision
 fields and bind omitted reads to the current stop.
+Inferior stdin, stdout, and stderr use `stream: "pty"`; `stream: "target"`
+selects GDB/MI `@` output, not the inferior's stdout.
 
 A `gdb_io` write may replace one `text` or `data_base64` payload with `steps`.
 Each step contains one payload and an optional `wait_for` substring. Matching
