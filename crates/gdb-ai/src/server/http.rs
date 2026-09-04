@@ -1296,7 +1296,7 @@ mod tests {
             .unwrap();
         let response: Value = serde_json::from_slice(&bytes).unwrap();
         let tools = response["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         assert!(!tools.iter().any(|tool| tool["name"] == "gdb_values"));
         let limited = http_mcp(
             State(state.clone()),
@@ -1416,7 +1416,7 @@ mod tests {
             .await
             .unwrap();
         let response: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 10);
+        assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 11);
 
         headers.insert("mcp-method", HeaderValue::from_static("ping"));
         let mismatch = http_mcp(

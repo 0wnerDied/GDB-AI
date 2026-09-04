@@ -194,7 +194,8 @@ modes without claiming legacy HTTP+SSE.
 | Tool | Purpose |
 | --- | --- |
 | `gdb_session` | Sessions, leases, local launch, lifecycle, and capabilities |
-| `gdb_run` | One-call input, run-to-stop, same-stop views, asynchronous waits, and breakpoint probes |
+| `gdb_run` | One-call input, run-to-stop, same-stop views, and asynchronous waits |
+| `gdb_probe` | Temporary breakpoint, exact input, skipped hits, capture, output, and cleanup in one call |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
 | `gdb_batch` | Multiple bounded inspection views at the current or named stop |
@@ -227,11 +228,12 @@ result key. Successful input adds no echo; a stalled write reports exact
 `gdb_io` for open-ended interaction.
 A standalone `gdb_batch` accepts explicit names when the same view is needed
 more than once.
-Action `probe` combines a temporary breakpoint, optional byte-exact input,
+`gdb_probe` combines a temporary breakpoint, optional byte-exact input,
 `ignore_count`, continue, bounded capture and output, and cleanup in one call.
 Its capture items accept an expression, stack, or exact memory window selected
 by `address_expression` and `length`. A module-offset probe may start before a
 stripped PIE maps; its temporary breakpoint is rebound and removed internally.
+`gdb_run` action `probe` remains an equivalent compatibility form.
 `gdb_memory` action `artifact` pages bytes from an artifact URI returned by a
 large result; use `next_offset` until `truncated` is false.
 If consistency is unknown or lost, the owner can attempt

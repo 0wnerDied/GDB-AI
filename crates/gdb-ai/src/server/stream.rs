@@ -761,7 +761,7 @@ mod tests {
         let listed = read_json_line(&mut client_input).await.unwrap();
         assert_eq!(listed["result"]["resultType"], "complete");
         assert_eq!(listed["result"]["ttlMs"], 86_400_000_u64);
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 10);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 11);
         write_rpc(
             &mut client_output,
             json!({

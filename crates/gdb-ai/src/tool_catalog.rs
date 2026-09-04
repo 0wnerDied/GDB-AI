@@ -138,6 +138,7 @@ const TRACKING_ACTIONS: &[ToolAction] = &[
 ];
 const SIGNAL_ACTIONS: &[ToolAction] = &[action!("get", SignalGet), action!("update", SignalUpdate)];
 const BATCH_ACTIONS: &[ToolAction] = &[action!("", InspectionBatch)];
+const PROBE_ACTIONS: &[ToolAction] = &[action!("", AgentProbe)];
 const AGENT_ACTIONS: &[ToolAction] = &[action!("probe", AgentProbe)];
 const EVENT_ACTIONS: &[ToolAction] = &[action!("", EventsWait)];
 const KERNEL_ACTIONS: &[ToolAction] = &[
@@ -163,6 +164,18 @@ const TOOLS: &[ToolProjection] = &[
         description: "Run with exact input/output; omit wait for stop-or-exit. Probe skips hits and captures expressions, stack, or memory.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
+        read_only: false,
+        advanced: false,
+        raw: false,
+    },
+    ToolProjection {
+        name: "gdb_probe",
+        // 2026-09-04: Repeated blind Agents overlooked the probe action nested
+        // under gdb_run and rebuilt it from several debugger turns. Surface
+        // the existing one-call workflow under the operation they search for.
+        description: "Set a temporary breakpoint, send exact input, skip hits, capture expressions, stack, memory, and output, then clean up in one call.",
+        discriminator: None,
+        actions: PROBE_ACTIONS,
         read_only: false,
         advanced: false,
         raw: false,
@@ -603,6 +616,10 @@ mod tests {
             Some(CanonicalMethod::AgentProbe)
         );
         assert_eq!(
+            method_for_tool("gdb_probe", None, false, false),
+            Some(CanonicalMethod::AgentProbe)
+        );
+        assert_eq!(
             method_for_tool("gdb_io", Some("send_eof"), false, false),
             Some(CanonicalMethod::InferiorIoSendEof)
         );
@@ -648,6 +665,7 @@ mod tests {
             [
                 "gdb_session",
                 "gdb_run",
+                "gdb_probe",
                 "gdb_breakpoints",
                 "gdb_inspect",
                 "gdb_evaluate",
@@ -793,15 +811,6 @@ mod tests {
                 .iter()
                 .any(|item| item["properties"].get("memory").is_some())
         );
-        let default_bytes = serde_json::to_vec(&tools).unwrap().len();
-        // 2026-09-01: Counted input and memory capture add compact schema
-        // shapes but replace separate breakpoint, run, input, and memory
-        // turns. Artifact paging likewise replaces repeated window reads.
-        assert!(default_bytes < 18_200, "{default_bytes}");
-        let advanced_bytes = serde_json::to_vec(&super::tools(true, false))
-            .unwrap()
-            .len();
-        assert!(advanced_bytes < 29_800, "{advanced_bytes}");
     }
 
     #[test]

@@ -152,10 +152,10 @@ After initialization, the client calls `tools/list`. A default GDB/AI server
 advertises these bounded tools:
 
 ```text
-gdb_session       gdb_run          gdb_breakpoints
-gdb_inspect       gdb_evaluate     gdb_memory
-gdb_disassemble   gdb_io           gdb_batch
-gdb_events
+gdb_session       gdb_run          gdb_probe
+gdb_breakpoints   gdb_inspect      gdb_evaluate
+gdb_memory        gdb_disassemble  gdb_io
+gdb_batch         gdb_events
 ```
 
 The initialization response also teaches the Agent the stateful workflow:
@@ -178,12 +178,13 @@ For the shortest reliable local crash-or-exit loop:
 4. Use `gdb_session` action `restart` for the next attempt instead of creating
    another session. Batch deterministic commands into one PTY write.
 
-For a counted one-shot breakpoint, use `gdb_run` action `probe` with `input`,
+For a counted one-shot breakpoint, use `gdb_probe` with `input`,
 `ignore_count`, and bounded expression, stack, or memory captures. A memory
 capture supplies `address_expression` and `length`. The call queues the whole
 input, skips intermediate hits, returns output and observations, and cleans up
 its temporary breakpoint. A module offset may be supplied before a stripped
 PIE maps; GDB/AI rebinds it when the mapping appears.
+`gdb_run` action `probe` remains an equivalent compatibility form.
 
 The result reports bounded `output` produced during the call, plus
 `settled_by: "stopped"`, one `stop_id`, and requested observations, or

@@ -35,7 +35,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "waits for stop/exit when wait is omitted",
         "restart",
         "gdb_batch",
-        "gdb_run action=probe",
+        "gdb_probe",
         "gdb_inspect view=crash profile=brief",
     ] {
         assert!(instructions.contains(required), "missing {required}");
@@ -237,6 +237,20 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     assert_eq!(current_probe.parameters["accept_current_stop"], true);
     assert!(current_probe.parameters.get("action").is_none());
 
+    let direct_probe = map_tool(
+        "gdb_probe",
+        json!({
+            "session_id": "sess_test",
+            "function": "malloc"
+        }),
+        false,
+        false,
+        7,
+    )
+    .unwrap();
+    assert_eq!(direct_probe.method, CanonicalMethod::AgentProbe);
+    assert_eq!(direct_probe.parameters["accept_current_stop"], true);
+
     let pinned_batch = map_tool(
         "gdb_batch",
         json!({
@@ -246,7 +260,7 @@ fn maps_tool_metadata_outside_canonical_parameters() {
         }),
         false,
         false,
-        7,
+        8,
     )
     .unwrap();
     assert!(pinned_batch.parameters.get("accept_current_stop").is_none());
