@@ -2071,6 +2071,22 @@
         "properties": {
           "parameters": {
             "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "expression"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "expressions"
+                    ]
+                  }
+                ]
+              }
+            ],
             "properties": {
               "accept_current_stop": {
                 "type": "boolean"
@@ -2080,6 +2096,12 @@
               },
               "expression": {
                 "type": "string"
+              },
+              "expressions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "frame_id": {
                 "type": "string"
@@ -2108,9 +2130,7 @@
                 "type": "string"
               }
             },
-            "required": [
-              "expression"
-            ],
+            "required": [],
             "type": "object"
           }
         }

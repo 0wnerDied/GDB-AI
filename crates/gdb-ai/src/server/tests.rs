@@ -406,6 +406,28 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
             .as_str()
             .is_some()
     );
+    let evaluated = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({
+            "name": "gdb_evaluate",
+            "arguments": {
+                "session_id": session_id,
+                "expressions": ["$pc", "$sp"]
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(evaluated["isError"], false);
+    assert_eq!(
+        evaluated["structuredContent"]["result"]["results"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
     let mutated = call_tool(
         &gateway,
         &caller,

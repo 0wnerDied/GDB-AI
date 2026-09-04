@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use serde_json::{Value, json};
 use ulid::Ulid;
 
@@ -5,15 +6,49 @@ use super::{
     context::{context_options, require_stopped_context},
     evaluation::{safe_evaluate_command, validate_expression, validate_expression_text},
     mi::result_text,
-    request::{bounded_limit, required_session, string},
+    request::{bounded_limit, parameters, required_session, string},
 };
 use crate::{
-    Result,
+    Error, ErrorCode, Result,
     backend::MiCommand,
     domain::{DomainEvent, ValueBinding, ValueId},
     gateway::{Gateway, SessionEntry},
     protocol::ApiRequest,
+    session::CommandReply,
 };
+
+async fn evaluate_expression(
+    entry: &SessionEntry,
+    request: &ApiRequest,
+    state: &crate::domain::SessionState,
+    expression: &str,
+    side_effects: bool,
+) -> Result<CommandReply> {
+    let command = context_options(
+        MiCommand::new("-data-evaluate-expression")?.string(expression),
+        &request.parameters,
+        state,
+    )?;
+    if !side_effects {
+        return safe_evaluate_command(&entry.handle, command).await;
+    }
+    entry
+        .handle
+        .transaction(
+            vec![
+                MiCommand::new("-gdb-set")?
+                    .bare("may-call-functions")?
+                    .bare("on")?,
+            ],
+            command,
+            vec![
+                MiCommand::new("-gdb-set")?
+                    .bare("may-call-functions")?
+                    .bare("off")?,
+            ],
+        )
+        .await
+}
 
 async fn current_value_binding(
     entry: &SessionEntry,
@@ -31,48 +66,92 @@ async fn current_value_binding(
 
 impl Gateway {
     pub(super) async fn value_evaluate(&self, request: &ApiRequest) -> Result<Value> {
+        #[derive(Deserialize)]
+        struct Parameters {
+            expression: Option<String>,
+            expressions: Option<Vec<String>>,
+            side_effects: Option<String>,
+        }
+
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
-        let expression = string(&request.parameters, "expression")?;
-        let side_effects = request
-            .parameters
-            .get("side_effects")
-            .and_then(Value::as_str)
-            .unwrap_or("deny");
-        let evaluate = context_options(
-            MiCommand::new("-data-evaluate-expression")?.string(&expression),
-            &request.parameters,
-            &state,
-        )?;
-        let reply = if side_effects == "allow" {
-            validate_expression_text(&expression)?;
+        let parameters: Parameters = parameters(request)?;
+        let batch = parameters.expressions.is_some();
+        let expressions = parameters
+            .expression
+            .into_iter()
+            .chain(parameters.expressions.unwrap_or_default())
+            .collect::<Vec<_>>();
+        if expressions.is_empty() || expressions.len() > 16 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "evaluation accepts 1 to 16 expressions",
+            ));
+        }
+        let side_effects = parameters.side_effects.as_deref().unwrap_or("deny");
+        let replies = if side_effects == "allow" {
+            let mut replies = Vec::with_capacity(expressions.len());
+            for expression in &expressions {
+                validate_expression_text(expression)?;
+                replies.push(evaluate_expression(&entry, request, &state, expression, true).await?);
+            }
+            replies
+        } else {
+            for expression in &expressions {
+                validate_expression(expression)?;
+            }
+            // 2026-09-05: Exploit traces evaluated related runtime addresses
+            // in separate Agent turns even though they belonged to one stop.
+            // Keep the complete ordered batch behind one stop/command fence.
             entry
                 .handle
-                .transaction(
-                    vec![
-                        MiCommand::new("-gdb-set")?
-                            .bare("may-call-functions")?
-                            .bare("on")?,
-                    ],
-                    evaluate,
-                    vec![
-                        MiCommand::new("-gdb-set")?
-                            .bare("may-call-functions")?
-                            .bare("off")?,
-                    ],
+                .stable_observation(
+                    &state,
+                    Box::pin(async {
+                        let mut replies = Vec::with_capacity(expressions.len());
+                        for expression in &expressions {
+                            replies.push(
+                                evaluate_expression(&entry, request, &state, expression, false)
+                                    .await?,
+                            );
+                        }
+                        Ok(replies)
+                    }),
                 )
                 .await?
-        } else {
-            validate_expression(&expression)?;
-            safe_evaluate_command(&entry.handle, evaluate).await?
         };
-        Ok(json!({
-            "stop_id": state.stop_id,
-            "value": result_text(&reply.record, "value"),
-            "command": reply,
-            "side_effects": if side_effects == "allow" { "allowed" } else { "denied" }
-        }))
+        let effect = if side_effects == "allow" {
+            "allowed"
+        } else {
+            "denied"
+        };
+        if batch {
+            let results = expressions
+                .iter()
+                .zip(&replies)
+                .map(|(expression, reply)| {
+                    json!({
+                        "expression": expression,
+                        "value": result_text(&reply.record, "value")
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "stop_id": state.stop_id,
+                "results": results,
+                "commands": replies,
+                "side_effects": effect
+            }))
+        } else {
+            let reply = replies.into_iter().next().unwrap();
+            Ok(json!({
+                "stop_id": state.stop_id,
+                "value": result_text(&reply.record, "value"),
+                "command": reply,
+                "side_effects": effect
+            }))
+        }
     }
 
     pub(super) async fn value_create(&self, request: &ApiRequest) -> Result<Value> {

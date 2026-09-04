@@ -102,7 +102,7 @@ revisions. stop_id pins later evidence; omit it for current-stop reads. gdb_run 
 stop/exit when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
 accepted/running only for later I/O. Use gdb_io write steps with wait_for for prompt-driven \
 menus. Reuse the session; gdb_probe restart=true reruns before arming, batches input or starts trigger.command after arming and returns its bounded stdout/stderr, skips ignore_count hits, and captures memory; continue_to_stop reaches the next crash/exit with optional inspect in the same call. Use gdb_batch for current-stop views and gdb_inspect view=crash \
-profile=brief for triage. gdb_evaluate side_effects=allow permits inferior calls or assignments in one request. Query a returned operation_id after timeout. Close when done.";
+profile=brief for triage. gdb_evaluate batches related expressions and side_effects=allow permits inferior calls or assignments in one request. Query a returned operation_id after timeout. Close when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {

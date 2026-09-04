@@ -209,7 +209,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_evaluate",
-        description: "Evaluate expressions; side_effects=allow permits inferior calls and assignments.",
+        description: "Evaluate expression or an ordered expressions batch; side_effects=allow permits inferior calls and assignments.",
         discriminator: None,
         actions: EVALUATE_ACTIONS,
         read_only: false,

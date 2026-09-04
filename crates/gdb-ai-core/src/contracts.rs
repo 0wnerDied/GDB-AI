@@ -768,9 +768,11 @@ impl CanonicalMethod {
             }
             InspectionSnapshotGet => MethodContract::plain(vec![required("snapshot_id", String)]),
             ValueEvaluate => MethodContract::contextual(vec![
-                required("expression", String),
+                optional("expression", String),
+                optional("expressions", StringArray),
                 optional("side_effects", Enum(&["deny", "allow"])),
-            ]),
+            ])
+            .exactly_one(&["expression", "expressions"]),
             ValueCreate => MethodContract::contextual(vec![required("expression", String)]),
             ValueChildren => MethodContract::contextual(vec![
                 required("value_id", String),
@@ -1078,6 +1080,9 @@ mod tests {
                 ]
             }))
             .unwrap();
+        CanonicalMethod::ValueEvaluate
+            .validate_parameters(&json!({"expressions": ["$pc", "$sp"]}))
+            .unwrap();
         CanonicalMethod::ExecutionControl
             .validate_parameters(&json!({
                 "action": "continue",
@@ -1150,6 +1155,10 @@ mod tests {
                     "data_base64": "QQ==",
                     "expected": {"sha256": "0"}
                 }),
+            ),
+            (
+                CanonicalMethod::ValueEvaluate,
+                json!({"expression": "$pc", "expressions": ["$sp"]}),
             ),
             (
                 CanonicalMethod::MemoryCompare,

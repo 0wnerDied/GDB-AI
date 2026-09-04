@@ -200,7 +200,7 @@ modes without claiming legacy HTTP+SSE.
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
 | `gdb_batch` | Multiple bounded inspection views at the current or named stop |
-| `gdb_evaluate` | Expression evaluation, with explicit inferior calls or assignments |
+| `gdb_evaluate` | Single or ordered-batch evaluation, with explicit calls or assignments |
 | `gdb_memory` | Bounded stop-consistent literal or expression-addressed memory reads |
 | `gdb_disassemble` | Normalized bounded instructions with source and bytes |
 | `gdb_io` | Inferior PTY I/O plus separate GDB/MI target, console, and log streams |

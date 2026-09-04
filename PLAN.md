@@ -430,6 +430,8 @@ The native assisted proof also depended on a one-line inferior function call,
 which projected evaluation rejected unconditionally. Explicit
 `side_effects=allow` now performs the same call or assignment through the
 ordinary evaluation tool while retaining read-only evaluation by default.
+The projected proof also fetched two same-stop addresses in separate calls;
+an ordered `expressions` batch now returns both under one stop fence.
 
 ### Blind kernel exploit-speed qualification
 
@@ -502,6 +504,8 @@ Complete only the shared fixes demonstrated by these runs:
   daemon owns their store, rather than advertising dead actors as controllable.
 - [x] Let explicit projected evaluation call inferior functions or assign
   values in one request instead of requiring raw GDB for exploit-side probes.
+- [x] Evaluate up to 16 related expressions under one stop fence and return
+  ordered semantic values without one Agent turn per address.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

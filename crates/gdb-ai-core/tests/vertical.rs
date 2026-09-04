@@ -1296,6 +1296,33 @@ async fn local_debugging_vertical_slice() {
     let output = output["text"].as_str().unwrap();
     assert!(output.contains("marker reached"));
     assert!(output.contains("environment: preserved"), "{output:?}");
+    let evaluated = successful(
+        gateway
+            .dispatch(
+                request(
+                    "evaluate-batch",
+                    Some(&session_id),
+                    "value.evaluate",
+                    None,
+                    json!({
+                        "expressions": ["$pc", "&global_value"],
+                        "stop_id": third_stop
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(
+        evaluated.result.as_ref().unwrap()["results"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        evaluated.result.as_ref().unwrap()["results"][1]["expression"],
+        "&global_value"
+    );
     let called = successful(
         gateway
             .dispatch(
@@ -1303,7 +1330,7 @@ async fn local_debugging_vertical_slice() {
                     "inferior-call",
                     Some(&session_id),
                     "value.evaluate",
-                    changed.revision,
+                    evaluated.revision,
                     json!({
                         "lease_id": lease_id,
                         "expression": "(void *)sbrk(0)",
