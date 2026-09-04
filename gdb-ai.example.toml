@@ -46,7 +46,8 @@ session_artifact_bytes = 536870912
 owner_artifact_bytes = 1073741824
 total_artifact_bytes = 4294967296
 journal_bytes = 67108864
-process_memory_bytes = 2147483648
+# Zero leaves sparse virtual reservations unchanged.
+process_memory_bytes = 0
 process_cpu_seconds = 3600
 process_open_files = 1024
 process_count = 0 # RLIMIT_NPROC is host-UID-wide; use a cgroup for process quotas.

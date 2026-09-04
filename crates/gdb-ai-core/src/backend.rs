@@ -780,7 +780,9 @@ impl GdbBackend {
         // only async-signal-safe libc calls and captured integer values.
         unsafe {
             command.pre_exec(move || {
-                set_limit(Resource::RLIMIT_AS, address_space)?;
+                if address_space > 0 {
+                    set_limit(Resource::RLIMIT_AS, address_space)?;
+                }
                 set_limit(Resource::RLIMIT_CPU, cpu_seconds)?;
                 set_limit(Resource::RLIMIT_FSIZE, file_bytes)?;
                 set_limit(Resource::RLIMIT_NOFILE, open_files)?;

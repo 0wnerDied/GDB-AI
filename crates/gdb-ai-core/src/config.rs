@@ -132,7 +132,6 @@ impl Config {
             && self.limits.total_artifact_bytes >= self.limits.session_artifact_bytes
             && self.limits.total_artifact_bytes <= i64::MAX as usize
             && self.limits.journal_bytes > 0
-            && self.limits.process_memory_bytes > 0
             && self.limits.process_cpu_seconds > 0
             && self.limits.process_open_files >= 32
             && self.storage.max_closed_sessions > 0
@@ -289,7 +288,10 @@ impl Default for Limits {
             owner_artifact_bytes: 1024 * 1024 * 1024,
             total_artifact_bytes: 4 * 1024 * 1024 * 1024,
             journal_bytes: 64 * 1024 * 1024,
-            process_memory_bytes: 2 * 1024 * 1024 * 1024,
+            // 2026-09-05: A finite RLIMIT_AS blocked targets that reserve large
+            // sparse address ranges, including engine sandboxes. Leave virtual
+            // address space unchanged unless the operator opts into a limit.
+            process_memory_bytes: 0,
             process_cpu_seconds: 3_600,
             process_open_files: 1_024,
             process_count: 0,
@@ -395,6 +397,7 @@ mod tests {
         );
         assert_eq!(Config::default().security.sandbox, SandboxMode::Disabled);
         assert!(Config::default().security.kernel_enabled);
+        assert_eq!(Config::default().limits.process_memory_bytes, 0);
         assert_eq!(
             default_state_directory(Some("/state".into()), Some("/home/user".into())),
             PathBuf::from("/state/gdb-ai")
