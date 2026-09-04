@@ -323,7 +323,8 @@ impl Gateway {
         // 2026-09-04: Requiring a stopped context rejected live services and
         // forced Agents to rebuild this operation from separate debugger
         // calls. A running inferior can accept the breakpoint in place.
-        if !initially_running {
+        let kernel_selector = request.parameters.get("kernel_module_offset");
+        if kernel_selector.is_some() || !initially_running {
             require_stopped_context(&request.parameters, &initial)?;
         }
         let budget: ObservationBudget = request
@@ -364,7 +365,32 @@ impl Gateway {
         {
             insert = insert.bare("-i")?.bare(ignore.to_string())?;
         }
-        let (location, module_offset) = self.breakpoint_location(&request.parameters, &initial)?;
+        let mut resolved_location = None;
+        let (location, module_offset) = if let Some(selector) = kernel_selector {
+            let resolved = entry
+                .handle
+                .stable_observation(
+                    &initial,
+                    Box::pin(async {
+                        self.resolve_kernel_module_offset(
+                            &entry,
+                            &request.parameters,
+                            &initial,
+                            selector,
+                        )
+                        .await
+                    }),
+                )
+                .await?;
+            let address = resolved["address"]
+                .as_str()
+                .expect("kernel module resolution returns an address");
+            let location = format!("*{address}");
+            resolved_location = Some(resolved);
+            (location, None)
+        } else {
+            self.breakpoint_location(&request.parameters, &initial)?
+        };
         let pending_module = module_offset.filter(|_| !location.starts_with('*'));
         let rebind_command = pending_module.as_ref().map(|_| insert.clone());
         insert = insert.string(location);
@@ -558,6 +584,9 @@ impl Gateway {
                 self.store.upsert_operation(&operation)?;
                 result["operation"] = serde_json::to_value(operation)?;
                 result["breakpoint"] = Value::String(backend_number);
+                if let Some(resolved) = resolved_location {
+                    result["resolved_location"] = resolved;
+                }
                 append_turn_output(&entry, output_offset, &mut result).await?;
                 if let Some(error) = cleanup_error {
                     result["cleanup_warning"] = Value::String(error.to_string());

@@ -750,6 +750,37 @@ async fn bootstraps_a_symbol_free_modern_kernel_over_qemu_rsp() {
                 .as_array()
                 .is_some_and(|modules| modules.iter().any(|module| module["name"] == expected))
         );
+
+        if let Ok(offset) = std::env::var("GDB_AI_KERNEL_PROBE_OFFSET") {
+            let mut parameters = json!({
+                "lease_id": lease_id,
+                "stop_id": stop_id,
+                "kernel_module_offset": {"module": expected, "offset": offset},
+                "capture": [{"stack": {"limit": 2}}],
+                "budget": {"max_calls": 6, "wall_time_ms": 15000}
+            });
+            if let Ok(input) = std::env::var("GDB_AI_KERNEL_PROBE_INPUT") {
+                parameters["input"] = json!({"text": input});
+            }
+            let started = std::time::Instant::now();
+            let probe = call(
+                &gateway,
+                &caller,
+                request(
+                    "runtime-module-probe",
+                    Some(session_id),
+                    "agent.probe",
+                    connected.revision,
+                    parameters,
+                ),
+            )
+            .await;
+            eprintln!("kernel module probe elapsed: {:?}", started.elapsed());
+            let probe = probe.result.as_ref().unwrap();
+            assert_eq!(probe["capture_count"], 1);
+            assert_eq!(probe["resolved_location"]["module"], expected);
+            assert_eq!(probe["resolved_location"]["offset"], offset);
+        }
     }
     gateway.shutdown().await;
 }

@@ -55,6 +55,13 @@ QEMU's live mappings. It is verified with multiple Debian modules on Linux 6.1
 and 6.12, multiple Arch modules across the Linux 6.13, 6.15, and 7.2 layout
 transitions, and a randomized module layout where GEF's module commands fail.
 
+`gdb_probe` accepts `kernel_module_offset` with a module name and text-relative
+hexadecimal offset. From a stopped kernel context, one call discovers the live
+module, validates the offset against its executable segment, arms the temporary
+breakpoint, runs, captures the attributed stop, and removes the breakpoint.
+QEMU serial or network activity is an external trigger: start it concurrently
+while the blocking probe waits; `input` remains inferior PTY data.
+
 The implementation follows the useful semantic boundaries demonstrated by
 [bata24/gef](https://github.com/bata24/gef): symbol-free QEMU bootstrap,
 architecture-specific current-task resolution, bounded task traversal, and
@@ -92,6 +99,12 @@ GDB_AI_KERNEL_RSP_ENDPOINT=127.0.0.1:1234 \
   cargo test -p gdb-ai-core --test kernel \
   bootstraps_a_symbol_free_modern_kernel_over_qemu_rsp -- --exact
 ```
+
+If that guest has a loaded module whose code can be triggered independently,
+add `GDB_AI_KERNEL_EXPECT_MODULE=name` and
+`GDB_AI_KERNEL_PROBE_OFFSET=0xTEXT_OFFSET`. Trigger the module through the QEMU
+serial console or network while the test waits; the check requires a real
+attributed breakpoint hit and validates cleanup.
 
 Required CI uses `tests/kernel/fetch-debian-kernel.sh` to verify pinned,
 checksum-validated Debian 6.1 and 6.12 x86-64 builds plus Debian 6.12

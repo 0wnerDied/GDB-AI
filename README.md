@@ -240,6 +240,9 @@ trigger concurrently while the probe call waits for its breakpoint.
 Its capture items accept an expression, stack, or exact memory window selected
 by `address_expression` and `length`. A module-offset probe may start before a
 stripped PIE maps; its temporary breakpoint is rebound and removed internally.
+For a stopped stripped x86-64 kernel, `kernel_module_offset` resolves a loaded
+module's live text base and runs the same probe without a separate bootstrap,
+address calculation, or raw GDB command.
 `gdb_run` action `probe` remains an equivalent compatibility form.
 `gdb_memory` action `artifact` pages bytes from an artifact URI returned by a
 large result; use `next_offset` until `truncated` is false.

@@ -241,6 +241,14 @@ const MODULE_OFFSET_FIELDS: &[ParameterField] = &[
 const MODULE_OFFSET_OBJECT: ObjectContract = ObjectContract::new(MODULE_OFFSET_FIELDS, 0, &[]);
 const MODULE_OFFSET_KIND: ParameterKind = ParameterKind::Shape(&MODULE_OFFSET_OBJECT);
 
+const KERNEL_MODULE_OFFSET_FIELDS: &[ParameterField] = &[
+    required("module", ParameterKind::String),
+    required("offset", ParameterKind::String),
+];
+const KERNEL_MODULE_OFFSET_OBJECT: ObjectContract =
+    ObjectContract::new(KERNEL_MODULE_OFFSET_FIELDS, 0, &[]);
+const KERNEL_MODULE_OFFSET_KIND: ParameterKind = ParameterKind::Shape(&KERNEL_MODULE_OFFSET_OBJECT);
+
 const LOCATION_FIELDS: &[ParameterField] = &[
     optional("function", ParameterKind::String),
     optional("address", ParameterKind::String),
@@ -845,6 +853,7 @@ impl CanonicalMethod {
                 optional("expression", String),
                 optional("source", SOURCE_KIND),
                 optional("module_offset", MODULE_OFFSET_KIND),
+                optional("kernel_module_offset", KERNEL_MODULE_OFFSET_KIND),
                 optional("condition", String),
                 optional("ignore_count", Unsigned),
                 optional("input", INFERIOR_INPUT_KIND),
@@ -863,6 +872,7 @@ impl CanonicalMethod {
                 "expression",
                 "source",
                 "module_offset",
+                "kernel_module_offset",
             ]),
             KernelInspect => MethodContract::contextual(vec![
                 required(
@@ -1025,6 +1035,11 @@ mod tests {
                     {"memory": {"address_expression": "$sp", "length": 16}}
                 ],
                 "budget": {"max_calls": 8, "wall_time_ms": 1000}
+            }))
+            .unwrap();
+        CanonicalMethod::AgentProbe
+            .validate_parameters(&json!({
+                "kernel_module_offset": {"module": "sample", "offset": "0x123"}
             }))
             .unwrap();
         CanonicalMethod::InspectionBatch

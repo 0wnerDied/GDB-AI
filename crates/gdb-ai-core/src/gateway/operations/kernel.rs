@@ -14,7 +14,7 @@ use super::{
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{DomainEvent, TargetOrigin},
+    domain::{Address, DomainEvent, TargetOrigin},
     gateway::{Gateway, SessionEntry},
     protocol::{ApiRequest, CanonicalMethod},
     providers::LINUX_KERNEL_PROVIDER_VERSION,
@@ -168,6 +168,80 @@ fn requested_kernel_symbols(parameters: &Value, required: bool) -> Result<Vec<St
     Ok(names)
 }
 
+fn kernel_module_text_offset(facts: &Value, requested: &str, offset: u64) -> Result<Value> {
+    if let Some(error) = facts["module_error"].as_str() {
+        return Err(Error::new(
+            ErrorCode::CapabilityMissing,
+            format!("kernel module discovery failed: {error}"),
+        ));
+    }
+    let modules = facts["modules"]
+        .as_array()
+        .ok_or_else(|| Error::new(ErrorCode::GdbError, "runtime kallsyms omitted modules"))?;
+    let module = modules
+        .iter()
+        .find(|module| module["name"] == requested)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::CapabilityMissing,
+                format!("loaded kernel module {requested:?} was not found"),
+            )
+            .with_details(json!({
+                "available_modules": modules.iter().filter_map(|module| module["name"].as_str()).collect::<Vec<_>>()
+            }))
+        })?;
+    let segments = module["segments"].as_array().ok_or_else(|| {
+        Error::new(
+            ErrorCode::CapabilityMissing,
+            format!("kernel module {requested:?} has no validated memory segments"),
+        )
+    })?;
+    let segment = segments
+        .iter()
+        .find(|segment| segment["kind"] == "text")
+        .or_else(|| segments.iter().find(|segment| segment["kind"] == "core"))
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::CapabilityMissing,
+                format!("kernel module {requested:?} has no executable segment"),
+            )
+        })?;
+    let base = parse_address(segment["base"].as_str().ok_or_else(|| {
+        Error::new(
+            ErrorCode::GdbError,
+            "kernel module segment omitted its base",
+        )
+    })?)?;
+    let size = segment["size"].as_u64().ok_or_else(|| {
+        Error::new(
+            ErrorCode::GdbError,
+            "kernel module segment omitted its size",
+        )
+    })?;
+    if offset >= size {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            format!("kernel module text offset 0x{offset:x} exceeds its 0x{size:x}-byte segment"),
+        ));
+    }
+    let address = base.checked_add(offset).ok_or_else(|| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            "kernel module text offset overflows its runtime base",
+        )
+    })?;
+    Ok(json!({
+        "space": "kernel",
+        "module": requested,
+        "module_address": module["address"],
+        "segment": segment["kind"],
+        "base": segment["base"],
+        "size": size,
+        "offset": format!("0x{offset:x}"),
+        "address": format!("0x{address:016x}")
+    }))
+}
+
 async fn kernel_current_text(
     entry: &SessionEntry,
     parameters: &Value,
@@ -239,6 +313,34 @@ async fn kernel_address(
 }
 
 impl Gateway {
+    pub(super) async fn resolve_kernel_module_offset(
+        &self,
+        entry: &SessionEntry,
+        parameters: &Value,
+        state: &crate::domain::SessionState,
+        selector: &Value,
+    ) -> Result<Value> {
+        if !self.config.security.kernel_enabled {
+            return Err(Error::new(
+                ErrorCode::CapabilityMissing,
+                "Linux kernel provider is disabled",
+            ));
+        }
+        let module = string(selector, "module")?;
+        let normalized = Address::parse(&string(selector, "offset")?)?;
+        let offset = u64::from_str_radix(&normalized.as_str()[2..], 16)
+            .map_err(|_| Error::new(ErrorCode::InvalidArgument, "invalid module offset"))?;
+        // 2026-09-04: Kernel probes previously required separate bootstrap,
+        // address arithmetic, and raw breakpoint calls. Resolve the live text
+        // segment under the probe's stopped-state fence instead.
+        let (_, facts, evidence_seq) = self
+            .symbol_free_kernel_facts(entry, parameters, state, &[])
+            .await?;
+        let mut resolved = kernel_module_text_offset(&facts, &module, offset)?;
+        resolved["evidence_seq"] = Value::from(evidence_seq);
+        Ok(resolved)
+    }
+
     async fn kernel_image_context(
         &self,
         entry: &SessionEntry,
@@ -1296,8 +1398,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        KernelMapping, kernel_symbol_output, parse_qemu_memory_map, requested_kernel_symbols,
-        select_kernel_image,
+        KernelMapping, kernel_module_text_offset, kernel_symbol_output, parse_qemu_memory_map,
+        requested_kernel_symbols, select_kernel_image,
     };
 
     #[test]
@@ -1353,5 +1455,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(names, ["commit_creds", "prepare_kernel_cred"]);
+    }
+
+    #[test]
+    fn resolves_only_offsets_inside_a_kernel_module_text_segment() {
+        let facts = json!({
+            "modules": [{
+                "address": "0xffffffff81001000",
+                "name": "sample",
+                "segments": [{
+                    "kind": "text",
+                    "base": "0xffffffffc0000000",
+                    "size": 0x1000
+                }]
+            }],
+            "module_error": null
+        });
+
+        let resolved = kernel_module_text_offset(&facts, "sample", 0x123).unwrap();
+        assert_eq!(resolved["address"], "0xffffffffc0000123");
+        assert!(kernel_module_text_offset(&facts, "sample", 0x1000).is_err());
     }
 }

@@ -381,6 +381,10 @@ randomized-layout target also resolved in 2.22s where both GEF module commands
 failed. Official Arch packages for Linux 6.13.8, 6.15.9, and 7.2.2 cover the
 remaining layout branches; their two-module names and bases matched
 `/proc/modules` in 2.88s, 2.80s, and 3.09s.
+A text-relative one-call probe then resolved a loaded distribution module,
+armed the dynamic breakpoint, captured its externally triggered execution, and
+cleaned up in 2.30s and 2.09s across two fresh KASLR boots. The legacy Linux
+6.1 `core_layout` path hit the same one-call probe without typed symbols.
 
 Complete only the shared fixes demonstrated by these runs:
 
@@ -418,6 +422,8 @@ Complete only the shared fixes demonstrated by these runs:
   measured Linux 5.15 through 7.2 layouts, returning only semantic facts.
 - [x] Resolve stripped module identity and validated memory segments in the
   existing one-call bootstrap, including measured randomized layouts.
+- [x] Let one `gdb_probe` resolve a stripped kernel module text offset, run,
+  capture the attributed hit, and clean up without raw GDB or fixed addresses.
 - [ ] Adopt page-walk semantics only when they beat the native workflow on a
   blind target; do not import GEF's UI or compatibility surface wholesale.
 - [ ] Detect KGDB/KDB separately from a QEMU gdbstub. Normalize read-oriented

@@ -184,6 +184,10 @@ capture supplies `address_expression` and `length`. The call queues the whole
 input, skips intermediate hits, returns output and observations, and cleans up
 its temporary breakpoint. A module offset may be supplied before a stripped
 PIE maps; GDB/AI rebinds it when the mapping appears.
+For a loaded stripped kernel module, use
+`kernel_module_offset: {"module": "name", "offset": "0x..."}`. The offset is
+relative to the module text segment; GDB/AI resolves its current runtime base,
+probes it, captures the stop, and removes the breakpoint in the same call.
 For an already-running target, the call arms and waits without a separate
 interrupt or resume.
 The `input` field writes the inferior PTY. For socket or other external events,
