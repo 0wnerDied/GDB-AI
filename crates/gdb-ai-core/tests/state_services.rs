@@ -144,7 +144,9 @@ async fn tracked_state_lifecycle_round_trips() {
             marker.revision,
             json!({
                 "lease_id": lease_id,
-                "location": {"source": {"path": source, "line": 19}}
+                // 2026-09-04: Keep this source breakpoint after input; the
+                // added helper moved line 19 off executable code.
+                "location": {"source": {"path": source, "line": 36}}
             }),
         ),
     )
