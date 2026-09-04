@@ -875,6 +875,7 @@ impl CanonicalMethod {
                 optional("kernel_module_offset", KERNEL_MODULE_OFFSET_KIND),
                 optional("condition", String),
                 optional("ignore_count", Unsigned),
+                optional("restart", Boolean),
                 optional("input", INFERIOR_INPUT_KIND),
                 optional("trigger", PROBE_TRIGGER_KIND),
                 optional("capture", CAPTURE_KIND),

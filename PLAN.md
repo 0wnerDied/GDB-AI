@@ -440,6 +440,8 @@ Complete only the shared fixes demonstrated by these runs:
   and the inferior runs, returning trigger status on a hit or timeout.
 - [x] Let `gdb_probe` remove its temporary breakpoint, continue to the next
   stop or exit, and return optional bounded inspection in the same call.
+- [x] Let a repeated `gdb_probe` restart the current inferior before arming,
+  eliminating separate restart and resume calls from exploit trials.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

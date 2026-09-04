@@ -259,6 +259,8 @@ more than once.
 `gdb_probe` arms a temporary breakpoint on a stopped or already-running target
 and combines optional byte-exact input, `ignore_count`, bounded capture, output,
 and cleanup in one call. A running target is not interrupted or resumed first.
+For another trial in the same session, set `restart: true`; the call reruns the
+target, arms the probe, and resumes it without separate restart or run calls.
 Set `stop_policy: "continue_to_stop"` to remove the probe breakpoint, continue
 to the next stop or exit within the same wall-time budget, and return its wait
 status under `after`. Optional `inspect` views run at that next stop and appear

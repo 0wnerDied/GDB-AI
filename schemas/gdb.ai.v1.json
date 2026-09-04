@@ -3840,6 +3840,9 @@
                 ],
                 "type": "object"
               },
+              "restart": {
+                "type": "boolean"
+              },
               "source": {
                 "additionalProperties": false,
                 "properties": {
@@ -4277,6 +4280,9 @@
                   "offset"
                 ],
                 "type": "object"
+              },
+              "restart": {
+                "type": "boolean"
               },
               "source": {
                 "additionalProperties": false,

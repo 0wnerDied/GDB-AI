@@ -184,7 +184,8 @@ For a counted one-shot breakpoint, use `gdb_probe` with `input`,
 `ignore_count`, and bounded expression, stack, or memory captures. A memory
 capture supplies `address_expression` and `length`. The call queues the whole
 input, skips intermediate hits, returns output and observations, and cleans up
-its temporary breakpoint. With `stop_policy: "continue_to_stop"`, it then waits
+its temporary breakpoint. Set `restart: true` on the next trial to rerun, arm,
+and resume in that same call. With `stop_policy: "continue_to_stop"`, it then waits
 for the next stop or exit; optional `inspect` views return that stop's crash or
 stack context in the same call. A module offset may be supplied before a
 stripped PIE maps; GDB/AI rebinds it when the mapping appears.

@@ -411,32 +411,17 @@ async fn probe_starts_an_external_trigger_after_arming() {
     assert!(probed.state.as_ref().unwrap().breakpoints.is_empty());
 
     std::fs::remove_file(&sentinel).unwrap();
-    let restarted = call(
-        &gateway,
-        &caller,
-        request(
-            "restart-trigger",
-            Some(session_id),
-            "target.restart",
-            probed.revision,
-            json!({
-                "lease_id": lease_id,
-                "stop": "none",
-                "wait": {"until": "running", "timeout_ms": 5000}
-            }),
-        ),
-    )
-    .await;
     let timed_out = gateway
         .dispatch(
             request(
                 "probe-failed-trigger",
                 Some(session_id),
                 "agent.probe",
-                restarted.revision,
+                probed.revision,
                 json!({
                     "lease_id": lease_id,
                     "function": "marker",
+                    "restart": true,
                     "trigger": {"command": ["false"]},
                     "budget": {"max_calls": 4, "wall_time_ms": 200}
                 }),

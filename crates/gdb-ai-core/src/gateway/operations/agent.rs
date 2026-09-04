@@ -406,7 +406,31 @@ impl Gateway {
             .and_then(|trigger| trigger.cwd.as_deref())
             .map(|cwd| self.workspace_path(cwd, true))
             .transpose()?;
-        let entry = self.entry(required_session(request)?).await?;
+        let session_id = required_session(request)?;
+        let restart = request
+            .parameters
+            .get("restart")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if restart {
+            // 2026-09-05: Repeated exploit trials needed restart, resume, and
+            // probe calls even though the probe already resumes a stopped
+            // inferior. Restart inside the compound operation so one request
+            // owns the new inferior through its attributed observation; the
+            // first instruction also keeps stripped targets independent of
+            // main.
+            self.target_restart(&ApiRequest {
+                api_version: request.api_version.clone(),
+                request_id: format!("{}:restart", request.request_id),
+                session_id: Some(session_id.to_owned()),
+                method: CanonicalMethod::TargetRestart,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({"stop": "first_instruction"}),
+            })
+            .await?;
+        }
+        let entry = self.entry(session_id).await?;
         let output_offset = entry.handle.inferior_output_position();
         let initial = entry.handle.state();
         let initially_running = initial
@@ -417,7 +441,7 @@ impl Gateway {
         // forced Agents to rebuild this operation from separate debugger
         // calls. A running inferior can accept the breakpoint in place.
         let kernel_selector = request.parameters.get("kernel_module_offset");
-        if kernel_selector.is_some() || !initially_running {
+        if !restart && (kernel_selector.is_some() || !initially_running) {
             require_stopped_context(&request.parameters, &initial)?;
         }
         let budget: ObservationBudget = request
