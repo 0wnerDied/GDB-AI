@@ -188,6 +188,7 @@ def _current_tasks(symbols):
         by_name.setdefault(symbol["name"], []).append(int(symbol["address"], 16))
     init_task = next((address for address in by_name.get("init_task", []) if address >> 63), None)
     current = next(iter(by_name.get("pcpu_hot", []) or by_name.get("current_task", [])), None)
+    per_cpu_offsets = next(iter(by_name.get("__per_cpu_offset", [])), None)
     if init_task is None or current is None:
         return []
 
@@ -201,19 +202,32 @@ def _current_tasks(symbols):
     try:
         for fallback_cpu, thread in enumerate(sorted(inferior.threads(), key=lambda item: item.num)):
             thread.switch()
+            name = thread.name or ""
+            match = re.search(r"CPU#(\d+)", name)
+            cpu = int(match.group(1)) if match else fallback_cpu
             gs_base = int(gdb.parse_and_eval("$gs_base")) & ((1 << 64) - 1)
+            # 2026-09-04: At a KPTI userspace stop, $gs_base is the process
+            # value. Recover the hidden kernel GS base from Linux's per-CPU
+            # offset array so current-task discovery stays valid.
+            if not gs_base >> 63:
+                if per_cpu_offsets is None:
+                    continue
+                gs_base = struct.unpack(
+                    "<Q", bytes(inferior.read_memory(per_cpu_offsets + cpu * 8, 8))
+                )[0]
             # 2026-09-04: Linux 7 kallsyms reports the linked per-CPU virtual
             # address instead of a small offset. x86 GS addition wraps at 64 bits.
             pointer_address = (gs_base + current) & ((1 << 64) - 1)
-            pointer = bytes(inferior.read_memory(pointer_address, 8))
-            task = struct.unpack("<Q", pointer)[0]
-            comm = bytes(inferior.read_memory(task + comm_offset, 16)).split(b"\x00", 1)[0]
+            try:
+                pointer = bytes(inferior.read_memory(pointer_address, 8))
+                task = struct.unpack("<Q", pointer)[0]
+                comm = bytes(inferior.read_memory(task + comm_offset, 16)).split(b"\x00", 1)[0]
+            except gdb.MemoryError:
+                continue
             if not comm or any(byte < 0x20 or byte > 0x7e for byte in comm):
                 continue
-            name = thread.name or ""
-            match = re.search(r"CPU#(\d+)", name)
             tasks.append({
-                "cpu": int(match.group(1)) if match else fallback_cpu,
+                "cpu": cpu,
                 "task": f"0x{task:016x}",
                 "comm": comm.decode("ascii"),
                 "gs_base": f"0x{gs_base:016x}",
@@ -452,7 +466,7 @@ def _gdbai_kernel_symbols(ranges, module_ranges, requested):
             image, version, token_index, count_address, count
         )
 
-        internal = {"init_task", "pcpu_hot", "current_task", "modules"}
+        internal = {"__per_cpu_offset", "init_task", "pcpu_hot", "current_task", "modules"}
         wanted = set(requested) | internal
         found = []
         position = names

@@ -53,6 +53,7 @@ struct KernelImageContext {
     image_mappings: Vec<KernelMapping>,
     module_candidates: Vec<KernelMapping>,
     module_candidates_truncated: bool,
+    kernel_page_table: bool,
     evidence_seq: u64,
 }
 
@@ -105,11 +106,15 @@ fn select_kernel_image(mappings: &[KernelMapping]) -> Option<KernelMapping> {
     // 2026-09-04: Some distro kernels place text and rodata in separate
     // mappings. Treat their complete span as the image while preserving each
     // readable segment for searches, so gaps cannot hide version or kallsyms.
-    Some(KernelMapping {
+    let image = KernelMapping {
         start: mappings.first()?.start,
         end: mappings.last()?.end,
         permissions: "-r-".into(),
-    })
+    };
+    // 2026-09-04: KPTI's user PGD exposes a 2 MiB entry mapping that matched
+    // the old image heuristic. Reject that isolated window so callers retry
+    // the paired kernel PGD instead of scanning unrelated entry code.
+    (image.size() > 2 * 1024 * 1024).then_some(image)
 }
 
 fn command_output(reply: &crate::session::CommandReply) -> Vec<u8> {
@@ -120,6 +125,50 @@ fn command_output(reply: &crate::session::CommandReply) -> Vec<u8> {
         }
     }
     output
+}
+
+fn kernel_cr3_script(body: &str) -> String {
+    let body = body.replace('\n', "\n    ");
+    // 2026-09-04: KPTI user stops expose only the shadow page table, so QEMU
+    // cannot read the kernel image. Use Linux's adjacent kernel PGD for one
+    // command and restore the exact CR3 before any other Agent can observe it.
+    format!(
+        concat!(
+            "import gdb\n",
+            "gdb.execute('set $_gdbai_kernel_saved_cr3 = $cr3', to_string=True)\n",
+            "try:\n",
+            "    gdb.execute('set $cr3 = $_gdbai_kernel_saved_cr3 & 0x000fffffffffe000', to_string=True)\n",
+            "    {body}\n",
+            "finally:\n",
+            "    gdb.execute('set $cr3 = $_gdbai_kernel_saved_cr3', to_string=True)\n",
+            "    gdb.set_convenience_variable('_gdbai_kernel_saved_cr3', None)"
+        ),
+        body = body
+    )
+}
+
+async fn qemu_memory_map(
+    entry: &SessionEntry,
+    kernel_page_table: bool,
+) -> Result<(Vec<KernelMapping>, u64)> {
+    let body = "print('|'.join(line for line in gdb.execute('monitor info mem', to_string=True).splitlines() if line.startswith('ffffffff')))";
+    let script = if kernel_page_table {
+        kernel_cr3_script(body)
+    } else {
+        format!("import gdb\n{body}")
+    };
+    let reply = entry
+        .handle
+        .command(
+            MiCommand::new("-interpreter-exec")?
+                .bare("console")?
+                .string(format!("python exec({})", serde_json::to_string(&script)?)),
+        )
+        .await?;
+    Ok((
+        parse_qemu_memory_map(&command_output(&reply)),
+        reply.evidence_seq,
+    ))
 }
 
 const KERNEL_SYMBOL_PREFIX: &str = "gdbai-kernel-symbols:";
@@ -358,40 +407,32 @@ impl Gateway {
                 "symbol-free bootstrap currently requires an x86-64 QEMU target",
             ));
         }
-        let (cs, cs_seq) = kernel_address(entry, parameters, state, "$cs").await?;
-        if cs & 3 == 3 {
-            return Err(Error::new(
-                ErrorCode::CapabilityMissing,
-                "symbol-free bootstrap requires a stop in kernel context",
-            ));
-        }
         let (pc, pc_seq) = kernel_address(entry, parameters, state, "$pc").await?;
         // 2026-09-04: Forwarding `monitor info mem` produced tens
         // of MiB of MI and journal data before the useful kernel
         // mappings. Capture it inside GDB and emit only global
         // kernel addresses so one semantic call stays bounded.
-        let monitor = entry
-            .handle
-            .command(
-                MiCommand::new("-interpreter-exec")?
-                    .bare("console")?
-                    .string(
-                        "python import gdb; print('|'.join(line for line in gdb.execute('monitor info mem', to_string=True).splitlines() if line.startswith('ffffffff')))"
-                    ),
-            )
-            .await?;
-        let output = command_output(&monitor);
-        let mappings = parse_qemu_memory_map(&output);
-        let image_mappings = kernel_image_mappings(&mappings);
+        let (mut mappings, mut monitor_seq) = qemu_memory_map(entry, false).await?;
+        let mut kernel_page_table = false;
         // 2026-09-04: A stop inside a loadable module made the PC
         // mapping look like the kernel image. Select the first
         // large read-only core mapping independently of stop site.
-        let image = select_kernel_image(&mappings).ok_or_else(|| {
-            Error::new(
-                ErrorCode::CapabilityMissing,
-                "QEMU did not report a symbol-free kernel image mapping",
-            )
-        })?;
+        let image = if let Some(image) = select_kernel_image(&mappings) {
+            image
+        } else {
+            let (kernel_mappings, evidence_seq) = qemu_memory_map(entry, true).await?;
+            let image = select_kernel_image(&kernel_mappings).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::CapabilityMissing,
+                    "QEMU did not report a symbol-free kernel image mapping",
+                )
+            })?;
+            mappings = kernel_mappings;
+            monitor_seq = monitor_seq.max(evidence_seq);
+            kernel_page_table = true;
+            image
+        };
+        let image_mappings = kernel_image_mappings(&mappings);
         let mut module_candidates = mappings
             .into_iter()
             .filter(|mapping| {
@@ -408,11 +449,8 @@ impl Gateway {
             image_mappings,
             module_candidates,
             module_candidates_truncated,
-            evidence_seq: names_reply
-                .evidence_seq
-                .max(cs_seq)
-                .max(pc_seq)
-                .max(monitor.evidence_seq),
+            kernel_page_table,
+            evidence_seq: names_reply.evidence_seq.max(pc_seq).max(monitor_seq),
         })
     }
 
@@ -421,6 +459,7 @@ impl Gateway {
         entry: &SessionEntry,
         image_mappings: &[KernelMapping],
         module_mappings: &[KernelMapping],
+        kernel_page_table: bool,
         names: &[String],
     ) -> Result<(Value, u64)> {
         let names = serde_json::to_string(names)?;
@@ -440,6 +479,11 @@ impl Gateway {
             "{}\n_gdbai_kernel_symbols({ranges}, {module_ranges}, {names})",
             include_str!("kernel_symbols.py"),
         );
+        let script = if kernel_page_table {
+            kernel_cr3_script(&script)
+        } else {
+            script
+        };
         let command = format!("python exec({})", serde_json::to_string(&script)?);
         let reply = entry
             .handle
@@ -471,6 +515,7 @@ impl Gateway {
                 entry,
                 &context.image_mappings,
                 &context.module_candidates,
+                context.kernel_page_table,
                 names,
             )
             .await?;
@@ -490,6 +535,26 @@ impl Gateway {
                 state,
                 Box::pin(async {
                     let context = self.kernel_image_context(entry, parameters, state).await?;
+                    if context.kernel_page_table {
+                        let (facts, evidence_seq) = self
+                            .scan_kernel_symbols(
+                                entry,
+                                &context.image_mappings,
+                                &context.module_candidates,
+                                true,
+                                &[],
+                            )
+                            .await?;
+                        return Ok(KernelBootstrap {
+                            version_address: facts["version_address"]
+                                .as_str()
+                                .map(parse_address)
+                                .transpose()?,
+                            version: facts["version"].as_str().map(str::to_owned),
+                            evidence_seq: context.evidence_seq.max(evidence_seq),
+                            context,
+                        });
+                    }
                     let needle = b"Linux version ";
                     let pattern = needle
                         .iter()
@@ -581,6 +646,7 @@ impl Gateway {
             "version_address": bootstrap.version_address.map(|address| format!("0x{address:016x}")),
             "module_candidates": bootstrap.context.module_candidates.iter().map(KernelMapping::json).collect::<Vec<_>>(),
             "module_candidates_truncated": bootstrap.context.module_candidates_truncated,
+            "page_table": if bootstrap.context.kernel_page_table { "paired-kernel" } else { "current" },
             "partial": !warnings.is_empty(),
             "warnings": warnings,
             "stop_id": state.stop_id,
@@ -810,6 +876,7 @@ impl Gateway {
                                 "current_tasks": facts["current_tasks"],
                                 "modules": facts["modules"],
                                 "kallsyms": facts["kallsyms"],
+                                "page_table": if context.kernel_page_table { "paired-kernel" } else { "current" },
                                 "partial": partial,
                                 "warnings": warnings,
                                 "stop_id": state.stop_id,
@@ -1438,6 +1505,14 @@ mod tests {
                 end: mappings[1].end,
                 permissions: "-r-".into(),
             })
+        );
+        assert_eq!(
+            select_kernel_image(&[KernelMapping {
+                start: 0xffff_ffff_8100_0000,
+                end: 0xffff_ffff_8120_0000,
+                permissions: "-r-".into(),
+            }]),
+            None
         );
     }
 

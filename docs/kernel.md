@@ -34,12 +34,14 @@ On AArch64, the provider uses `$sp_el0`. Task traversal uses debug type
 information from `vmlinux`. Module inspection supports both the legacy
 `core_layout` and Linux 6.4-or-newer `mem[]` layouts.
 
-When an x86-64 QEMU target is stopped in kernel context without usable
-`vmlinux` symbols, `bootstrap` compacts QEMU's memory map and a bounded GDB
-search into the runtime kernel image range, Linux version, and possible module
-mappings. The `base` and `version` views use the same fallback automatically.
-When `bootstrap` includes `names`, the same in-GDB scan also follows the kernel
-module list and correlates each module's memory layout with those mappings.
+When an x86-64 QEMU target is stopped without usable `vmlinux` symbols,
+`bootstrap` compacts QEMU's memory map and a bounded GDB search into the runtime
+kernel image range, Linux version, and possible module mappings. At a KPTI
+userspace stop it reads through Linux's paired kernel page table for the
+observation and restores the original CR3 before returning. The `base` and
+`version` views use the same fallback automatically. When `bootstrap` includes
+`names`, the same in-GDB scan also follows the kernel module list and correlates
+each module's memory layout with those mappings.
 
 `symbols` decodes the in-memory compressed kallsyms table inside GDB and returns
 only exact names requested by the Agent. It also derives every CPU's current
@@ -100,6 +102,10 @@ GDB_AI_KERNEL_RSP_ENDPOINT=127.0.0.1:1234 \
   cargo test -p gdb-ai-core --test kernel \
   bootstraps_a_symbol_free_modern_kernel_over_qemu_rsp -- --exact
 ```
+
+When the stub is stopped in KPTI userspace, add
+`GDB_AI_KERNEL_EXPECT_PAGE_TABLE=paired-kernel`; the repeated bootstrap also
+checks that the temporary kernel CR3 was restored.
 
 If that guest has a loaded module whose code can be triggered independently,
 add `GDB_AI_KERNEL_EXPECT_MODULE=name` and

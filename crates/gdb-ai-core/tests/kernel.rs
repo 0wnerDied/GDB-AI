@@ -704,6 +704,9 @@ async fn bootstraps_a_symbol_free_modern_kernel_over_qemu_rsp() {
             .as_array()
             .is_some_and(|segments| !segments.is_empty())
     );
+    if let Ok(expected) = std::env::var("GDB_AI_KERNEL_EXPECT_PAGE_TABLE") {
+        assert_eq!(layout["page_table"], expected);
+    }
 
     let started = std::time::Instant::now();
     let bootstrap = call(
@@ -723,6 +726,9 @@ async fn bootstraps_a_symbol_free_modern_kernel_over_qemu_rsp() {
     )
     .await;
     let result = bootstrap.result.as_ref().unwrap();
+    if let Ok(expected) = std::env::var("GDB_AI_KERNEL_EXPECT_PAGE_TABLE") {
+        assert_eq!(result["page_table"], expected);
+    }
     assert_eq!(result["missing_symbols"], json!([]));
     assert_eq!(result["symbols"].as_array().unwrap().len(), 3);
     assert!(

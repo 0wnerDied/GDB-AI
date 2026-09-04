@@ -433,6 +433,8 @@ Complete only the shared fixes demonstrated by these runs:
   an administrative profile retry.
 - [x] Let one `gdb_probe` resolve a stripped kernel module text offset, run,
   capture the attributed hit, and clean up without raw GDB or fixed addresses.
+- [x] Inspect symbol-free kernels from KPTI userspace stops through Linux's
+  paired kernel PGD, restoring CR3 within every bounded observation.
 - [ ] Adopt page-walk semantics only when they beat the native workflow on a
   blind target; do not import GEF's UI or compatibility surface wholesale.
 - [ ] Detect KGDB/KDB separately from a QEMU gdbstub. Normalize read-oriented
