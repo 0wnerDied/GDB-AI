@@ -13,7 +13,7 @@ Completed and superseded plans are preserved in:
 
 ## Version-1 maintenance
 
-- Preserve the `gdb.ai/v1` compatibility rules and the default ten-tool MCP
+- Preserve the `gdb.ai/v1` compatibility rules and the default eleven-tool MCP
   catalog. Add public surface only for a demonstrated user or Agent need.
 - Keep correctness, bounded output, stop consistency, operation ownership,
   cancellation scope, evidence integrity, and cleanup paths covered by a
@@ -31,13 +31,13 @@ the default MCP catalog. Removing `agent.experiment` or
 version-1 maintenance release. `agent.hypothesis_check` remains experimental
 and outside the default catalog.
 
-## Agent token efficiency
+## Agent exploit speed
 
-The only optimization target is less Agent context for the same or better
-debugging accuracy. Wall time and RPC latency matter only when they reduce the
-number or quality of useful debugging turns. Preserve precise stop, frame,
-memory, register, and crash evidence; remove transport bookkeeping, duplicated
-state, and low-value prose from the Agent surface.
+The only optimization target is shorter wall time from the first debugger turn
+to a reproducible exploit. Tool calls, output size, and RPC latency are
+diagnostics only: optimize them when they delay Agent reasoning or split one
+debugging operation into several turns. Preserve precise stop, frame, memory,
+register, and crash evidence.
 
 GDB/AI is a semantic compressor over GDB, not a decomposition of GDB commands
 into transport steps. Strip prompts, terminal formatting, control bytes, and
@@ -74,10 +74,10 @@ Complete these changes before the next comparison:
   SDK, workspace, and lint checks before comparative evaluation.
 
 The next comparison must use the projected MCP `tools/call` surface and a
-prebuilt server. A custom `gdb.ai/call` client does not measure Agent-facing
-schemas or compact tool results. Record prompt-visible schema bytes, request
-and response bytes, tool calls, coordination errors, useful exploit progress,
-stable success, and wall time.
+prebuilt server. A custom `gdb.ai/call` client does not measure the Agent-facing
+workflow. Record time to the first runtime primitive, time to a stable exploit,
+fresh-process verification, debugger turns, retries, errors, and final wall
+time. Record traffic size only when it explains a delay or a bad tool choice.
 
 Comparative claims still require matched model builds, prompts, permissions,
 budgets, environments, tasks, blind grading, and multiple seeds:
@@ -85,15 +85,17 @@ budgets, environments, tasks, blind grading, and multiple seeds:
 ```text
 A  shell plus CLI GDB
 B  persistent raw GDB
-C  default ten-tool structured GDB/AI
+C  default structured GDB/AI
 D  C plus typed probe
 ```
 
-For the first post-fix gate, projected coordination fields and redundant
-acquisitions must disappear. GDB/AI must use fewer prompt-visible bytes than
-the native transcript while matching or improving verified exploit progress;
-stable success remains the strongest evidence. Otherwise use the recorded call
-trace for one more bounded change rather than adding a general pwn subsystem.
+For each post-fix gate, GDB/AI must match or beat native GDB's verified runtime
+progress and stable-exploit wall time. Otherwise use the recorded call trace
+for one more bounded shared-interface fix rather than adding a general pwn
+subsystem.
+
+Historical traffic totals below remain diagnostic evidence from earlier gates;
+they are not current acceptance targets.
 
 The blind exploit comparison reached the same controlled-callback proof on five
 fresh ASLR processes in both groups, but failed the context gate. Native
@@ -311,6 +313,74 @@ Complete only the shared fixes demonstrated by this run:
 - [x] Emit only positive MCP annotations and one breakpoint-location syntax.
   The same ten-tool catalog falls from 18,196 to 16,865 wire bytes without
   removing a debugger action or canonical request form.
+
+### Dynamic-service exploit-speed comparison
+
+A matched blind Terra xhigh pair used the same stripped PIE, loader, libraries,
+network shim, and three-process success gate. The host has ASLR disabled by
+configuration, so validity was checked by inspecting both exploit programs:
+neither embeds a debugger-observed absolute address, and both derive the PIE
+base from target output plus module-relative offsets.
+
+| Interface | First runtime primitive | Stable control flow | Three-process proof | Debugger traffic |
+| --- | ---: | ---: | ---: | --- |
+| Native GDB CLI | 2m04s | 11m51s | 12m44s | 2 starts, 62 command lines |
+| Default GDB/AI | 3m18s | 5m24s | 7m26s | 24 projected calls, about 105 ms API time |
+| Current GDB/AI adoption | 3m43s | 5m43s | 9m26s | 15 calls, one persistent connection |
+
+GDB/AI reached the stable controlled callback about 2.2 times faster and
+finished ordinary-process verification about 1.7 times faster. Native GDB
+found the first leak earlier, so the remaining target is faster early runtime
+discovery without regressing the combined path that won the full exploit.
+
+A subsequent fresh GDB/AI-only run reached its first runtime primitive in
+1m51s and the three-process proof in 11m32s using 18 projected calls. It used
+the launch convention correctly and needed no standalone register evaluation,
+but naturally rebuilt a running-service probe from breakpoint, event, inspect,
+and resume calls. It also exposed a loaded-library SONAME breakpoint that
+silently remained pending.
+
+An intermediate adoption run reached its first primitive in about 2m20s but
+took 17m39s to finish. It reopened the one-shot client for 64 calls, could not
+read a pointer expression directly, omitted the main executable from its module
+view, and did not recognize how a blocking probe coordinates with a concurrent
+network trigger. These were interface evidence, not traffic-size targets.
+
+After the shared fixes, the current blind replay naturally selected
+`gdb_probe`, reused one persistent connection, reached controlled flow in
+5m43s, and completed three ordinary-process proofs in 9m26s. Its first malformed
+payload aborted before the requested probe point, so the bounded probe timed
+out and the Agent correctly switched to a persistent breakpoint while fixing
+the payload. The final exploit derives every runtime address from a target
+leak and module offsets; it contains no absolute process address.
+
+Complete only the shared fixes demonstrated by these runs:
+
+- [x] Reset exit state when GDB reuses an inferior identifier for a new process.
+- [x] Include ABI argument registers in the standard register view.
+- [x] Surface the existing one-call breakpoint probe as `gdb_probe`.
+- [x] Project process exit codes as decimal integers.
+- [x] State that launch `program` is the executable and `argv` contains only
+  following arguments.
+- [x] Resolve loaded-module SONAME symlinks against the inferior working
+  directory before calculating their mapping load bias.
+- [x] Let `gdb_probe` arm an already-running target and wait for its first hit
+  without an interrupt and redundant resume.
+- [x] Resolve and read one address expression under the same stopped-state
+  fence, including pointer-cast dereferences used during exploit development.
+- [x] Include the main executable's local mappings in the module view.
+- [x] State that socket and other external triggers run concurrently with a
+  blocking probe while `input` remains target PTY data.
+- [x] Keep a detached multi-client server alive when GDB teardown delivers
+  SIGHUP, so closing one session cannot drop the other Agents.
+- [x] Run a fresh blind natural-adoption replay against the current release,
+  verify direct module-relative debugging and no absolute exploit address, and
+  record bounded-probe fallback separately from interface failure.
+- [ ] Repeat a matched native/GDB-AI comparison on a new runtime-dependent
+  userland target after the adoption gate passes.
+- [ ] Qualify kernel debugging later with a blind ring-1 guest target, measuring
+  stop attribution, guest symbol/module discovery, reconnects, and exploit wall
+  time without supplying source.
 
 ## Optional post-North-star work
 
