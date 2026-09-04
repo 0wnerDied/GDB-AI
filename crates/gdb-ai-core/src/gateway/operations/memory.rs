@@ -5,10 +5,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{
-    context::require_stopped_context,
+    context::{context_options, require_stopped_context},
     encoding::{hex_decode, hex_encode, input_bytes, parse_address},
-    evaluation::validate_expression,
-    mi::aggregate_items,
+    evaluation::{safe_evaluate_command, validate_expression},
+    mi::{aggregate_items, result_text},
     request::{bool_value, required_session, string, unsigned},
 };
 use crate::{
@@ -282,8 +282,6 @@ impl Gateway {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
-        let address_text = string(&request.parameters, "address")?;
-        let address = crate::domain::Address::parse(&address_text)?;
         let length = unsigned(&request.parameters, "length")? as usize;
         // 2026-08-28: The public read limit was accidentally capped to one
         // backend chunk, making the configured 16 MiB logical limit unusable.
@@ -296,14 +294,46 @@ impl Gateway {
                 ),
             ));
         }
-        let (bytes, evidence_seq) = read_memory_bytes(
-            &entry.handle,
-            &state,
-            parse_address(address.as_str())?,
-            length,
-            bool_value(&request.parameters, "allow_partial", false),
-        )
-        .await?;
+        let allow_partial = bool_value(&request.parameters, "allow_partial", false);
+        // 2026-09-04: Literal-only reads forced pointer chasing through an
+        // evaluate turn followed by a memory turn. Resolve and read under the
+        // existing stable-stop fence so one expression-addressed call is exact.
+        let (address, bytes, evidence_seq) = entry
+            .handle
+            .stable_observation(
+                &state,
+                Box::pin(async {
+                    let address = if let Some(expression) = request
+                        .parameters
+                        .get("address_expression")
+                        .and_then(Value::as_str)
+                    {
+                        validate_expression(expression)?;
+                        let command = context_options(
+                            MiCommand::new("-data-evaluate-expression")?.string(expression),
+                            &request.parameters,
+                            &state,
+                        )?;
+                        let reply = safe_evaluate_command(&entry.handle, command).await?;
+                        let value = result_text(&reply.record, "value").ok_or_else(|| {
+                            Error::new(ErrorCode::GdbError, "address expression returned no value")
+                        })?;
+                        crate::domain::Address::parse(&format!("0x{:x}", parse_address(&value)?))?
+                    } else {
+                        crate::domain::Address::parse(&string(&request.parameters, "address")?)?
+                    };
+                    let (bytes, evidence_seq) = read_memory_bytes_in_observation(
+                        &entry.handle,
+                        &state,
+                        parse_address(address.as_str())?,
+                        length,
+                        allow_partial,
+                    )
+                    .await?;
+                    Ok((address, bytes, evidence_seq))
+                }),
+            )
+            .await?;
         let partial = bytes.len() != length;
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
         // 2026-08-30: Memory observations omitted their stop identity, which

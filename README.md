@@ -200,7 +200,7 @@ modes without claiming legacy HTTP+SSE.
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
 | `gdb_batch` | Multiple bounded inspection views at the current or named stop |
 | `gdb_evaluate` | Side-effect-denied one-shot expression evaluation |
-| `gdb_memory` | Bounded stop-consistent memory reads |
+| `gdb_memory` | Bounded stop-consistent literal or expression-addressed memory reads |
 | `gdb_disassemble` | Normalized bounded instructions with source and bytes |
 | `gdb_io` | Separate PTY, MI target, console, and log I/O plus `send_eof` and resize |
 | `gdb_events` | Finite event waits |
@@ -241,6 +241,8 @@ stripped PIE maps; its temporary breakpoint is rebound and removed internally.
 `gdb_run` action `probe` remains an equivalent compatibility form.
 `gdb_memory` action `artifact` pages bytes from an artifact URI returned by a
 large result; use `next_offset` until `truncated` is false.
+Its `read` action accepts exactly one of `address` or `address_expression`; the
+latter resolves a GDB expression and reads the resulting address at one stop.
 If consistency is unknown or lost, the owner can attempt
 recovery or use `gdb_session` action `force_abort` to terminate resources
 without claiming a clean shutdown.

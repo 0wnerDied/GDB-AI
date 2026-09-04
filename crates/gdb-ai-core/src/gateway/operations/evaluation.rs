@@ -63,7 +63,10 @@ pub(super) fn validate_expression(expression: &str) -> Result<()> {
             let Some(previous) = prefix.as_bytes().last().copied() else {
                 continue;
             };
-            if matches!(previous, b')' | b']') {
+            // 2026-09-04: Treating every `)(` as a function call rejected
+            // ordinary cast operands such as `*(void**)($rbp-0x78)`. Named
+            // calls are rejected below and GDB's call guard remains active.
+            if previous == b']' {
                 return unsafe_expression();
             }
             if previous.is_ascii_alphanumeric() || previous == b'_' {
@@ -108,6 +111,7 @@ mod tests {
             "&large_buffer",
             "$pc == 0",
             "(struct pair *)global",
+            "*(void**)($rbp-0x78)",
             "sizeof(global_value)",
         ] {
             validate_expression(expression).unwrap();

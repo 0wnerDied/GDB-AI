@@ -2350,6 +2350,22 @@
         "properties": {
           "parameters": {
             "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "address"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "address_expression"
+                    ]
+                  }
+                ]
+              }
+            ],
             "properties": {
               "accept_current_stop": {
                 "type": "boolean"
@@ -2361,6 +2377,9 @@
                 "type": "boolean"
               },
               "address": {
+                "type": "string"
+              },
+              "address_expression": {
                 "type": "string"
               },
               "allow_partial": {
@@ -2394,7 +2413,6 @@
               }
             },
             "required": [
-              "address",
               "length"
             ],
             "type": "object"

@@ -222,7 +222,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_memory",
-        description: "Read memory or page a returned artifact; advanced: write/search/compare.",
+        description: "Read memory by literal address or GDB address expression, or page an artifact; advanced: write/search/compare.",
         discriminator: Some("action"),
         actions: MEMORY_ACTIONS,
         read_only: false,
@@ -591,7 +591,18 @@ mod tests {
             read["required"]
                 .as_array()
                 .unwrap()
-                .contains(&Value::String("address".into()))
+                .contains(&Value::String("length".into()))
+        );
+        let address_choices = read["allOf"][0]["oneOf"].as_array().unwrap();
+        assert!(
+            address_choices
+                .iter()
+                .any(|choice| choice["required"][0] == "address")
+        );
+        assert!(
+            address_choices
+                .iter()
+                .any(|choice| choice["required"][0] == "address_expression")
         );
         let artifact = memory["inputSchema"]["oneOf"]
             .as_array()

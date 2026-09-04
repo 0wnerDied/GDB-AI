@@ -756,12 +756,14 @@ impl CanonicalMethod {
                 MethodContract::contextual(vec![required("value_id", String)])
             }
             MemoryRead => MethodContract::contextual(vec![
-                required("address", String),
+                optional("address", String),
+                optional("address_expression", String),
                 required("length", Unsigned),
                 optional("allow_partial", Boolean),
                 optional("acknowledge_target_effects", Boolean),
                 optional("volatile", Boolean),
-            ]),
+            ])
+            .exactly_one(&["address", "address_expression"]),
             MemoryWrite => MethodContract::contextual(vec![
                 required("address", String),
                 optional("text", String),

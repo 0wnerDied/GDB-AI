@@ -3,6 +3,7 @@ use std::{path::PathBuf, process::Command};
 use gdb_ai_core::{
     ErrorCode,
     config::{ArtifactConfig, Config, PersistenceConfig},
+    domain::Address,
     gateway::{Caller, Gateway},
     policy::Profile,
     protocol::{API_VERSION, ApiRequest, ApiResponse},
@@ -717,6 +718,28 @@ async fn local_debugging_vertical_slice() {
             .await,
     );
     assert_eq!(memory.result.as_ref().unwrap()["stop_id"], second_stop);
+    let expression_memory = successful(
+        gateway
+            .dispatch(
+                request(
+                    "expression-memory",
+                    Some(&session_id),
+                    "memory.read",
+                    None,
+                    json!({
+                        "address_expression": "&global_value",
+                        "length": 4,
+                        "stop_id": second_stop
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(
+        expression_memory.result.as_ref().unwrap()["address"],
+        Address::parse(&address).unwrap().as_str()
+    );
     let unmapped = gateway
         .dispatch(
             request(
