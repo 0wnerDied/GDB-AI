@@ -135,6 +135,7 @@ async fn probe_and_experiment_capture_and_clean_up() {
                     {"expression": "global_value"},
                     {"memory": {"address_expression": "&global_value", "length": 4}}
                 ],
+                "inspect": [{"view": "registers", "roles": ["pc", "sp"]}],
                 "budget": {
                     "max_calls": 8,
                     "max_values": 3,
@@ -157,6 +158,7 @@ async fn probe_and_experiment_capture_and_clean_up() {
         probe.result.as_ref().unwrap()["captures"][0]["observation"]["observations"][1]["memory"]["hex"],
         "08000000"
     );
+    assert!(probe.result.as_ref().unwrap()["observations"]["registers"].is_object());
 
     let exited = call(
         &gateway,

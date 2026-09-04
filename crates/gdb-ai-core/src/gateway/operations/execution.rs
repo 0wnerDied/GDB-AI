@@ -462,7 +462,7 @@ impl Gateway {
         Ok(result)
     }
 
-    async fn append_stop_observations(
+    pub(super) async fn append_stop_observations(
         &self,
         request: &ApiRequest,
         state: &crate::domain::SessionState,

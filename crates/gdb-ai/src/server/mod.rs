@@ -104,7 +104,7 @@ excludes program; patch the interpreter/library path before launch when needed; 
 revisions. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
 stop/exit after continue or step when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
 accepted/running only for later I/O. Use gdb_io write steps with wait_for for prompt-driven \
-menus. Reuse the session; gdb_run restart relaunches directly, while gdb_probe restart=true replaces separate restart/continue before arming, batches input or starts trigger.command after arming and returns its bounded stdout/stderr, skips ignore_count hits, and captures memory; continue_to_stop reaches the next crash/exit with optional inspect in the same call. Use gdb_batch for current-stop views and gdb_inspect view=crash \
+menus. Reuse the session; gdb_run restart relaunches directly, while gdb_probe restart=true replaces separate restart/continue before arming, batches input or starts trigger.command after arming and returns its bounded stdout/stderr, skips ignore_count hits, and captures memory plus inspect views; continue_to_stop moves those views to the next crash/exit. Use gdb_batch for other current-stop views and gdb_inspect view=crash \
 profile=brief for triage. gdb_evaluate batches related expressions and side_effects=allow permits inferior calls or assignments in one request. Query a returned operation_id after timeout. Close when done.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
@@ -773,6 +773,7 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                 // operation record. Captures and cleanup status are sufficient;
                 // failed operations retain their error evidence in the envelope.
                 result.remove("operation");
+                remove_batched_stop_ids(result, "observations");
             }
             CanonicalMethod::BreakpointCreate | CanonicalMethod::BreakpointUpdate
                 if result.get("breakpoint").is_some_and(Value::is_object) =>
@@ -816,7 +817,11 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                 | CanonicalMethod::InspectionBatch
                 | CanonicalMethod::ExecutionControl
                 | CanonicalMethod::ExecutionWait
+                | CanonicalMethod::AgentProbe
+                | CanonicalMethod::AgentExperiment
         ) {
+            // 2026-09-05: Probe hit inspections embedded unprojected mapping
+            // transport fields that standalone and run inspections already omit.
             for value in result.values_mut() {
                 compact_mapping_metadata(value);
             }

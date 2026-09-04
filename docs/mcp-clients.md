@@ -184,11 +184,12 @@ For a counted one-shot breakpoint, use `gdb_probe` with `input`,
 `ignore_count`, and bounded expression, stack, or memory captures. A memory
 capture supplies `address_expression` and `length`. The call queues the whole
 input, skips intermediate hits, returns output and observations, and cleans up
-its temporary breakpoint. Set `restart: true` on the next trial to rerun, arm,
-and resume in that same call. With `stop_policy: "continue_to_stop"`, it then waits
-for the next stop or exit; optional `inspect` views return that stop's crash or
-stack context in the same call. A module offset may be supplied before a
-stripped PIE maps; GDB/AI rebinds it when the mapping appears.
+its temporary breakpoint. Optional `inspect` views read the same final hit.
+Set `restart: true` on the next trial to rerun, arm, and resume in that same
+call. With `stop_policy: "continue_to_stop"`, it instead waits for the next stop
+or exit and returns the requested crash or stack views there. A module offset
+may be supplied before a stripped PIE maps; GDB/AI rebinds it when the mapping
+appears.
 For a loaded stripped kernel module, use
 `kernel_module_offset: {"module": "name", "offset": "0x..."}`. The offset is
 relative to the module text segment; GDB/AI resolves its current runtime base,

@@ -196,7 +196,7 @@ modes without claiming legacy HTTP+SSE.
 | --- | --- |
 | `gdb_session` | Sessions, leases, local launch, lifecycle, and capabilities |
 | `gdb_run` | Direct restart, one-call input, run-to-stop, same-stop views, and waits |
-| `gdb_probe` | Temporary breakpoint, trigger, capture, optional next stop/crash inspection, and cleanup in one call |
+| `gdb_probe` | Temporary breakpoint, trigger, capture, hit/next-stop inspection, and cleanup in one call |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
 | `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
 | `gdb_batch` | Multiple bounded inspection views at the current or named stop |
@@ -266,6 +266,8 @@ and combines optional byte-exact input, `ignore_count`, bounded capture, output,
 and cleanup in one call. A running target is not interrupted or resumed first.
 For another trial in the same session, set `restart: true`; the call reruns the
 target, arms the probe, and resumes it without separate restart or run calls.
+Optional `inspect` views run at the final probe hit and appear under
+`observations`, alongside the bounded captures from that same stop.
 Set `stop_policy: "continue_to_stop"` to remove the probe breakpoint, continue
 to the next stop or exit within the same wall-time budget, and return its wait
 status under `after`. Optional `inspect` views run at that next stop and appear

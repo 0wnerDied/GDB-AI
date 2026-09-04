@@ -919,6 +919,17 @@ fn completed_agent_operations_omit_recovery_bookkeeping() {
             json!({
                 "captures": [],
                 "capture_count": 0,
+                "stop_id": "stop_test",
+                "observations": {"mappings": {"stop_id": "stop_test", "mappings": [{
+                    "start": "0x1000",
+                    "end": "0x2000",
+                    "offset": "0x0",
+                    "permissions": "r-xp",
+                    "path": "/target",
+                    "device": "00:01",
+                    "inode": 7,
+                    "source": "linux-proc"
+                }]}},
                 "operation": {"operation_id": "op_probe", "status": "COMPLETED"}
             }),
         ),
@@ -930,6 +941,14 @@ fn completed_agent_operations_omit_recovery_bookkeeping() {
             .get("operation")
             .is_none()
     );
+    let probe_mapping =
+        &probe["structuredContent"]["result"]["observations"]["mappings"]["mappings"][0];
+    assert!(
+        probe["structuredContent"]["result"]["observations"]["mappings"]
+            .get("stop_id")
+            .is_none()
+    );
+    assert!(probe_mapping.get("device").is_none());
 }
 
 #[test]

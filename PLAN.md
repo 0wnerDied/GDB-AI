@@ -460,6 +460,21 @@ the complete session registries even though the Agent needed only target state
 and the resumption cursor. Projected event waits now retain `event_seq` with a
 compact state summary; the canonical API keeps its full resynchronization
 snapshot.
+A protocol-level replay against a running target measured the projected
+coalesced reply at 221 bytes versus 1.7--2.0 KiB in the preceding trace, while
+retaining the event cursor, PID, and running state.
+
+The final source-free replay required three ordinary-process flag results from
+both arms. Native GDB reached its first debugger-assisted flag in about 13
+minutes and finished three ordinary runs in about 15 minutes using four GDB
+starts and 46 commands. GDB/AI reached its first dynamic primitive in about two
+minutes, stable control in about 14 minutes, and three ordinary flag results in
+about 17 minutes using one session and 25 canonical calls. Native therefore won
+the final result by roughly two minutes, while the projected interface reached
+runtime evidence earlier with fewer debugging actions. One projected attempt
+to add module and mapping views at a probe hit was rejected, then repeated as a
+probe plus a separate batch. Probe `inspect` now reads those views at the hit;
+`continue_to_stop` retains its following-stop semantics.
 
 ### Blind kernel exploit-speed qualification
 
@@ -538,6 +553,8 @@ Complete only the shared fixes demonstrated by these runs:
   pair a first-instruction session restart with an immediate continue.
 - [x] Keep projected event resynchronization to its cursor and compact target
   state instead of repeating every session registry.
+- [x] Let a probe capture bounded inspection views at its own hit instead of
+  rejecting the request and forcing a separate current-stop batch.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,

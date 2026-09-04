@@ -540,12 +540,6 @@ impl Gateway {
                 "stop_policy must be on_condition, continue_after_capture, or continue_to_stop",
             ));
         }
-        if request.parameters.get("inspect").is_some() && stop_policy != "continue_to_stop" {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                "inspect requires stop_policy=continue_to_stop",
-            ));
-        }
         let mut insert = MiCommand::new("-break-insert")?.bare("-f")?;
         if let Some(condition) = request.parameters.get("condition").and_then(Value::as_str) {
             validate_expression(condition)?;
@@ -660,6 +654,9 @@ impl Gateway {
             match tokio::time::timeout(Duration::from_millis(budget.wall_time_ms), async {
                 let mut input = input;
                 let mut input_result = None;
+                let inspect_at_hit = request.parameters.get("inspect").is_some()
+                    && stop_policy != "continue_to_stop";
+                let mut capture_state = None;
                 for hit in 1..=max_hits {
                     let baseline = entry.handle.state();
                     let already_running = baseline
@@ -721,7 +718,11 @@ impl Gateway {
                         .capture_probe_observation(request, &entry, &stopped, &budget, &mut calls)
                         .await?;
                     captures.push(json!({ "hit": hit, "observation": capture }));
-                    if stop_policy == "on_condition" || hit == max_hits {
+                    let final_hit = stop_policy == "on_condition" || hit == max_hits;
+                    if inspect_at_hit && final_hit {
+                        capture_state = Some(Box::new(stopped));
+                    }
+                    if final_hit {
                         break;
                     }
                 }
@@ -747,6 +748,13 @@ impl Gateway {
                 };
                 if let Some(input) = input_result {
                     result["input"] = input;
+                }
+                // 2026-09-05: Rejecting views at a probe hit forced a retry
+                // and a separate inspection batch. Read them at the captured
+                // stop; continue_to_stop keeps its existing following-stop view.
+                if let Some(state) = capture_state.as_deref() {
+                    self.append_stop_observations(request, state, &mut result)
+                        .await;
                 }
                 Ok(result)
             })
