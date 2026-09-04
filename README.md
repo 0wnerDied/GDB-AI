@@ -252,13 +252,14 @@ write count, output cursor, and bounded observed PTY tail.
 For `gdb_session` launch, `program` names the executable and `argv` contains
 only the arguments that follow it. The default `runtime: "auto"` stages unique
 sibling libraries matching ELF dependencies in a session-local patched copy.
-A supplied libc is selected only with its matching sibling loader; otherwise
-independent supplied libraries use the system loader and libc. The response
-always reports `system`, `hybrid`, or `bundled` mode and lists the dependencies
-selected from the sibling directory versus the system. The original executable
-is unchanged, and `restart` reuses the prepared copy. Static executables and
-directories without a usable match keep the system runtime; set
-`runtime: "system"` to disable detection.
+Detection uses each ELF object's `DT_SONAME`, not its filename. Every unique
+sibling library, including libc, libm, libgcc, and libstdc++, takes precedence;
+only absent dependencies use the system runtime. A matching sibling loader is
+also selected when present. The response always reports `system`, `hybrid`, or
+`bundled` mode and lists supplied versus system dependencies. The original
+executable is unchanged, and `restart` reuses the prepared copy. Static
+executables and directories without a usable match keep the system runtime;
+set `runtime: "system"` to disable detection.
 Projected terminal state reports `exit_code` as a decimal integer instead of
 GDB/MI's octal text.
 A standalone `gdb_batch` accepts explicit names when the same view is needed

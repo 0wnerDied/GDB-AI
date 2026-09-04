@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Read,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
@@ -1034,18 +1035,9 @@ async fn prepare_bundled_runtime(
     let runtime_files = entries
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(runtime_candidate_name)
-        })
+        .filter(|path| elf_file(path))
         .collect::<Vec<_>>();
-    let has_library = runtime_files.iter().any(|path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains(".so") && !loader_candidate_name(name))
-    });
-    if !has_library {
+    if runtime_files.is_empty() {
         return Ok(None);
     }
     let interpreter = match Command::new("patchelf")
@@ -1061,7 +1053,7 @@ async fn prepare_bundled_runtime(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(Error::new(
                 ErrorCode::TargetUnavailable,
-                "bundled loader detected but patchelf is unavailable",
+                "sibling ELF runtime detected but patchelf is unavailable",
             )
             .with_details(json!({"candidates": runtime_files})));
         }
@@ -1123,31 +1115,24 @@ async fn prepare_bundled_runtime(
         }
     }
     let bundled_loader = unique_soname_candidate(&candidates, interpreter_soname, "loader")?;
-    // 2026-09-05: Requiring a complete loader/library bundle discarded a
-    // usable supplied dependency, while mixing a supplied libc with the host
-    // loader could crash before main. Pair libc with its loader, but stage
-    // other matching dependencies over the system runtime when the pair is
-    // absent.
-    let use_bundled_loader = bundled_loader.is_some()
-        && candidates
-            .iter()
-            .any(|(soname, matches)| core_runtime_soname(soname) && matches.len() == 1);
-    let mut bundled_libraries = Vec::new();
-    let mut system_libraries = Vec::new();
-    for name in &needed {
-        let supplied = unique_soname_candidate(&candidates, name, "library")?.is_some();
-        if supplied && (use_bundled_loader || !core_runtime_soname(name)) {
-            bundled_libraries.push(name.clone());
-        } else {
-            system_libraries.push(name.clone());
-        }
-    }
-    if bundled_libraries.is_empty() {
+    if candidates.is_empty() {
         return Ok(None);
     }
-    let loader = bundled_loader
-        .filter(|_| use_bundled_loader)
-        .unwrap_or_else(|| PathBuf::from(&interpreter));
+    // 2026-09-05: Skipping a supplied libc when its loader was absent changed
+    // the target ABI silently. Every unambiguous sibling SONAME must win;
+    // only dependencies absent from the attachment may use the host runtime.
+    let bundled_libraries = candidates
+        .keys()
+        .filter(|soname| soname.as_str() != interpreter_soname)
+        .cloned()
+        .collect::<Vec<_>>();
+    let system_libraries = needed
+        .iter()
+        .filter(|name| !candidates.contains_key(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    let use_bundled_loader = bundled_loader.is_some();
+    let loader = bundled_loader.unwrap_or_else(|| PathBuf::from(&interpreter));
 
     let runtime_directory = session_directory.join(format!("runtime-{revision}"));
     let library_directory = runtime_directory.join("lib");
@@ -1156,12 +1141,18 @@ async fn prepare_bundled_runtime(
     // attachment lacked the DT_NEEDED filename. Stage aliases for every
     // unambiguous sibling without changing the supplied files.
     for (soname, matches) in &candidates {
-        if matches.len() != 1
-            || Path::new(soname).components().count() != 1
-            || (!use_bundled_loader
-                && (core_runtime_soname(soname) || soname == interpreter_soname))
-        {
-            continue;
+        if matches.len() != 1 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                format!("sibling runtime has ambiguous library for {soname:?}"),
+            )
+            .with_details(json!({"soname": soname, "candidates": matches})));
+        }
+        if Path::new(soname).components().count() != 1 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                format!("sibling runtime SONAME must be a file name: {soname:?}"),
+            ));
         }
         let link = library_directory.join(soname);
         if let Err(error) = std::fs::remove_file(&link)
@@ -1245,19 +1236,12 @@ fn unique_soname_candidate(
     Ok(matches.first().cloned())
 }
 
-fn runtime_candidate_name(name: &str) -> bool {
-    name.contains(".so") || loader_candidate_name(name)
-}
-
-fn loader_candidate_name(name: &str) -> bool {
-    name.starts_with("ld-")
-        || name.starts_with("ld-linux")
-        || name.starts_with("ld-musl")
-        || name.starts_with("ld.so")
-}
-
-fn core_runtime_soname(name: &str) -> bool {
-    name.starts_with("libc.so")
+fn elf_file(path: &Path) -> bool {
+    let mut magic = [0; 4];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok()
+        && magic == *b"\x7fELF"
 }
 
 pub(super) fn remote_endpoint(parameters: &Value) -> Result<String> {
@@ -1378,7 +1362,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn stages_a_partial_sibling_library_without_mixing_libc() {
+    async fn stages_every_matching_sibling_library() {
         use std::process::Command as StdCommand;
 
         if ["cc", "ldd", "patchelf"]
@@ -1443,15 +1427,18 @@ mod tests {
         assert_eq!(runtime.summary["loader_source"], "system");
         assert_eq!(
             runtime.summary["bundled_libraries"],
-            json!(["libfixture.so.1"])
+            json!(["libc.so.6", "libfixture.so.1"])
         );
-        assert_eq!(runtime.summary["system_libraries"], json!(["libc.so.6"]));
+        assert_eq!(runtime.summary["system_libraries"], json!([]));
         let library_path = Path::new(runtime.summary["library_path"].as_str().unwrap());
         assert_eq!(
             std::fs::canonicalize(library_path.join("libfixture.so.1")).unwrap(),
             library
         );
-        assert!(!library_path.join("libc.so.6").exists());
+        assert_eq!(
+            std::fs::canonicalize(library_path.join("libc.so.6")).unwrap(),
+            supplied_libc
+        );
         assert!(
             StdCommand::new(&runtime.program)
                 .status()

@@ -453,8 +453,8 @@ Complete only the shared fixes demonstrated by these runs:
   that a broad target read can consume.
 - [x] Select a complete sibling ELF loader/library set through a session-local
   patched copy, preserving the original target, PIE symbols, and restart flow.
-- [x] Stage independently usable sibling dependencies over the system runtime
-  when no matching loader accompanies libc, and report every runtime choice.
+- [x] Prefer every sibling ELF dependency by SONAME, including libc, while
+  using the system only for absent files and reporting every runtime choice.
 - [x] Finish the concurrent blind ring-1 qualification, measuring stop
   attribution, guest symbol/module discovery, reconnects, primitive and exploit
   wall time without supplying source.
