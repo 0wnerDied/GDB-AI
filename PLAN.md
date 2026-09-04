@@ -402,6 +402,30 @@ calls before a probe. `gdb_probe restart=true` now owns that complete retry and
 removes those 34 calls. Neither fix is credited retroactively, and neither
 would by itself have supplied the missing heap-staging exploitation insight.
 
+A third matched source-free run used a multi-process HTTP/IPC target and a
+60-minute cutoff. Native GDB reached debugger-observed control in 11m18s, the
+first debugger-assisted flag response in 19m30s, and three fresh-stack proofs
+in 20m40s. It used three GDB starts and at least 78 commands; the count is a
+lower bound because machine logging did not begin with the first command. It
+did not find a network-visible runtime address, so the proofs remain
+debugger-assisted rather than standalone remote exploitation.
+
+The projected arm found an address-independent controlled crash and later
+replayed three debugger-assisted flag responses using 108 accepted operations
+across 19 sessions. Three raw-GDB commands appeared in its isolated shell
+history after the common start, however, and their output provenance cannot be
+excluded. The entire projected solve-time result is therefore contaminated
+and receives no A/B score. Its later MCP journal independently verifies the
+mechanics of one projected proof, but does not repair the strategy provenance.
+
+The run exposed reused-inferior exit waits, unattributed child exits, discarded
+trigger output, ambiguous inferior-output naming, and stale live-looking state
+after daemon replacement. A current-build warm replay does not count toward
+the comparison: three repeated exit waits completed in 55.7--71.5 ms, a probe
+returned both 20-byte trigger streams without another client session, a child
+exit left the parent running, and replacement startup reported abandoned
+sessions as `FAILED/DEAD` with their old leases removed.
+
 ### Blind kernel exploit-speed qualification
 
 A concurrent source-free ring-1 run exposed a different adoption gap. Native
@@ -461,6 +485,16 @@ Complete only the shared fixes demonstrated by these runs:
   stop or exit, and return optional bounded inspection in the same call.
 - [x] Let a repeated `gdb_probe` restart the current inferior before arming,
   eliminating separate restart and resume calls from exploit trials.
+- [x] Distinguish reused inferior generations when waiting for exit, so a new
+  fast process cannot be mistaken for the preceding terminal state.
+- [x] Leave an exit without a thread-group unattributed when several inferiors
+  exist, preserving the live parent's state after a child exits.
+- [x] Return bounded stdout and stderr from a probe's external trigger instead
+  of requiring an extra debugger-managed client session.
+- [x] Identify inferior stdio as `pty` and reserve `target` for GDB/MI's
+  `@` stream in the Agent-facing tool description.
+- [x] Mark persisted nonterminal sessions and leases abandoned when a new
+  daemon owns their store, rather than advertising dead actors as controllable.
 - [x] Keep a detached multi-client server alive when GDB teardown delivers
   SIGHUP, so closing one session cannot drop the other Agents.
 - [x] Run a fresh blind natural-adoption replay against the current release,
