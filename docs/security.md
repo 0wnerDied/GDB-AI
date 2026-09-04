@@ -8,6 +8,8 @@ bounded set. GDB/AI rejects environment values containing whitespace or a
 double quote because GDB cannot preserve them through its MI setting command.
 Target paths are canonicalized beneath configured workspace roots; relative
 paths resolve from those roots rather than the server process directory.
+Remote connections that name an executable also set GDB's working directory
+to its parent, so subsequent raw console file paths resolve there.
 Bubblewrap hardening is disabled by default. Operators may select `auto` or
 `required` when its filesystem and network namespaces are wanted.
 

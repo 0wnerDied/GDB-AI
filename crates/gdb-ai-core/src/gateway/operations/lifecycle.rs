@@ -669,7 +669,9 @@ impl Gateway {
         }
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
-        if let Some(executable) = request.parameters.get("executable").and_then(Value::as_str) {
+        let workspace_cwd = if let Some(executable) =
+            request.parameters.get("executable").and_then(Value::as_str)
+        {
             let executable = self.workspace_path(executable, false)?;
             entry
                 .handle
@@ -678,7 +680,10 @@ impl Gateway {
                         .string(executable.as_os_str().as_encoded_bytes()),
                 )
                 .await?;
-        }
+            executable.parent().map(Path::to_owned)
+        } else {
+            None
+        };
         let reply = entry
             .handle
             .command(
@@ -690,6 +695,17 @@ impl Gateway {
                     .bare(&endpoint)?,
             )
             .await?;
+        // 2026-09-04: The remote handshake retained the service process
+        // directory, so raw commands could not reuse workspace-relative
+        // module paths. Set the executable directory after connecting.
+        if let Some(cwd) = workspace_cwd {
+            entry
+                .handle
+                .command(
+                    MiCommand::new("-environment-cd")?.string(cwd.as_os_str().as_encoded_bytes()),
+                )
+                .await?;
+        }
         entry
             .handle
             .record_event(DomainEvent::TargetConfigured {

@@ -114,6 +114,23 @@ async fn connects_to_allowlisted_gdbserver() {
         .await;
     assert!(connected.error.is_none(), "{:?}", connected.error);
     assert!(connected.state.as_ref().unwrap().stop_id.is_some());
+    let symbols = gateway
+        .dispatch(
+            request(
+                "relative-symbols",
+                Some(&session_id),
+                "raw.console",
+                None,
+                json!({
+                    "accept_latest_revision": true,
+                    "lease_id": lease_id,
+                    "command": "add-symbol-file ./remote 0"
+                }),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(symbols.error.is_none(), "{:?}", symbols.error);
     let mappings = gateway
         .dispatch(
             request(
