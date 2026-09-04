@@ -712,7 +712,19 @@ impl Gateway {
                     .map(str::to_owned)
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_else(|| vec!["pc".into(), "sp".into(), "fp".into(), "return".into()]);
+            .unwrap_or_else(|| {
+                let mut roles = vec!["pc".into(), "sp".into(), "fp".into(), "return".into()];
+                // 2026-09-04: Standard register views omitted ABI arguments,
+                // forcing one expression-evaluation turn per call register.
+                // Include every argument role supported by the target ABI.
+                if !matches!(
+                    request.parameters.get("profile").and_then(Value::as_str),
+                    Some("minimal" | "brief")
+                ) {
+                    roles.extend((0..8).map(|index| format!("argument_{index}")));
+                }
+                roles
+            });
         let mut role_numbers = BTreeMap::new();
         for role in requested_roles {
             let candidates = register_role_candidates(&role).ok_or_else(|| {

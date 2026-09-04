@@ -559,7 +559,7 @@ async fn local_debugging_vertical_slice() {
         ("locals", "locals"),
         ("registers", "registers"),
     ] {
-        successful(
+        let response = successful(
             gateway
                 .dispatch(
                     request(
@@ -567,12 +567,30 @@ async fn local_debugging_vertical_slice() {
                         Some(&session_id),
                         "inspection.get",
                         None,
-                        json!({"view": view, "stop_id": second_stop, "limit": 8}),
+                        json!({
+                            "view": view,
+                            "stop_id": second_stop,
+                            "limit": 8,
+                            "profile": "standard"
+                        }),
                     ),
                     &caller,
                 )
                 .await,
         );
+        if view == "registers" {
+            let roles = &response.result.as_ref().unwrap()["roles"];
+            for role in [
+                "argument_0",
+                "argument_1",
+                "argument_2",
+                "argument_3",
+                "argument_4",
+                "argument_5",
+            ] {
+                assert!(roles[role].as_str().is_some(), "missing {role}");
+            }
+        }
     }
     let batch = successful(
         gateway
