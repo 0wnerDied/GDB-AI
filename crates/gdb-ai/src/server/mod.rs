@@ -974,7 +974,7 @@ fn session_coordination_state(state: &SessionState) -> Value {
             summary.insert("pid".into(), Value::from(pid));
         }
         if let Some(exit_code) = &inferior.exit_code {
-            summary.insert("exit_code".into(), Value::String(exit_code.clone()));
+            summary.insert("exit_code".into(), projected_exit_code(exit_code));
         }
     }
     if !state.outcome_unknown_tokens.is_empty() {
@@ -1028,6 +1028,21 @@ fn session_coordination_state(state: &SessionState) -> Value {
         }
     }
     Value::Object(std::mem::take(summary))
+}
+
+// 2026-09-04: Projected state exposed GDB/MI's octal exit-code text, making
+// Agents translate values such as 0170 before checking an exploit result.
+// Preserve unknown backend forms, but report recognized process codes as
+// decimal.
+fn projected_exit_code(exit_code: &str) -> Value {
+    let parsed = if exit_code == "0" {
+        Some(0)
+    } else if let Some(octal) = exit_code.strip_prefix('0') {
+        u32::from_str_radix(octal, 8).ok()
+    } else {
+        exit_code.parse().ok()
+    };
+    parsed.map(Value::from).unwrap_or_else(|| exit_code.into())
 }
 
 fn canonical_request(

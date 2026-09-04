@@ -653,6 +653,13 @@ fn tool_results_compact_status_and_preserve_explicit_target_state() {
 }
 
 #[test]
+fn projected_exit_codes_are_decimal_integers() {
+    assert_eq!(projected_exit_code("0170"), json!(120));
+    assert_eq!(projected_exit_code("0"), json!(0));
+    assert_eq!(projected_exit_code("unknown"), json!("unknown"));
+}
+
+#[test]
 fn tool_results_omit_incidental_metadata_but_preserve_explicit_discovery() {
     let request = ApiRequest {
         api_version: API_VERSION.into(),
