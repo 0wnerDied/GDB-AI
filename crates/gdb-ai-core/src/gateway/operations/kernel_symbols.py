@@ -8,6 +8,15 @@ import gdb
 
 _PREFIX = "gdbai-kernel-symbols:"
 _SYMBOL_TYPES = b"-?ABCDGINPRSTUVWabcdginprstuvw"
+_MODULE_MEMORY_TYPES = (
+    "text",
+    "data",
+    "rodata",
+    "ro_after_init",
+    "init_text",
+    "init_data",
+    "init_rodata",
+)
 
 
 def _aligned(value, alignment):
@@ -216,7 +225,184 @@ def _current_tasks(symbols):
     return tasks
 
 
-def _gdbai_kernel_symbols(ranges, requested):
+def _integer(data, offset, size):
+    if offset < 0 or offset + size > len(data):
+        return None
+    return int.from_bytes(data[offset:offset + size], "little")
+
+
+def _module_range(address, ranges):
+    return next(((start, end) for start, end in ranges if start <= address < end), None)
+
+
+def _module_span(address, size, ranges):
+    end = address + size
+    cursor = address
+    for start, stop in ranges:
+        if start > cursor:
+            break
+        if start <= cursor < stop:
+            cursor = stop
+            if cursor >= end:
+                return True
+    return False
+
+
+def _module_name(data, offset):
+    end = data.find(b"\x00", offset, offset + 56)
+    if end < 0:
+        return None
+    value = data[offset:end]
+    if len(value) < 2 or re.fullmatch(rb"[A-Za-z0-9_-]+", value) is None:
+        return None
+    return value.decode("ascii")
+
+
+def _modern_module_layout(blobs, ranges, version):
+    # module_memory gained rw_copy ahead of size in 6.13 and removed it in
+    # 6.15. The optional lookup-tree node adds 56 bytes to each array entry.
+    if version < (6, 13, 0):
+        size_offset = 8
+    elif version < (6, 15, 0):
+        size_offset = 20
+    else:
+        size_offset = 12
+    minimum_stride = _aligned(size_offset + 4, 8)
+    for offset in range(0, min(2400, min(map(len, blobs))), 8):
+        for stride in (minimum_stride, minimum_stride + 56):
+            valid = True
+            for data in blobs:
+                for kind in range(3):
+                    entry = offset + kind * stride
+                    base = _integer(data, entry, 8)
+                    size = _integer(data, entry + size_offset, 4)
+                    mapping = _module_range(base, ranges) if base is not None else None
+                    if mapping is None or not size or size > mapping[1] - base:
+                        valid = False
+                        break
+                if not valid:
+                    break
+            if valid:
+                return offset, size_offset, stride
+    return None
+
+
+def _legacy_module_layout(blobs, ranges):
+    for offset in range(0, min(2400, min(map(len, blobs))) - 24, 8):
+        valid = True
+        for data in blobs:
+            base = _integer(data, offset, 8)
+            size = _integer(data, offset + 8, 4)
+            text = _integer(data, offset + 12, 4)
+            ro = _integer(data, offset + 16, 4)
+            ro_after_init = _integer(data, offset + 20, 4)
+            # 2026-09-04: Legacy module allocations are split into adjacent
+            # read-only and writable QEMU mappings. Validate the complete span
+            # instead of requiring core_layout to fit its first permission run.
+            if (
+                base is None
+                or not text
+                or not (text <= ro <= ro_after_init <= size)
+                or not _module_span(base, size, ranges)
+            ):
+                valid = False
+                break
+        if valid:
+            return offset
+    return None
+
+
+def _kernel_modules(symbols, version, ranges):
+    modules = next(
+        (int(symbol["address"], 16) for symbol in symbols if symbol["name"] == "modules"),
+        None,
+    )
+    if modules is None:
+        return []
+
+    inferior = gdb.selected_inferior()
+    cursor = struct.unpack("<Q", bytes(inferior.read_memory(modules, 8)))[0]
+    seen = {modules}
+    addresses = []
+    blobs = []
+    while cursor != modules and len(addresses) < 128:
+        if cursor in seen or cursor < 8:
+            raise ValueError("kernel module list is cyclic")
+        seen.add(cursor)
+        # list_head is at offset 8 in supported layouts; RANDSTRUCT may reorder
+        # the following fields.
+        module = cursor - 8
+        try:
+            data = bytes(inferior.read_memory(module, 4096))
+        except gdb.MemoryError:
+            data = bytes(inferior.read_memory(module, 4096 - (module & 0xfff)))
+        addresses.append(module)
+        blobs.append(data)
+        cursor = struct.unpack("<Q", bytes(inferior.read_memory(cursor, 8)))[0]
+    if cursor != modules:
+        raise ValueError("kernel module list exceeds 128 entries")
+    if not blobs:
+        return []
+
+    # 2026-09-04: RANDSTRUCT can move module->name beyond GEF's historical
+    # 128-byte search window. Infer one common inline name offset across every
+    # list member instead of requiring target debug types.
+    name_offset = next(
+        (
+            offset
+            for offset in range(0, min(2048, min(map(len, blobs))), 8)
+            if all(_module_name(data, offset) is not None for data in blobs)
+        ),
+        None,
+    )
+    if name_offset is None:
+        raise ValueError("module name layout was not found")
+
+    layout = (
+        _modern_module_layout(blobs, ranges, version)
+        if version >= (6, 4, 0)
+        else _legacy_module_layout(blobs, ranges)
+    )
+    result = []
+    for module, data in zip(addresses, blobs):
+        item = {
+            "address": f"0x{module:016x}",
+            "name": _module_name(data, name_offset),
+            "base": None,
+            "size": None,
+            "layout": "unknown",
+            "segments": [],
+        }
+        if layout is not None and version >= (6, 4, 0):
+            offset, size_offset, stride = layout
+            for index, kind in enumerate(_MODULE_MEMORY_TYPES):
+                entry = offset + index * stride
+                base = _integer(data, entry, 8)
+                size = _integer(data, entry + size_offset, 4)
+                if base and size and _module_range(base, ranges) is not None:
+                    item["segments"].append({
+                        "kind": kind,
+                        "base": f"0x{base:016x}",
+                        "size": size,
+                    })
+            if item["segments"]:
+                item["base"] = item["segments"][0]["base"]
+                item["size"] = sum(segment["size"] for segment in item["segments"])
+                item["layout"] = "module_memory"
+        elif layout is not None:
+            base = _integer(data, layout, 8)
+            size = _integer(data, layout + 8, 4)
+            item.update({
+                "base": f"0x{base:016x}",
+                "size": size,
+                "layout": "core_layout",
+                "segments": [{"kind": "core", "base": f"0x{base:016x}", "size": size}],
+            })
+        result.append(item)
+    return result
+
+
+def _gdbai_kernel_symbols(ranges, module_ranges, requested):
     try:
         # 2026-09-04: Returning a raw kernel image through MI consumed tens of
         # MiB of journal data. Parse it inside GDB and emit only requested facts.
@@ -257,7 +443,7 @@ def _gdbai_kernel_symbols(ranges, requested):
             image, version, token_index, count_address, count
         )
 
-        internal = {"init_task", "pcpu_hot", "current_task"}
+        internal = {"init_task", "pcpu_hot", "current_task", "modules"}
         wanted = set(requested) | internal
         found = []
         position = names
@@ -279,12 +465,21 @@ def _gdbai_kernel_symbols(ranges, requested):
                     "address": f"0x{_address(start, image, version, offsets, relative_base, absolute_percpu, index):016x}",
                 })
 
+        try:
+            modules = _kernel_modules(found, version, module_ranges)
+            module_error = None
+        except (gdb.MemoryError, ValueError, struct.error) as error:
+            modules = []
+            module_error = str(error)
+
         payload = {
             "version": banner,
             "version_address": f"0x{start + banner_address:016x}",
             "symbols": [symbol for symbol in found if symbol["name"] in requested],
             "missing": sorted(set(requested) - {symbol["name"] for symbol in found}),
             "current_tasks": _current_tasks(found),
+            "modules": modules,
+            "module_error": module_error,
             "kallsyms": {
                 "symbols": count,
                 "names_address": f"0x{start + names:016x}",

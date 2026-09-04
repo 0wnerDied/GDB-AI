@@ -1,9 +1,9 @@
 # Linux kernel debugging
 
 The conditional `linux-kernel` provider runs above the ordinary GDB/MI remote
-target. Typed task and module views require a trusted, matching `vmlinux`.
-An x86-64 QEMU stub can also provide the bounded symbol-free bootstrap below.
-GDB/AI does not auto-load target scripts or invent typed symbols.
+target. Typed task traversal requires a trusted, matching `vmlinux`. An x86-64
+QEMU stub can also provide the bounded symbol-free bootstrap and module views
+below. GDB/AI does not auto-load target scripts or invent typed symbols.
 
 `gdb_kernel` exposes two actions:
 
@@ -16,7 +16,7 @@ The `inspect` views are:
 
 | View | Result |
 | --- | --- |
-| `bootstrap` | Symbol-free x86-64 QEMU image segments, version, module candidates, plus optional exact `names` |
+| `bootstrap` | Symbol-free x86-64 image; optional `names` also return exact symbols, current tasks, and loaded modules |
 | `symbols` | Exact requested runtime kallsyms and per-CPU current tasks |
 | `capabilities` | Architecture, transport, symbol mode, task strategy, and monitor limits |
 | `version` | Bounded `linux_banner` text |
@@ -24,7 +24,7 @@ The `inspect` views are:
 | `current_task` | Current CPU task pointer |
 | `init_task` | Address of the initial task |
 | `tasks` | Paged `task_struct.tasks` traversal with PID, TGID, name, and current marker |
-| `modules` | Paged module list with address, name, runtime base, and size |
+| `modules` | Paged typed or symbol-free module list with address, name, runtime base, size, and segments |
 | `stack` | Bounded kernel stack frames |
 | `panic` | Standard bounded stop snapshot with kernel provenance |
 
@@ -37,16 +37,23 @@ When an x86-64 QEMU target is stopped in kernel context without usable
 `vmlinux` symbols, `bootstrap` compacts QEMU's memory map and a bounded GDB
 search into the runtime kernel image range, Linux version, and possible module
 mappings. The `base` and `version` views use the same fallback automatically.
-Candidate module mappings are intentionally unnamed until typed symbols or a
-kernel module list can prove their identity.
+When `bootstrap` includes `names`, the same in-GDB scan also follows the kernel
+module list and correlates each module's memory layout with those mappings.
 
 `symbols` decodes the in-memory compressed kallsyms table inside GDB and returns
 only exact names requested by the Agent. It also derives every CPU's current
 task from `pcpu_hot` or `current_task`, `$gs_base`, and `init_task`'s live
 `comm` offset. `bootstrap` accepts the same optional `names` array so one call
 can return layout, symbols, and current tasks. No runtime address is cached
-across boots. This path is verified on Linux 5.15, 6.1, 6.6, 6.12, and 7.2
-x86-64 distribution kernels, including split text/rodata mappings.
+across boots. This path is verified on Linux 5.15, 6.1, 6.6, 6.12, 6.13,
+6.15, and 7.2 x86-64 distribution kernels, including split text/rodata
+mappings.
+
+The symbol-free module path returns the stable module address and inline name,
+then validates legacy `core_layout` or current `module_memory` bases against
+QEMU's live mappings. It is verified with multiple Debian modules on Linux 6.1
+and 6.12, multiple Arch modules across the Linux 6.13, 6.15, and 7.2 layout
+transitions, and a randomized module layout where GEF's module commands fail.
 
 The implementation follows the useful semantic boundaries demonstrated by
 [bata24/gef](https://github.com/bata24/gef): symbol-free QEMU bootstrap,

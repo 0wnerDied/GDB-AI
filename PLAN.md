@@ -374,6 +374,13 @@ CPU tasks. Fresh official x86-64 distribution kernels spanning Linux 5.15,
 6.1, 6.6, 6.12, and 7.2 completed it in 1.60s, 1.15s, 2.13s, 2.08s, and 3.05s.
 Every symbol address matched the independent GEF decoder; a second KASLR boot
 changed every kernel base and passed again, excluding fixed runtime addresses.
+The same call now resolves loaded module names, bases, sizes, and memory
+segments. Two-module Linux 6.1 and 6.12 names and bases matched guest
+`/proc/modules` in 1.17s and 2.07s versus GEF's 2.50s and 3.00s; a
+randomized-layout target also resolved in 2.22s where both GEF module commands
+failed. Official Arch packages for Linux 6.13.8, 6.15.9, and 7.2.2 cover the
+remaining layout branches; their two-module names and bases matched
+`/proc/modules` in 2.88s, 2.80s, and 3.09s.
 
 Complete only the shared fixes demonstrated by these runs:
 
@@ -409,9 +416,10 @@ Complete only the shared fixes demonstrated by these runs:
   semantics as bounded kernel views; keep the typed provider as the fallback.
 - [x] Decode exact requested kallsyms and per-CPU current tasks inside GDB for
   measured Linux 5.15 through 7.2 layouts, returning only semantic facts.
-- [ ] Adopt GEF's module-identity and page-walk semantics only when each beats
-  the native workflow on a blind target; do not import its UI or compatibility
-  surface wholesale.
+- [x] Resolve stripped module identity and validated memory segments in the
+  existing one-call bootstrap, including measured randomized layouts.
+- [ ] Adopt page-walk semantics only when they beat the native workflow on a
+  blind target; do not import GEF's UI or compatibility surface wholesale.
 - [ ] Detect KGDB/KDB separately from a QEMU gdbstub. Normalize read-oriented
   `monitor` process, module, and dmesg results while GDB remains the sole run
   controller, as required by the upstream debugger contract.

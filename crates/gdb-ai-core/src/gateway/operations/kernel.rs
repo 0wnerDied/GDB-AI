@@ -318,6 +318,7 @@ impl Gateway {
         &self,
         entry: &SessionEntry,
         image_mappings: &[KernelMapping],
+        module_mappings: &[KernelMapping],
         names: &[String],
     ) -> Result<(Value, u64)> {
         let names = serde_json::to_string(names)?;
@@ -327,8 +328,14 @@ impl Gateway {
                 .map(|mapping| [mapping.start, mapping.end])
                 .collect::<Vec<_>>(),
         )?;
+        let module_ranges = serde_json::to_string(
+            &module_mappings
+                .iter()
+                .map(|mapping| [mapping.start, mapping.end])
+                .collect::<Vec<_>>(),
+        )?;
         let script = format!(
-            "{}\n_gdbai_kernel_symbols({ranges}, {names})",
+            "{}\n_gdbai_kernel_symbols({ranges}, {module_ranges}, {names})",
             include_str!("kernel_symbols.py"),
         );
         let command = format!("python exec({})", serde_json::to_string(&script)?);
@@ -358,7 +365,12 @@ impl Gateway {
         // resolution behind one stopped-state observation.
         let context = self.kernel_image_context(entry, parameters, state).await?;
         let (facts, evidence_seq) = self
-            .scan_kernel_symbols(entry, &context.image_mappings, names)
+            .scan_kernel_symbols(
+                entry,
+                &context.image_mappings,
+                &context.module_candidates,
+                names,
+            )
             .await?;
         let evidence_seq = context.evidence_seq.max(evidence_seq);
         Ok((context, facts, evidence_seq))
@@ -526,7 +538,15 @@ impl Gateway {
                             result["symbols"] = facts["symbols"].clone();
                             result["missing_symbols"] = facts["missing"].clone();
                             result["current_tasks"] = facts["current_tasks"].clone();
+                            result["modules"] = facts["modules"].clone();
                             result["kallsyms"] = facts["kallsyms"].clone();
+                            if let Some(error) = facts["module_error"].as_str() {
+                                result["partial"] = Value::Bool(true);
+                                result["warnings"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .push(Value::String(format!("module discovery: {error}")));
+                            }
                             Ok(result)
                         }),
                     )
@@ -672,8 +692,12 @@ impl Gateway {
                                 )
                                 .await?;
                             let missing = facts["missing"].clone();
-                            let partial =
-                                missing.as_array().is_some_and(|values| !values.is_empty());
+                            let mut warnings = Vec::new();
+                            if let Some(error) = facts["module_error"].as_str() {
+                                warnings.push(format!("module discovery: {error}"));
+                            }
+                            let partial = !warnings.is_empty()
+                                || missing.as_array().is_some_and(|values| !values.is_empty());
                             Ok(json!({
                                 "view": view,
                                 "architecture": "x86-64",
@@ -682,8 +706,10 @@ impl Gateway {
                                 "symbols": facts["symbols"],
                                 "missing": missing,
                                 "current_tasks": facts["current_tasks"],
+                                "modules": facts["modules"],
                                 "kallsyms": facts["kallsyms"],
                                 "partial": partial,
+                                "warnings": warnings,
                                 "stop_id": state.stop_id,
                                 "source": {
                                     "provider": "linux-kernel",
@@ -839,6 +865,20 @@ impl Gateway {
                         },
                         "mechanism": current_task
                     },
+                    "modules": {
+                        "status": if typed_symbols.is_some() {
+                            "supported"
+                        } else if runtime_kallsyms {
+                            "conditional"
+                        } else {
+                            "unsupported"
+                        },
+                        "mechanism": if typed_symbols.is_some() {
+                            "trusted-vmlinux"
+                        } else {
+                            "runtime-kallsyms+modules-list"
+                        }
+                    },
                     "monitor": {
                         "status": if self.config.security.monitor_allowlist.is_empty() {
                             "unsupported"
@@ -848,7 +888,7 @@ impl Gateway {
                         "allowlist": self.config.security.monitor_allowlist.clone()
                     },
                     "limitations": [
-                        "symbol-free kallsyms is verified on Linux 5.15, 6.1, 6.6, 6.12, and 7.2 x86-64 distribution kernels",
+                        "symbol-free kallsyms is verified on Linux 5.15, 6.1, 6.6, 6.12, 6.13, 6.15, and 7.2 x86-64 distribution kernels",
                         "QEMU monitor support is confirmed only by an allowlisted command"
                     ],
                     "stop_id": state.stop_id,
@@ -1022,8 +1062,63 @@ impl Gateway {
             self.config.limits.value_children,
             "kernel module",
         )?;
-        let (head, mut evidence_seq) =
-            kernel_address(entry, &request.parameters, state, "&modules").await?;
+        let head = kernel_address(entry, &request.parameters, state, "&modules").await;
+        let (head, mut evidence_seq) = match head {
+            Ok(value) => value,
+            // 2026-09-04: Stripped guests previously made the typed module
+            // view fail before returning even the stable list/name prefix.
+            // Reuse the bounded runtime scanner under the same stop fence.
+            Err(error) if error.code == ErrorCode::GdbError => {
+                return entry
+                    .handle
+                    .stable_observation(
+                        state,
+                        Box::pin(async {
+                            let (_, facts, evidence_seq) = self
+                                .symbol_free_kernel_facts(entry, &request.parameters, state, &[])
+                                .await?;
+                            let all = facts["modules"].as_array().ok_or_else(|| {
+                                Error::new(
+                                    ErrorCode::GdbError,
+                                    "runtime kallsyms omitted the module list",
+                                )
+                            })?;
+                            let modules = all
+                                .iter()
+                                .skip(offset)
+                                .take(limit)
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let truncated = offset.saturating_add(modules.len()) < all.len();
+                            let next_offset = offset + modules.len();
+                            let warnings = facts["module_error"]
+                                .as_str()
+                                .map(str::to_owned)
+                                .into_iter()
+                                .collect::<Vec<_>>();
+                            Ok(json!({
+                                "view": "modules",
+                                "modules": modules,
+                                "offset": offset,
+                                "limit": limit,
+                                "truncated": truncated,
+                                "continuation": truncated.then(|| json!({"offset": next_offset})),
+                                "partial": !warnings.is_empty(),
+                                "warnings": warnings,
+                                "stop_id": state.stop_id,
+                                "source": {
+                                    "provider": "linux-kernel",
+                                    "version": LINUX_KERNEL_PROVIDER_VERSION,
+                                    "mechanism": "runtime-kallsyms+modules-list"
+                                },
+                                "evidence_seq": evidence_seq
+                            }))
+                        }),
+                    )
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
         let (mut cursor, seq) =
             kernel_address(entry, &request.parameters, state, "modules.next").await?;
         evidence_seq = evidence_seq.max(seq);

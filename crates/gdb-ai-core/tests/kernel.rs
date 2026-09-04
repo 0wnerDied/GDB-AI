@@ -713,5 +713,43 @@ async fn bootstraps_a_symbol_free_modern_kernel_over_qemu_rsp() {
             .is_some_and(|address| address.starts_with("0x"))
     }));
     eprintln!("symbol-free bootstrap elapsed: {:?}", started.elapsed());
+    if let Ok(expected) = std::env::var("GDB_AI_KERNEL_EXPECT_MODULE") {
+        let module = result["modules"]
+            .as_array()
+            .and_then(|modules| modules.iter().find(|module| module["name"] == expected))
+            .unwrap_or_else(|| panic!("expected runtime module {expected}: {result}"));
+        assert!(
+            module["base"]
+                .as_str()
+                .is_some_and(|base| base.starts_with("0x"))
+        );
+        assert!(module["size"].as_u64().is_some_and(|size| size > 0));
+        assert!(
+            module["segments"]
+                .as_array()
+                .is_some_and(|segments| !segments.is_empty())
+        );
+        if let Ok(expected_base) = std::env::var("GDB_AI_KERNEL_EXPECT_MODULE_BASE") {
+            assert_eq!(module["base"], expected_base);
+        }
+
+        let modules = call(
+            &gateway,
+            &caller,
+            request(
+                "runtime-modules",
+                Some(session_id),
+                "kernel.inspect",
+                None,
+                json!({"view": "modules", "stop_id": stop_id}),
+            ),
+        )
+        .await;
+        assert!(
+            modules.result.as_ref().unwrap()["modules"]
+                .as_array()
+                .is_some_and(|modules| modules.iter().any(|module| module["name"] == expected))
+        );
+    }
     gateway.shutdown().await;
 }
