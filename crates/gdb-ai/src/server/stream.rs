@@ -556,6 +556,35 @@ mod tests {
                 .get("reconciliation_required")
                 .is_none()
         );
+        let helper = directory.path().join("failing-helper.gdb");
+        std::fs::write(
+            &helper,
+            "printf \"helper diagnostic\\n\"\nmissing_helper_command\n",
+        )
+        .unwrap();
+        let failed = call_tool(
+            &gateway,
+            &caller,
+            false,
+            &sequence,
+            json!({
+                "name": "gdb_raw",
+                "arguments": {
+                    "action": "console",
+                    "session_id": session_id,
+                    "command": format!("source {}", helper.display())
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(failed["isError"], true);
+        let error = &failed["structuredContent"]["error"];
+        assert_eq!(error["code"], "GDB_ERROR");
+        assert_eq!(error["details"]["console"]["text"], "helper diagnostic\n");
+        for field in ["record", "token", "evidence_seq", "stream_records"] {
+            assert!(error["details"].get(field).is_none(), "{failed}");
+        }
         let console = call_tool(
             &gateway,
             &caller,

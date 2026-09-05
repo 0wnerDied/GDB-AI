@@ -29,7 +29,7 @@ use crate::{
     },
     journal::Journal,
     metrics::Metrics,
-    normalize::{breakpoint_number, normalize},
+    normalize::{breakpoint_number, command_output, normalize},
     persistence::{ArtifactLimits, Store},
     policy::Profile,
     providers::live_module_offset,
@@ -2427,13 +2427,18 @@ fn command_reply(
         let message = MiResult::find_str(results, "msg")
             .unwrap_or("GDB command failed")
             .to_owned();
-        return Err(
-            Error::new(ErrorCode::GdbError, message).with_details(serde_json::json!({
-                "token": token,
-                "record": record,
-                "evidence_seq": evidence_seq
-            })),
-        );
+        let mut details = serde_json::json!({
+            "token": token,
+            "record": record,
+            "evidence_seq": evidence_seq
+        });
+        // 2026-09-05: A failing helper discarded diagnostics emitted before
+        // its error. Preserve this command's bounded streams in the same reply.
+        details
+            .as_object_mut()
+            .unwrap()
+            .extend(command_output(&stream_records, stream_truncated));
+        return Err(Error::new(ErrorCode::GdbError, message).with_details(details));
     }
     let class = class.clone();
     Ok(CommandReply {

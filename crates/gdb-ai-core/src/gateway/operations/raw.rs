@@ -1,10 +1,9 @@
 use std::time::Duration;
 
-use gdb_ai_mi::MiRecord;
 use serde_json::{Value, json};
 
 use super::{
-    encoding::{byte_content, first_word},
+    encoding::first_word,
     reconciliation::{
         reconcile_breakpoints, reconcile_inferiors, reconcile_libraries, reconcile_threads,
         reconciliation_command,
@@ -16,6 +15,7 @@ use crate::{
     backend::MiCommand,
     domain::DomainEvent,
     gateway::{Gateway, SessionEntry},
+    normalize::command_output,
     policy::validate_console_command,
     protocol::ApiRequest,
 };
@@ -76,23 +76,10 @@ impl Gateway {
         });
         // 2026-09-05: Runtime helper output was exposed only as MI byte
         // arrays or a later console-ring read. Keep each stream in this turn.
-        let (mut console, mut target, mut log) = (Vec::new(), Vec::new(), Vec::new());
-        for record in &reply.stream_records {
-            match record {
-                MiRecord::ConsoleStream(bytes) => console.extend_from_slice(bytes),
-                MiRecord::TargetStream(bytes) => target.extend_from_slice(bytes),
-                MiRecord::LogStream(bytes) => log.extend_from_slice(bytes),
-                _ => {}
-            }
-        }
-        for (name, bytes) in [("console", console), ("target", target), ("log", log)] {
-            if !bytes.is_empty() {
-                result[name] = Value::Object(byte_content(bytes));
-            }
-        }
-        if reply.stream_truncated {
-            result["truncated"] = Value::Bool(true);
-        }
+        result.as_object_mut().unwrap().extend(command_output(
+            &reply.stream_records,
+            reply.stream_truncated,
+        ));
         Ok(result)
     }
 

@@ -1,6 +1,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
+pub(super) use crate::normalize::byte_content;
 use crate::{Error, ErrorCode, Result};
 
 pub(super) const MAX_INFERIOR_INPUT_BYTES: usize = 64 * 1024;
@@ -120,27 +121,6 @@ pub(super) fn input_bytes(parameters: &Value) -> Result<Vec<u8>> {
         ErrorCode::InvalidArgument,
         "text or data_base64 is required",
     ))
-}
-
-pub(super) fn byte_content(bytes: Vec<u8>) -> Map<String, Value> {
-    // 2026-08-30: Returning UTF-8 as both text and base64 duplicated target
-    // evidence and inflated Agent context. Emit exactly one lossless form.
-    let mut content = Map::new();
-    // 2026-09-01: NUL-heavy target output is valid UTF-8, but JSON expands
-    // every byte to `\u0000`. Keep ordinary terminal whitespace readable and
-    // use the smaller lossless binary form for other control bytes.
-    let readable = std::str::from_utf8(&bytes).ok().filter(|text| {
-        text.chars()
-            .all(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
-    });
-    if let Some(text) = readable {
-        content.insert("encoding".into(), Value::String("utf-8".into()));
-        content.insert("text".into(), Value::String(text.into()));
-    } else {
-        content.insert("encoding".into(), Value::String("binary".into()));
-        content.insert("data_base64".into(), Value::String(BASE64.encode(bytes)));
-    }
-    content
 }
 
 pub(super) fn first_word(command: &str) -> &str {

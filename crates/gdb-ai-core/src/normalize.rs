@@ -1,4 +1,6 @@
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_mi::{MiRecord, MiResult, MiValue};
+use serde_json::{Map, Value};
 
 use crate::{
     Error, ErrorCode, Result,
@@ -34,6 +36,49 @@ pub fn normalize(record: &MiRecord) -> Option<DomainEvent> {
         }),
         MiRecord::Result { .. } | MiRecord::StatusAsync { .. } | MiRecord::Prompt => None,
     }
+}
+
+pub(crate) fn command_output(records: &[MiRecord], truncated: bool) -> Map<String, Value> {
+    let (mut console, mut target, mut log) = (Vec::new(), Vec::new(), Vec::new());
+    for record in records {
+        match record {
+            MiRecord::ConsoleStream(bytes) => console.extend_from_slice(bytes),
+            MiRecord::TargetStream(bytes) => target.extend_from_slice(bytes),
+            MiRecord::LogStream(bytes) => log.extend_from_slice(bytes),
+            _ => {}
+        }
+    }
+    let mut output = Map::new();
+    for (name, bytes) in [("console", console), ("target", target), ("log", log)] {
+        if !bytes.is_empty() {
+            output.insert(name.into(), Value::Object(byte_content(bytes)));
+        }
+    }
+    if truncated {
+        output.insert("truncated".into(), Value::Bool(true));
+    }
+    output
+}
+
+pub(crate) fn byte_content(bytes: Vec<u8>) -> Map<String, Value> {
+    // 2026-08-30: Returning UTF-8 as both text and base64 duplicated target
+    // evidence and inflated Agent context. Emit exactly one lossless form.
+    let mut content = Map::new();
+    // 2026-09-01: NUL-heavy target output is valid UTF-8, but JSON expands
+    // every byte to `\u0000`. Keep ordinary terminal whitespace readable and
+    // use the smaller lossless binary form for other control bytes.
+    let readable = std::str::from_utf8(&bytes).ok().filter(|text| {
+        text.chars()
+            .all(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+    });
+    if let Some(text) = readable {
+        content.insert("encoding".into(), Value::String("utf-8".into()));
+        content.insert("text".into(), Value::String(text.into()));
+    } else {
+        content.insert("encoding".into(), Value::String("binary".into()));
+        content.insert("data_base64".into(), Value::String(BASE64.encode(bytes)));
+    }
+    content
 }
 
 pub(crate) fn breakpoint_number(record: &MiRecord) -> Result<String> {

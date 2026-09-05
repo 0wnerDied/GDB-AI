@@ -216,6 +216,8 @@ aliases remain canonical-only. `gdb_raw` is registered separately only with
 With `--raw-admin`, session creation defaults to the raw profile. Use
 `gdb_raw action=console` for native GDB commands and runtime helpers;
 the reply includes that command's `console`, `target`, and `log` output.
+If the command fails after producing output, those streams remain available
+in `error.details`.
 
 Canonical mutations require the current revision and write lease. Valid owner
 mutations refresh the lease near half-life. Projected MCP tools keep that
