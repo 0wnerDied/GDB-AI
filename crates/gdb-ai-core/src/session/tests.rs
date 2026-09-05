@@ -124,7 +124,7 @@ fn exit_wait_tracks_terminal_inferior_generations() {
     });
     assert_eq!(settled_by(&stopped, Some(&baseline)), Some("stopped"));
     assert_eq!(
-        wait_timeout_result(stopped.clone(), WaitUntil::Snapshot, Some(&baseline), None)
+        wait_timeout_result(&stopped, WaitUntil::Snapshot, Some(&baseline), None)
             .unwrap()
             .stop_id,
         stopped.stop_id
@@ -1170,4 +1170,38 @@ async fn starts_compatible_mi3_backend() {
     .unwrap();
     assert_eq!(session.capabilities().backend.mi_version, "mi3");
     session.close().await.unwrap();
+}
+
+#[test]
+#[ignore = "microbenchmark: run explicitly with an optimized build"]
+fn benchmark_large_state_publication() {
+    let mut state = SessionState::creating(SessionId("sess_benchmark".into()));
+    for index in 0..4_096 {
+        let id = format!("module-{index}");
+        state.modules.insert(
+            id.clone(),
+            crate::domain::ModuleState {
+                id,
+                target_name: Some(format!("/target/modules/{index:04}/libbenchmark.so")),
+                host_name: Some(format!("/host/modules/{index:04}/libbenchmark.so")),
+                symbols_loaded: Some(true),
+            },
+        );
+    }
+    let (sender, receiver) = watch::channel(state);
+    let mut live = super::state::LiveState::new(sender, false);
+    let event = DomainEvent::Output {
+        source: crate::domain::OutputSource::GdbConsoleStream,
+        bytes: Vec::new(),
+    };
+    let started = std::time::Instant::now();
+    for event_seq in 1..=20_000 {
+        live.apply_event(event_seq, &event).unwrap();
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(receiver.borrow().event_seq, 20_000);
+    eprintln!(
+        "published 20,000 large states in {elapsed:?} ({:.0} publications/s)",
+        20_000.0 / elapsed.as_secs_f64()
+    );
 }

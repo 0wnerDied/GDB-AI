@@ -14,6 +14,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use super::{
     ActiveOperation, Capability, CapabilityStatus, CommandReply, OperationCancelMode, OutputRing,
     PendingModuleBreakpoint, PublishedEvent, SessionCapabilities, command_deadline,
+    state::LiveState,
 };
 use crate::{
     Error, ErrorCode, Result,
@@ -33,7 +34,6 @@ use crate::{
     persistence::{ArtifactLimits, Store},
     policy::Profile,
     providers::live_module_offset,
-    reducer::StateReducer,
     ring::{ByteRing, RingRead},
 };
 
@@ -190,18 +190,18 @@ impl PendingControlResponse {
     }
 }
 
-// Owns both GDB input and reducer state. One ordinary MI command may be in
-// flight; the control lane admits interruption, closure, and admission metadata.
+// Owns both GDB input and every state transition. One ordinary MI command may
+// be in flight; the control lane admits interruption, closure, and admission
+// metadata.
 pub(super) struct SessionWorker {
     backend: GdbBackend,
     journal: Journal,
     artifacts: ArtifactStore,
-    reducer: StateReducer,
+    state: LiveState,
     store: Arc<Store>,
     metrics: Arc<Metrics>,
     profile: Profile,
     pub(super) capabilities: Arc<StdRwLock<SessionCapabilities>>,
-    state_sender: watch::Sender<SessionState>,
     events: broadcast::Sender<PublishedEvent>,
     requests: mpsc::Receiver<WorkerRequest>,
     controls: mpsc::Receiver<ControlRequest>,
@@ -251,7 +251,6 @@ impl SessionWorker {
         metrics: Arc<Metrics>,
         session_dir: PathBuf,
         journal: Journal,
-        initial_state: SessionState,
         state_sender: watch::Sender<SessionState>,
         events: broadcast::Sender<PublishedEvent>,
         requests: mpsc::Receiver<WorkerRequest>,
@@ -266,7 +265,7 @@ impl SessionWorker {
         let mut selected = None;
         let mut journal = journal;
         let artifacts = ArtifactStore::new(&config.artifacts.path)?;
-        let mut reducer = StateReducer::new(initial_state);
+        let mut state = LiveState::new(state_sender, journal.is_durable());
         let mut target_output = ByteRing::new(config.limits.inferior_output_ring_bytes);
         let mut console_output = ByteRing::new(config.limits.console_output_ring_bytes);
         let mut log_output = ByteRing::new(config.limits.console_output_ring_bytes);
@@ -295,7 +294,7 @@ impl SessionWorker {
             match wait_for_prompt(
                 &mut backend,
                 &mut journal,
-                &mut reducer,
+                &mut state,
                 &mut target_output,
                 &mut console_output,
                 &mut log_output,
@@ -347,11 +346,10 @@ impl SessionWorker {
             backend,
             journal,
             artifacts,
-            reducer,
+            state,
             store,
             metrics,
             profile,
-            state_sender,
             events,
             requests,
             controls,
@@ -577,13 +575,22 @@ impl SessionWorker {
     }
 
     fn set_capability(&self, name: &str, status: CapabilityStatus) {
-        let mut capabilities = self
-            .capabilities
+        let revision = self.state.borrow().revision;
+        Self::set_capability_at(&self.capabilities, revision, name, status);
+    }
+
+    fn set_capability_at(
+        capabilities: &StdRwLock<SessionCapabilities>,
+        revision: u64,
+        name: &str,
+        status: CapabilityStatus,
+    ) {
+        let mut capabilities = capabilities
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(capability) = capabilities.capabilities.get_mut(name) {
             capability.status = status;
-            capability.last_checked_revision = self.reducer.state().revision;
+            capability.last_checked_revision = revision;
         }
     }
 
@@ -706,9 +713,8 @@ impl SessionWorker {
             }
         }
         if self.fatal {
-            let _ = self
-                .store
-                .upsert_session(self.reducer.state(), self.profile);
+            let state = self.state.borrow();
+            let _ = self.store.upsert_session(&state, self.profile);
         } else {
             let _ = self.checkpoint(false);
         }
@@ -896,7 +902,8 @@ impl SessionWorker {
             }
             WorkerRequest::GetValue { value_id, response } => {
                 let result = self.values.get(&value_id).cloned().ok_or_else(|| {
-                    let current = self.reducer.state().stop_id.as_ref();
+                    let state = self.state.borrow();
+                    let current = state.stop_id.as_ref();
                     if value_id.starts_with('v')
                         && current.is_none_or(|stop| !value_id.contains(&stop.0))
                     {
@@ -956,8 +963,8 @@ impl SessionWorker {
                     let stored = if self.store_failed {
                         Ok(())
                     } else {
-                        self.store
-                            .upsert_tracking(&self.reducer.state().session_id, &definition)
+                        let state = self.state.borrow();
+                        self.store.upsert_tracking(&state.session_id, &definition)
                     };
                     self.store_result(stored).map(|()| {
                         self.tracking.insert(definition.id().0.clone(), definition);
@@ -976,9 +983,10 @@ impl SessionWorker {
                     .ok_or_else(|| Error::new(ErrorCode::NotFound, "tracking definition not found"))
                     .and_then(|definition| {
                         if !self.store_failed {
-                            let removed = self
-                                .store
-                                .delete_tracking(&self.reducer.state().session_id, &tracking_id);
+                            let state = self.state.borrow();
+                            let removed =
+                                self.store.delete_tracking(&state.session_id, &tracking_id);
+                            drop(state);
                             self.store_result(removed)?;
                         }
                         self.tracking.remove(&tracking_id);
@@ -1033,10 +1041,12 @@ impl SessionWorker {
                 // 2026-08-28: Snapshot data was persisted before the Gateway's
                 // final context check. Validate and publish it atomically in
                 // the state-owning worker so stale builds leave no evidence.
-                let state = self.reducer.state();
-                let result = if state.stop_id.as_ref() != Some(&expected_stop_id)
-                    || state.execution_epoch != expected_execution_epoch
-                {
+                let matches_context = {
+                    let state = self.state.borrow();
+                    state.stop_id.as_ref() == Some(&expected_stop_id)
+                        && state.execution_epoch == expected_execution_epoch
+                };
+                let result = if !matches_context {
                     Err(Error::new(
                         ErrorCode::StaleContext,
                         "target stop changed before snapshot commit",
@@ -1236,7 +1246,7 @@ impl SessionWorker {
         let output = Arc::clone(&self.inferior_output);
         let store = Arc::clone(&self.store);
         let artifacts = self.artifacts.clone();
-        let session_id = self.reducer.state().session_id.clone();
+        let session_id = self.state.borrow().session_id.clone();
         let evidence_mode = self.output_evidence_mode;
         let artifact_limits = ArtifactLimits {
             session_bytes: self.artifact_limit,
@@ -1328,7 +1338,7 @@ impl SessionWorker {
         // command consumed that request's deadline. Clean one object only
         // after responding, so maintenance cannot delay the current result.
         if !self.timed_out_tokens.is_empty()
-            || !self.reducer.state().inferiors.values().any(|inferior| {
+            || !self.state.borrow().inferiors.values().any(|inferior| {
                 matches!(
                     inferior.status,
                     InferiorStatus::Stopped | InferiorStatus::Core
@@ -1386,8 +1396,8 @@ impl SessionWorker {
             .pending_module_breakpoints
             .values()
             .filter(|breakpoint| {
-                self.reducer
-                    .state()
+                self.state
+                    .borrow()
                     .breakpoints
                     .get(&breakpoint.backend_number)
                     .is_some_and(|state| state.pending)
@@ -1396,7 +1406,7 @@ impl SessionWorker {
             .collect::<Vec<_>>();
         for breakpoint in pending {
             let Some(address) =
-                live_module_offset(self.reducer.state(), &breakpoint.module, breakpoint.offset)?
+                live_module_offset(&self.state.borrow(), &breakpoint.module, breakpoint.offset)?
             else {
                 continue;
             };
@@ -1423,8 +1433,8 @@ impl SessionWorker {
             .pending_module_breakpoints
             .values()
             .filter_map(|breakpoint| {
-                self.reducer
-                    .state()
+                self.state
+                    .borrow()
                     .breakpoints
                     .get(&breakpoint.backend_number)
                     .filter(|state| !state.pending)
@@ -1932,8 +1942,8 @@ impl SessionWorker {
     }
 
     fn target_running(&self) -> bool {
-        self.reducer
-            .state()
+        self.state
+            .borrow()
             .inferiors
             .values()
             .any(|inferior| inferior.status == InferiorStatus::Running)
@@ -2115,7 +2125,7 @@ impl SessionWorker {
 
     fn apply_event_inner(&mut self, event: DomainEvent) -> Result<()> {
         let stopped = matches!(&event, DomainEvent::TargetStopped { .. });
-        let attributed_exit = self.reducer.state().attributed_exit(&event);
+        let attributed_exit = self.state.borrow().attributed_exit(&event);
         if attributed_exit
             || matches!(
                 &event,
@@ -2158,79 +2168,97 @@ impl SessionWorker {
                     | DomainEvent::TargetDetached
                     | DomainEvent::BackendExited { .. }
             );
-        let journaled = self.journal.append_domain(event.clone())?;
-        let changed = self.reducer.apply(&journaled)?;
-        match &event {
-            DomainEvent::CoreOpened { .. } => {
-                self.set_capability("execution", CapabilityStatus::Unsupported);
-                self.set_capability("target_mutation", CapabilityStatus::Unsupported);
-                self.set_capability("memory_write", CapabilityStatus::Unsupported);
+        // The journal and reducer both borrow the normalized event. Ownership
+        // then moves into the broadcast queue without copying large output.
+        let event_seq = self.journal.append_domain_ref(&event)?;
+        let capabilities = &self.capabilities;
+        let profile = self.profile;
+        let values = &mut self.values;
+        let stale_backend_values = &mut self.stale_backend_values;
+        let changed = self.state.apply_event_with(event_seq, &event, |state| {
+            let revision = state.revision;
+            let set_capability = |name, status| {
+                Self::set_capability_at(capabilities, revision, name, status);
+            };
+            match &event {
+                DomainEvent::CoreOpened { .. } => {
+                    set_capability("execution", CapabilityStatus::Unsupported);
+                    set_capability("target_mutation", CapabilityStatus::Unsupported);
+                    set_capability("memory_write", CapabilityStatus::Unsupported);
+                }
+                DomainEvent::TargetRunning { .. } | DomainEvent::TargetStopped { .. } => {
+                    set_capability(
+                        "execution",
+                        if matches!(
+                            profile,
+                            Profile::DebugControl | Profile::LabMutation | Profile::RawAdmin
+                        ) {
+                            CapabilityStatus::Conditional
+                        } else {
+                            CapabilityStatus::Unsupported
+                        },
+                    );
+                }
+                DomainEvent::TargetDetached
+                | DomainEvent::TargetDisconnected
+                | DomainEvent::BackendExited { .. } => {
+                    set_capability("execution", CapabilityStatus::TemporarilyUnavailable);
+                }
+                DomainEvent::InferiorExited { .. }
+                    if state
+                        .inferiors
+                        .values()
+                        .any(|inferior| inferior.status == InferiorStatus::Disconnected) =>
+                {
+                    set_capability("execution", CapabilityStatus::TemporarilyUnavailable);
+                }
+                _ => {}
             }
-            DomainEvent::TargetRunning { .. } | DomainEvent::TargetStopped { .. } => {
-                self.set_capability(
-                    "execution",
-                    if matches!(
-                        self.profile,
-                        Profile::DebugControl | Profile::LabMutation | Profile::RawAdmin
-                    ) {
-                        CapabilityStatus::Conditional
-                    } else {
-                        CapabilityStatus::Unsupported
-                    },
+            if invalidates_values {
+                // 2026-08-28: Clearing public bindings alone leaked MI
+                // variable objects across stops. Delete them at the next
+                // stopped command, when GDB permits var-object cleanup.
+                stale_backend_values.extend(
+                    std::mem::take(values)
+                        .into_values()
+                        .map(|binding| binding.backend_name),
                 );
             }
-            DomainEvent::TargetDetached
-            | DomainEvent::TargetDisconnected
-            | DomainEvent::BackendExited { .. } => {
-                self.set_capability("execution", CapabilityStatus::TemporarilyUnavailable);
-            }
-            DomainEvent::InferiorExited { .. }
-                if self
-                    .reducer
-                    .state()
-                    .inferiors
-                    .values()
-                    .any(|inferior| inferior.status == InferiorStatus::Disconnected) =>
-            {
-                self.set_capability("execution", CapabilityStatus::TemporarilyUnavailable);
-            }
-            _ => {}
-        }
-        if invalidates_values {
-            // 2026-08-28: Clearing public bindings alone leaked MI variable
-            // objects across stops. Delete them at the next stopped command,
-            // when GDB permits var-object cleanup.
-            self.stale_backend_values.extend(
-                std::mem::take(&mut self.values)
-                    .into_values()
-                    .map(|binding| binding.backend_name),
-            );
-        }
+        })?;
         // 2026-08-28: Even non-revision events advance public event_seq. The
-        // watch state must publish every journaled event or waits see stale evidence.
+        // watched state must publish every journaled event or waits see stale evidence.
         self.state_dirty |= changed;
         if changed && self.journal.is_durable() {
             self.checkpoint(false)?;
         }
-        self.state_sender.send_replace(self.reducer.state().clone());
+        self.state.publish();
+        let revision = self.state.borrow().revision;
         let _ = self.events.send(PublishedEvent {
-            event_seq: journaled.seq(),
-            revision: self.reducer.state().revision,
+            event_seq,
+            revision,
             event,
         });
         if stopped {
             let snapshot_started = Instant::now();
             // 2026-08-28: SnapshotReady was published without a stored object.
             // Commit the bounded stop context before advertising readiness.
-            let stop_id = self.reducer.state().stop_id.clone().unwrap();
+            let (stop_id, frame, revision, reason, session_id) = {
+                let state = self.state.borrow();
+                (
+                    state.stop_id.clone().unwrap(),
+                    state.stopped_frame().cloned(),
+                    state.revision,
+                    state.stop_reason.clone(),
+                    state.session_id.clone(),
+                )
+            };
             let snapshot_id = format!("snap_{stop_id}");
-            let frame = self.reducer.state().stopped_frame().cloned();
             let snapshot = serde_json::json!({
                 "snapshot_id": snapshot_id,
                 "stop_id": stop_id,
-                "revision": self.reducer.state().revision,
+                "revision": revision,
                 "profile": "minimal",
-                "reason": self.reducer.state().stop_reason,
+                "reason": reason,
                 "frame": frame,
                 "partial": frame.is_none(),
                 "warnings": if frame.is_none() {
@@ -2245,8 +2273,8 @@ impl SessionWorker {
                     "kind": "mi-event",
                     "uri": format!(
                         "gdbai://session/{}/event/{}",
-                        self.reducer.state().session_id,
-                        journaled.seq()
+                        session_id,
+                        event_seq
                     )
                 }]
             });
@@ -2272,11 +2300,10 @@ impl SessionWorker {
         let appended = self.journal.append_snapshot(&snapshot_id, &snapshot);
         self.journal_result(appended)?;
         if !self.store_failed {
-            let stored = self.store.upsert_snapshot(
-                &self.reducer.state().session_id,
-                &snapshot_id,
-                &snapshot,
-            );
+            let session_id = self.state.borrow().session_id.clone();
+            let stored = self
+                .store
+                .upsert_snapshot(&session_id, &snapshot_id, &snapshot);
             self.store_result(stored)?;
         }
         if self.snapshots.len() >= 128 {
@@ -2365,14 +2392,16 @@ impl SessionWorker {
         // the shared SQLite connection. Performance mode coalesces those
         // copies at flush/close boundaries; live state remains actor-owned.
         self.state_dirty = false;
-        let appended = self
-            .journal
-            .append_state(self.reducer.state().revision, self.reducer.state());
+        let appended = {
+            let state = self.state.borrow();
+            self.journal.append_state(state.revision, &*state)
+        };
         self.journal_result(appended)?;
         if !self.store_failed || closing {
-            let stored = self
-                .store
-                .upsert_session(self.reducer.state(), self.profile);
+            let stored = {
+                let state = self.state.borrow();
+                self.store.upsert_session(&state, self.profile)
+            };
             self.store_result(stored)?;
         }
         Ok(())
@@ -2400,11 +2429,10 @@ impl SessionWorker {
     fn mark_failed(&mut self) {
         // 2026-08-29: Evidence-storage failures stopped the worker before a
         // BackendExited event could be journaled, leaving live clients with a
-        // stale READY/ACTIVE state. The reducer still owns this emergency
+        // stale READY/ACTIVE state. The actor-owned state still applies this
         // terminal transition even though the failed journal cannot record it.
-        if self.reducer.fail_closed() {
+        if self.state.fail_closed() {
             self.state_dirty = true;
-            self.state_sender.send_replace(self.reducer.state().clone());
         }
         if self.metric_active {
             self.metrics.session_failed();
@@ -2417,7 +2445,7 @@ impl SessionWorker {
 async fn wait_for_prompt(
     backend: &mut GdbBackend,
     journal: &mut Journal,
-    reducer: &mut StateReducer,
+    state: &mut LiveState,
     target_output: &mut ByteRing,
     console_output: &mut ByteRing,
     log_output: &mut ByteRing,
@@ -2449,8 +2477,8 @@ async fn wait_for_prompt(
                             _ => {}
                         }
                     }
-                    let journaled = journal.append_domain(event)?;
-                    reducer.apply(&journaled)?;
+                    let event_seq = journal.append_domain_ref(&event)?;
+                    state.apply_event(event_seq, &event)?;
                 }
                 if record == MiRecord::Prompt {
                     return Ok(());

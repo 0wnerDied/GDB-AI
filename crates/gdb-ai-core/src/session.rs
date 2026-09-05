@@ -17,6 +17,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 
 mod actor;
+mod state;
 
 use actor::{ControlRequest, SessionWorker, WorkerRequest};
 
@@ -211,7 +212,7 @@ impl SessionHandle {
         )?;
         journal.append_session_created(&id.0)?;
         let initial_state = SessionState::creating(id.clone());
-        let (state_sender, state) = watch::channel(initial_state.clone());
+        let (state_sender, state) = watch::channel(initial_state);
         let (events, _) = broadcast::channel(512);
         let (requests, receiver) = mpsc::channel(128);
         // 2026-08-28: Interrupt and close previously waited behind the command
@@ -228,7 +229,6 @@ impl SessionHandle {
             metrics.clone(),
             session_dir.clone(),
             journal,
-            initial_state,
             state_sender,
             events.clone(),
             receiver,
@@ -517,10 +517,11 @@ impl SessionHandle {
     }
 
     fn require_observation_context(&self, expected: &SessionState) -> Result<()> {
-        let current = self.state();
-        if current.stop_id == expected.stop_id
-            && current.execution_epoch == expected.execution_epoch
-        {
+        let matches = self.with_state(|current| {
+            current.stop_id == expected.stop_id
+                && current.execution_epoch == expected.execution_epoch
+        });
+        if matches {
             Ok(())
         } else {
             Err(Error::new(
@@ -838,72 +839,16 @@ impl SessionHandle {
         let baseline = baseline.cloned();
         let wait = async {
             loop {
-                let current = state.borrow().clone();
-                // 2026-08-28: A later execution epoch belongs to another
-                // operation and must not satisfy this operation's waiter.
-                if expected_execution_epoch
-                    .is_some_and(|expected| current.execution_epoch > expected)
                 {
-                    return Err(Error::new(
-                        ErrorCode::StaleContext,
-                        "operation state was superseded by a later execution",
-                    ));
-                }
-                if expected_execution_epoch
-                    .is_none_or(|expected| current.execution_epoch == expected)
-                    && wait_satisfied(&current, until, baseline.as_ref())
-                {
-                    return Ok(current);
-                }
-                // 2026-09-01: Report impossible waits immediately, but only
-                // after the requested execution epoch starts. A restart first
-                // exits the old inferior; that transition cannot fail the new run.
-                if expected_execution_epoch
-                    .is_none_or(|expected| current.execution_epoch == expected)
-                    && !matches!(until, WaitUntil::Settled | WaitUntil::Exited)
-                    && let Some(inferior) = terminal_after(&current, baseline.as_ref())
-                {
-                    let code = if inferior.status == InferiorStatus::Exited {
-                        ErrorCode::TargetExited
-                    } else {
-                        ErrorCode::TargetDisconnected
-                    };
-                    return Err(Error::new(
-                        code,
-                        format!("target became {:?} before {until:?}", inferior.status),
-                    )
-                    .with_details(serde_json::json!({
-                        "inferior_id": inferior.id,
-                        "status": inferior.status,
-                        "exit_code": inferior.exit_code
-                    })));
-                }
-                // 2026-08-28: State waiters kept sleeping after GDB death or
-                // an unmatched result made the controller unreliable, turning
-                // a known failure into an unrelated timeout.
-                if matches!(
-                    current.lifecycle,
-                    crate::domain::SessionLifecycle::Closed
-                        | crate::domain::SessionLifecycle::Failed
-                ) || current.backend == crate::domain::BackendHealth::Dead
-                {
-                    return Err(Error::new(ErrorCode::GdbExited, "GDB session ended"));
-                }
-                if current.consistency == crate::domain::Consistency::Lost {
-                    return Err(Error::new(
-                        ErrorCode::ConsistencyLost,
-                        "session consistency was lost while waiting",
-                    ));
-                }
-                if current.reconciliation_required
-                    && baseline
-                        .as_ref()
-                        .is_none_or(|baseline| current.event_seq > baseline.event_seq)
-                {
-                    return Err(Error::new(
-                        ErrorCode::ConsistencyDirty,
-                        "session requires reconciliation after an unexpected backend result",
-                    ));
+                    let current = state.borrow();
+                    if inspect_wait_state(
+                        &current,
+                        until,
+                        baseline.as_ref(),
+                        expected_execution_epoch,
+                    )? {
+                        return Ok(current.clone());
+                    }
                 }
                 state.changed().await.map_err(|_| {
                     Error::new(ErrorCode::GdbExited, "session state channel closed")
@@ -915,12 +860,10 @@ impl SessionHandle {
             // 2026-09-04: A stop and the timer can become ready in the same
             // scheduler turn. Recheck the published state before reporting a
             // timeout so an already-ready snapshot is never hidden from Agents.
-            Err(_) => wait_timeout_result(
-                state.borrow().clone(),
-                until,
-                baseline.as_ref(),
-                expected_execution_epoch,
-            ),
+            Err(_) => {
+                let current = state.borrow();
+                wait_timeout_result(&current, until, baseline.as_ref(), expected_execution_epoch)
+            }
         }
     }
 
@@ -933,12 +876,12 @@ impl SessionHandle {
         if matches!(ring, OutputRing::Inferior) {
             // 2026-08-28: GDB can publish inferior exit before the PTY reader
             // observes hangup. Drain that bounded tail before returning exit output.
-            if self
-                .state()
-                .inferiors
-                .values()
-                .any(|inferior| inferior.status == InferiorStatus::Exited)
-            {
+            if self.with_state(|state| {
+                state
+                    .inferiors
+                    .values()
+                    .any(|inferior| inferior.status == InferiorStatus::Exited)
+            }) {
                 self.inferior_output.drain(Duration::from_secs(1)).await;
             }
             return Ok(self
@@ -1086,18 +1029,86 @@ fn wait_satisfied(state: &SessionState, until: WaitUntil, baseline: Option<&Wait
 }
 
 fn wait_timeout_result(
-    state: SessionState,
+    state: &SessionState,
     until: WaitUntil,
     baseline: Option<&WaitBaseline>,
     expected_execution_epoch: Option<u64>,
 ) -> Result<SessionState> {
     if expected_execution_epoch.is_none_or(|expected| state.execution_epoch == expected)
-        && wait_satisfied(&state, until, baseline)
+        && wait_satisfied(state, until, baseline)
     {
-        Ok(state)
+        Ok(state.clone())
     } else {
         Err(Error::new(ErrorCode::Timeout, "state wait timed out").retryable())
     }
+}
+
+fn inspect_wait_state(
+    state: &SessionState,
+    until: WaitUntil,
+    baseline: Option<&WaitBaseline>,
+    expected_execution_epoch: Option<u64>,
+) -> Result<bool> {
+    // 2026-08-28: A later execution epoch belongs to another operation and
+    // must not satisfy this operation's waiter.
+    if expected_execution_epoch.is_some_and(|expected| state.execution_epoch > expected) {
+        return Err(Error::new(
+            ErrorCode::StaleContext,
+            "operation state was superseded by a later execution",
+        ));
+    }
+    let expected_epoch =
+        expected_execution_epoch.is_none_or(|expected| state.execution_epoch == expected);
+    if expected_epoch && wait_satisfied(state, until, baseline) {
+        return Ok(true);
+    }
+    // 2026-09-01: Report impossible waits immediately, but only after the
+    // requested execution epoch starts. A restart first exits the old
+    // inferior; that transition cannot fail the new run.
+    if expected_epoch
+        && !matches!(until, WaitUntil::Settled | WaitUntil::Exited)
+        && let Some(inferior) = terminal_after(state, baseline)
+    {
+        let code = if inferior.status == InferiorStatus::Exited {
+            ErrorCode::TargetExited
+        } else {
+            ErrorCode::TargetDisconnected
+        };
+        return Err(Error::new(
+            code,
+            format!("target became {:?} before {until:?}", inferior.status),
+        )
+        .with_details(serde_json::json!({
+            "inferior_id": inferior.id,
+            "status": inferior.status,
+            "exit_code": inferior.exit_code
+        })));
+    }
+    // 2026-08-28: State waiters kept sleeping after GDB death or an unmatched
+    // result made the controller unreliable, turning a known failure into an
+    // unrelated timeout.
+    if matches!(
+        state.lifecycle,
+        crate::domain::SessionLifecycle::Closed | crate::domain::SessionLifecycle::Failed
+    ) || state.backend == crate::domain::BackendHealth::Dead
+    {
+        return Err(Error::new(ErrorCode::GdbExited, "GDB session ended"));
+    }
+    if state.consistency == crate::domain::Consistency::Lost {
+        return Err(Error::new(
+            ErrorCode::ConsistencyLost,
+            "session consistency was lost while waiting",
+        ));
+    }
+    if state.reconciliation_required
+        && baseline.is_none_or(|baseline| state.event_seq > baseline.event_seq)
+    {
+        return Err(Error::new(
+            ErrorCode::ConsistencyDirty,
+            "session requires reconciliation after an unexpected backend result",
+        ));
+    }
+    Ok(false)
 }
 
 fn stopped_after(state: &SessionState, baseline: Option<&WaitBaseline>) -> bool {

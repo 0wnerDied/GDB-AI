@@ -28,6 +28,7 @@ crates/
 │       ├── session.rs         public SessionHandle and session data types
 │       └── session/
 │           ├── actor.rs       SessionWorker loop, control lane, MI input
+│           ├── state.rs       live reduction and atomic state publication
 │           └── tests.rs       session facade and wait regressions
 └── gdb-ai/                    executable, CLI, MCP and JSON-RPC adapters
     └── src/
@@ -88,7 +89,7 @@ GDB stdout bytes
   -> raw journal evidence
   -> normalized domain event
   -> reducer
-  -> immutable public revision and bounded event publication
+  -> coherent public revision and bounded event publication
 ```
 
 The PTY reader writes target output directly into its bounded ring or
@@ -139,7 +140,9 @@ starve debugger state events.
 - Raw MI and normalized events share one monotonic sequence before reducer
   application. In default `performance` mode, full-state journal checkpoints
   and operation history are coalesced at the 250 ms flush, transcript-read, and
-  close boundaries. Live inspection reads the actor's current state.
+  close boundaries. The actor reduces directly into its watched live state and
+  publishes related capability and value invalidation with that transition;
+  scalar inspections borrow it and returned snapshots own their data.
 - A full or unwritable performance journal stops recording and publishes an
   evidence-gap limitation; it does not stop GDB or invalidate live stop handles.
   SQLite failure leaves live snapshots and operation waits available, suspends
@@ -148,7 +151,8 @@ starve debugger state events.
   lag live state and missing history is never reconstructed from current state.
 - `durable` mode preserves per-revision checkpoints, calls `sync_data` at API,
   state, snapshot, periodic, and close boundaries, and fails the session when
-  required evidence cannot be retained.
+  required evidence cannot be retained. Revised state remains staged until its
+  checkpoint succeeds, then becomes visible to readers as one publication.
 - Artifact sensitivity is monotonic for each ownership association. Retention
   and garbage collection preserve any content with a live owner.
 

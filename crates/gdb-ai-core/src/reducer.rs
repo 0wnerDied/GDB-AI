@@ -50,6 +50,38 @@ impl StateReducer {
     }
 
     pub fn fail_closed(&mut self) -> bool {
+        Self::fail_closed_state(&mut self.state)
+    }
+
+    pub fn apply(&mut self, journaled: &JournaledEvent) -> Result<bool> {
+        self.apply_event(journaled.seq(), journaled.event())
+    }
+
+    pub(crate) fn apply_event(&mut self, sequence: u64, event: &DomainEvent) -> Result<bool> {
+        Self::apply_event_to(&mut self.state, sequence, event)
+    }
+
+    pub(crate) fn apply_event_to(
+        state: &mut SessionState,
+        sequence: u64,
+        event: &DomainEvent,
+    ) -> Result<bool> {
+        StateMutator { state }.apply_event(sequence, event)
+    }
+
+    pub(crate) fn fail_closed_state(state: &mut SessionState) -> bool {
+        StateMutator { state }.fail_closed()
+    }
+}
+
+// Reuse one transition implementation for replay-owned state and the session
+// actor's watched state without copying either representation.
+struct StateMutator<'a> {
+    state: &'a mut SessionState,
+}
+
+impl StateMutator<'_> {
+    fn fail_closed(&mut self) -> bool {
         let changed = self.fail_backend();
         if changed {
             self.state.revision += 1;
@@ -57,19 +89,18 @@ impl StateReducer {
         changed
     }
 
-    pub fn apply(&mut self, journaled: &JournaledEvent) -> Result<bool> {
-        if journaled.seq() <= self.state.event_seq {
+    fn apply_event(&mut self, sequence: u64, event: &DomainEvent) -> Result<bool> {
+        if sequence <= self.state.event_seq {
             return Err(Error::new(
                 ErrorCode::InvalidState,
                 format!(
                     "event sequence {} is not greater than {}",
-                    journaled.seq(),
-                    self.state.event_seq
+                    sequence, self.state.event_seq
                 ),
             ));
         }
-        self.state.event_seq = journaled.seq();
-        let changed = self.reduce(journaled.event());
+        self.state.event_seq = sequence;
+        let changed = self.reduce(event);
         if changed {
             self.state.revision += 1;
         }

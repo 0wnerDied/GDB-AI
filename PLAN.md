@@ -24,6 +24,10 @@ Completed and superseded plans are preserved in:
 - Qualify runtime releases with the required workspace, GDB compatibility,
   AArch64, kernel, schema, SDK, and fuzz lanes. The tag-only 10,000-cycle soak
   remains useful diagnostic evidence but does not gate release packaging.
+- Back runtime performance claims with alternating baseline and candidate
+  samples built by one toolchain and run with identical state, durability,
+  storage, CPU placement, and workload. Preserve raw samples with release or CI
+  evidence so medians remain independently checkable.
 
 Canonical compatibility aliases already published in version 1 remain outside
 the default MCP catalog. Removing `agent.experiment` or
