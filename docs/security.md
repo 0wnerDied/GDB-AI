@@ -1,7 +1,9 @@
 # Security Model
 
-GDB starts with initialization, target auto-load, debuginfod, shell launch,
-and inferior function calls disabled. `gdb_evaluate side_effects=allow`
+GDB starts with initialization, target auto-load, debuginfod, and inferior
+function calls disabled. Launch uses GDB's standard shell startup with each
+`argv` value quoted literally, without variable or command expansion.
+`gdb_evaluate side_effects=allow`
 temporarily enables calls for mutation profiles. Inferiors start with a clean
 environment unless `environment_mode=inherited` selects variables named by
 the operator's `security.environment_allowlist`; request values may then

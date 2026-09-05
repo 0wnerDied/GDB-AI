@@ -268,9 +268,10 @@ The timeout covers the whole sequence. Success returns `steps_completed` and
 `written`; a missing prompt reports its zero-based `step_index`, accumulated
 write count, output cursor, and bounded observed PTY tail.
 For `gdb_session` launch, `program` names the executable and `argv` contains
-only the arguments that follow it. GDB/AI uses `program` unchanged; patch its
-interpreter and library search path before launch when a supplied runtime is
-required.
+only the arguments that follow it. Empty arguments, whitespace, quotes, and
+shell characters in `argv` are preserved literally. GDB/AI uses `program`
+unchanged; patch its interpreter and library search path before launch when
+a supplied runtime is required.
 `gdb_run` action `restart` relaunches directly to running. Use a
 first-instruction session restart only when another setup action must precede
 execution.

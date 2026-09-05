@@ -47,6 +47,15 @@ async fn local_debugging_vertical_slice() {
     }
 
     let directory = tempdir().unwrap();
+    let argv = [
+        "plain",
+        "",
+        "two words",
+        "single' double\" backslash\\",
+        "tab\tcarriage\rnewline\n",
+        "$(printf expanded) `printf expanded` $HOME *.c ; #",
+        "中文",
+    ];
     let executable = directory.path().join("vertical");
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/vertical.c");
     let compiled = Command::new("cc")
@@ -199,6 +208,7 @@ async fn local_debugging_vertical_slice() {
                     partial_signals.revision,
                     json!({
                         "program": "vertical",
+                        "argv": argv,
                         "lease_id": lease_id,
                         "cwd": directory.path(),
                         "environment": {"GDB_AI_TEST_ENV": "preserved"},
@@ -1296,6 +1306,15 @@ async fn local_debugging_vertical_slice() {
     let output = output["text"].as_str().unwrap();
     assert!(output.contains("marker reached"));
     assert!(output.contains("environment: preserved"), "{output:?}");
+    let actual_arguments: Vec<_> = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("argument: "))
+        .collect();
+    let expected_arguments: Vec<String> = argv
+        .iter()
+        .map(|argument| argument.bytes().map(|byte| format!("{byte:02x}")).collect())
+        .collect();
+    assert_eq!(actual_arguments, expected_arguments);
     let evaluated = successful(
         gateway
             .dispatch(

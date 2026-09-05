@@ -740,8 +740,6 @@ impl GdbBackend {
             .arg("-iex")
             .arg("set debuginfod enabled off")
             .arg("-iex")
-            .arg("set startup-with-shell off")
-            .arg("-iex")
             .arg("set disable-randomization off")
             .arg("-iex")
             .arg("set may-call-functions off")

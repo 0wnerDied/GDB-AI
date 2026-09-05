@@ -162,10 +162,11 @@ not divided into independent services. Stable reads retain their target-state
 guard through the complete checked dispatch; snapshot publication occurs only
 after the actor validates and atomically commits the original stop baseline.
 
-GDB starts with initialization files, target auto-load, debuginfod, shell
-launch, and inferior function calls disabled by default. Linux bubblewrap is
-disabled by default; `sandbox = "auto"` or `"required"` enables its filesystem
-and network hardening. It is not a complete sandbox. Untrusted targets require
+GDB starts with initialization files, target auto-load, debuginfod, and inferior
+function calls disabled by default. Launch uses GDB's standard shell startup
+with each argument quoted literally across supported GDB versions. Linux
+bubblewrap is disabled by default; `sandbox = "auto"` or `"required"` enables
+its filesystem and network hardening. It is not a complete sandbox. Untrusted targets require
 an external container or VM supervisor for PID/user namespaces, cgroups,
 seccomp, and stronger isolation.
 

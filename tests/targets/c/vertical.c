@@ -17,7 +17,7 @@ __attribute__((noinline)) static void report_input(int input)
   printf("input received: %c\n", input);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
   const char *environment = getenv("GDB_AI_TEST_ENV");
   int input;
@@ -26,6 +26,12 @@ int main(void)
      Leave the alarm as a final guard without racing debugger deadlines. */
   alarm(300);
   printf("environment: %s\n", environment ? environment : "unset");
+  for (int i = 1; i < argc; ++i) {
+    printf("argument: ");
+    for (const unsigned char *c = (const unsigned char *)argv[i]; *c; ++c)
+      printf("%02x", *c);
+    puts("");
+  }
   marker();
 #ifdef GDB_AI_REPEAT_MARKER
   global_value = 8;

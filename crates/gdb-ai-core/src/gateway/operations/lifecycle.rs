@@ -627,23 +627,21 @@ impl Gateway {
                 .bare("console")?
                 .string("unset environment"),
         ];
-        let mut arguments = MiCommand::new("-exec-arguments")?;
+        // 2026-09-05: GDB before 17 splits no-shell argv without unquoting,
+        // and -exec-arguments forwards MI quotes literally. Use GDB's normal
+        // shell startup with literal arguments; MI decodes only the set args
+        // command, preserving empty values, whitespace and shell characters.
+        let mut arguments = String::from("set args");
         for argument in parameters.argv {
-            // 2026-08-28: GDB 15 retains MI C-string quotes in argv when
-            // startup-with-shell is disabled. Keep simple arguments bare;
-            // newer GDB accepts that encoding and older GDB gets the exact
-            // path instead of a quoted, nonexistent one.
-            arguments = if !argument.is_empty()
-                && !argument
-                    .bytes()
-                    .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'\'' | b'"'))
-            {
-                arguments.bare(argument)?
-            } else {
-                arguments.string(argument)
-            };
+            arguments.push_str(" '");
+            arguments.push_str(&argument.replace('\'', "'\\''"));
+            arguments.push('\'');
         }
-        setup.push(arguments);
+        setup.push(
+            MiCommand::new("-interpreter-exec")?
+                .bare("console")?
+                .string(arguments),
+        );
         for (name, value) in environment {
             // 2026-09-01: GDB accepts quoted environment arguments but keeps
             // the quotes or silently leaves NAME undefined. Send one validated
