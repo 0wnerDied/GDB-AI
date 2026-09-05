@@ -40,12 +40,13 @@ and outside the default catalog.
 Keep framing and replay incremental as retained output grows, without changing
 the three-crate ownership boundaries, record limits, normalized sequence
 authority, checkpoint checks, or evidence-gap rules. Qualify these paths with
-the workspace tests and the MI framer fuzz target.
+the workspace tests and the MI framer and parser fuzz targets.
 
 Run the focused release benchmarks explicitly:
 
 ```sh
 cargo test --locked --release -p gdb-ai-mi benchmark_fragmented_records -- --ignored --nocapture
+cargo test --locked --release -p gdb-ai-mi benchmark_c_string_parsing -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-core benchmark_output_replay -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-core benchmark_raw_output_replay -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-core benchmark_large_gdb_output -- --ignored --nocapture

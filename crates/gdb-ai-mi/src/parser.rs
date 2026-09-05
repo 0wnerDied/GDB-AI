@@ -280,12 +280,29 @@ impl Parser<'_> {
         self.expect(b'"', "opening quote")?;
         let mut decoded = Vec::new();
         loop {
+            // 2026-09-06: Per-byte pushes repeatedly grew ordinary output strings.
+            // Bound plain-span scans and check decoded limits before allocation.
+            let budget = self.limits.max_decoded_string_bytes - decoded.len();
+            let remaining = &self.input[self.offset..];
+            let remaining = &remaining[..remaining.len().min(budget.saturating_add(1))];
+            let plain_len = remaining
+                .iter()
+                .position(|byte| matches!(byte, b'"' | b'\\' | b'\n' | b'\r'))
+                .unwrap_or(remaining.len());
+            if plain_len > budget {
+                return Err(MiError::Limit {
+                    kind: "decoded C-string bytes",
+                    limit: self.limits.max_decoded_string_bytes,
+                });
+            }
+            decoded.extend_from_slice(&remaining[..plain_len]);
+            self.offset += plain_len;
             let byte = self.take("closing quote")?;
             match byte {
                 b'"' => break,
                 b'\\' => self.escape(&mut decoded)?,
                 b'\n' | b'\r' => return self.unexpected("escaped newline or closing quote"),
-                byte => decoded.push(byte),
+                _ => unreachable!("plain bytes were copied above"),
             }
             if decoded.len() > self.limits.max_decoded_string_bytes {
                 return Err(MiError::Limit {
@@ -472,20 +489,84 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(
-            parse_record(b"~\"1234\"", limits),
-            Err(MiError::Limit {
-                kind: "decoded C-string bytes",
-                ..
-            })
-        ));
+        for record in [b"~\"1234\"".as_slice(), b"~\"12\\n4\"", b"~\"123\\n\""] {
+            assert!(matches!(
+                parse_record(record, limits),
+                Err(MiError::Limit {
+                    kind: "decoded C-string bytes",
+                    ..
+                })
+            ));
+        }
+        for (record, expected) in [
+            (b"~\"123\"".as_slice(), b"123".as_slice()),
+            (b"~\"12\\n\"", b"12\n"),
+            (b"~\"\\n12\"", b"\n12"),
+        ] {
+            assert_eq!(
+                parse_record(record, limits).unwrap(),
+                MiRecord::ConsoleStream(expected.to_vec())
+            );
+        }
     }
 
     #[test]
     fn rejects_trailing_or_partial_input() {
         assert!(parse_record(b"^done garbage", MiLimits::default()).is_err());
-        assert!(parse_record(b"^done,x=\"unterminated", MiLimits::default()).is_err());
+        for (input, offset, expected) in [
+            (b"~\"abc".as_slice(), 5, "closing quote"),
+            (b"~\"abc\\", 6, "C-string escape"),
+            (b"~\"abc\n\"", 6, "escaped newline or closing quote"),
+            (b"~\"abc\r\"", 6, "escaped newline or closing quote"),
+        ] {
+            assert_eq!(
+                parse_record(input, MiLimits::default()),
+                Err(MiError::Unexpected {
+                    offset,
+                    expected,
+                    found: DisplayByte(input.get(offset).copied()),
+                })
+            );
+        }
         assert!(parse_record(b"^done,x=[a=\"1\",\"mixed\"]", MiLimits::default()).is_err());
         assert!(parse_record(b"^\xff", MiLimits::default()).is_err());
+    }
+
+    #[test]
+    #[ignore = "microbenchmark: run explicitly with an optimized build"]
+    fn benchmark_c_string_parsing() {
+        for (decoded_bytes, escape_stride, records) in [
+            (64, 0, 500_000),
+            (64 * 1024, 0, 512),
+            (2 * 1024 * 1024, 0, 16),
+            (64 * 1024, 32, 512),
+        ] {
+            let bytes = (0..decoded_bytes)
+                .map(|index| {
+                    if escape_stride != 0 && (index + 1) % escape_stride == 0 {
+                        b'\n'
+                    } else {
+                        b'x'
+                    }
+                })
+                .collect::<Vec<_>>();
+            let record = format!("~{}", crate::quote_c_string(&bytes));
+            assert_eq!(parse(record.as_bytes()), MiRecord::ConsoleStream(bytes));
+            let started = std::time::Instant::now();
+            for _ in 0..records {
+                std::hint::black_box(parse_record(record.as_bytes(), MiLimits::default()).unwrap());
+            }
+            let elapsed = started.elapsed();
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "benchmark": "c_string_parsing",
+                    "decoded_bytes": decoded_bytes,
+                    "escape_stride": escape_stride,
+                    "records": records,
+                    "elapsed_ns": elapsed.as_nanos()
+                })
+            );
+        }
     }
 }
