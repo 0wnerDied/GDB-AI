@@ -197,6 +197,20 @@ jobs:
     steps:
       - name: Install compatibility prerequisites
         run: |
+          # 2026-09-05: Ubuntu's HTTP mirrors became unreachable from some
+          # runners, leaving apt with incomplete indexes. Fetch the same
+          # signed repositories over HTTPS before installing prerequisites.
+          for sources in \
+            /etc/apt/sources.list \
+            /etc/apt/sources.list.d/ubuntu.sources
+          do
+            if [ -f "$sources" ]; then
+              sed -i \
+                -e 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' \
+                -e 's|http://security.ubuntu.com|https://security.ubuntu.com|g' \
+                "$sources"
+            fi
+          done
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bison build-essential ca-certificates curl flex git \
