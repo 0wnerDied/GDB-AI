@@ -92,6 +92,10 @@ GDB stdout bytes
   -> coherent public revision and bounded event publication
 ```
 
+MI framing scans newly received bytes without rescanning an unfinished
+record's retained prefix. It retains the complete record for lossless parsing
+and applies the record-size limit before publishing it to the session actor.
+
 The PTY reader writes target output directly into its bounded ring or
 configured evidence spool. It emits coalesced high-water metadata instead of
 placing bulk bytes on the MI control queue, so a slow actor or journal cannot

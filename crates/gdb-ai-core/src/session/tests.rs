@@ -1205,3 +1205,68 @@ fn benchmark_large_state_publication() {
         20_000.0 / elapsed.as_secs_f64()
     );
 }
+
+#[tokio::test]
+#[ignore = "benchmark: run explicitly with real GDB and an optimized build"]
+async fn benchmark_large_gdb_output() {
+    assert!(crate::test_support::require_commands(&["gdb"]));
+    let directory = tempdir().unwrap();
+    let config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+    let session = SessionHandle::start(
+        Arc::new(config),
+        Profile::RawAdmin,
+        store,
+        Arc::new(Metrics::default()),
+    )
+    .await
+    .unwrap();
+    let output_bytes = 2 * 1024 * 1024;
+    let command = MiCommand::new("-interpreter-exec")
+        .unwrap()
+        .bare("console")
+        .unwrap()
+        .string(format!("printf \"%{output_bytes}s\", \"x\""));
+    let mut elapsed = Duration::ZERO;
+    for _ in 0..4 {
+        let started = std::time::Instant::now();
+        let reply = session.command(command.clone()).await.unwrap();
+        elapsed += started.elapsed();
+        assert!(!reply.stream_truncated);
+        let output = reply
+            .stream_records
+            .iter()
+            .filter_map(|record| match record {
+                MiRecord::ConsoleStream(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(output.len(), output_bytes);
+        assert_eq!(output.last(), Some(&b'x'));
+        assert!(output[..output_bytes - 1].iter().all(|byte| *byte == b' '));
+    }
+    session.close().await.unwrap();
+    let report = crate::replay::replay(session.journal_path(), session.id().clone()).unwrap();
+    assert!(report.complete);
+    assert!(report.evidence_gap.is_none());
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "benchmark": "large_gdb_output",
+            "output_bytes": output_bytes,
+            "commands": 4,
+            "elapsed_ns": elapsed.as_nanos()
+        })
+    );
+}
