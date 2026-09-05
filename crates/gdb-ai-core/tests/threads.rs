@@ -75,7 +75,7 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
     let caller = Caller::local("deadlock-test");
     let created = successful(
         gateway
-            .dispatch(
+            .dispatch_agent(
                 request("create", None, "session.create", None, json!({})),
                 &caller,
             )
@@ -83,12 +83,8 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
     );
     let session = created.session_id.unwrap();
     let call = async |id: &str, method: &str, parameters: Value| {
-        let mut request = request(id, Some(&session), method, None, parameters);
-        gateway
-            .prepare_agent_request(&mut request, &caller)
-            .await
-            .unwrap();
-        gateway.dispatch(request, &caller).await
+        let request = request(id, Some(&session), method, None, parameters);
+        gateway.dispatch_agent(request, &caller).await
     };
     successful(
         call(

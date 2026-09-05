@@ -5,35 +5,37 @@ use super::*;
 use crate::config::{ArtifactConfig, PersistenceConfig};
 
 #[tokio::test]
-async fn expired_lease_keeps_owner_cleanup_reachable() {
+async fn controllers_preserve_agent_ownership_and_canonical_lease_expiry() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
+    let sqlite = directory.path().join("state.sqlite");
     let mut config = Config {
         artifacts: ArtifactConfig {
             path: directory.path().join("artifacts"),
         },
         persistence: PersistenceConfig {
-            sqlite: directory.path().join("state.sqlite"),
+            sqlite: sqlite.clone(),
             sessions: directory.path().join("sessions"),
         },
         ..Config::default()
     };
     config.server.write_lease_ms = 1;
     let gateway = Gateway::new(config).unwrap();
-    let caller = Caller::local("lease-test");
+    let caller = Caller::local("lease-test/mcp:owner");
+    let request = |id: &str, session_id: Option<&str>, method, parameters| ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: id.into(),
+        session_id: session_id.map(str::to_owned),
+        method,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters,
+    };
     let created = gateway
         .dispatch(
-            ApiRequest {
-                api_version: API_VERSION.into(),
-                request_id: "create".into(),
-                session_id: None,
-                method: crate::protocol::CanonicalMethod::SessionCreate,
-                expected_revision: None,
-                idempotency_key: None,
-                parameters: json!({}),
-            },
+            request("create", None, CanonicalMethod::SessionCreate, json!({})),
             &caller,
         )
         .await;
@@ -44,20 +46,16 @@ async fn expired_lease_keeps_owner_cleanup_reachable() {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let rejected = gateway
         .dispatch(
-            ApiRequest {
-                api_version: API_VERSION.into(),
-                request_id: "close".into(),
-                session_id: Some(session_id.clone()),
-                method: crate::protocol::CanonicalMethod::SessionClose,
-                expected_revision: created.revision,
-                idempotency_key: None,
-                parameters: json!({"lease_id": lease_id}),
-            },
+            request(
+                "close",
+                Some(&session_id),
+                CanonicalMethod::SessionClose,
+                json!({"lease_id": lease_id, "accept_latest_revision": true}),
+            ),
             &caller,
         )
         .await;
     assert_eq!(rejected.error.unwrap().code, ErrorCode::WriteLeaseExpired);
-
     gateway
         .entry(&session_id)
         .await
@@ -68,52 +66,147 @@ async fn expired_lease_keeps_owner_cleanup_reachable() {
         .unwrap();
     let renewed = gateway
         .dispatch(
-            ApiRequest {
-                api_version: API_VERSION.into(),
-                request_id: "renew-unknown".into(),
-                session_id: Some(session_id.clone()),
-                method: crate::protocol::CanonicalMethod::SessionAcquireWriteLease,
-                expected_revision: None,
-                idempotency_key: None,
-                parameters: json!({"accept_latest_revision": true}),
-            },
+            request(
+                "renew-unknown",
+                Some(&session_id),
+                CanonicalMethod::SessionAcquireWriteLease,
+                json!({"accept_latest_revision": true}),
+            ),
             &caller,
         )
         .await;
     assert!(renewed.error.is_none(), "{:?}", renewed.error);
-
     let denied = gateway
         .dispatch(
-            ApiRequest {
-                api_version: API_VERSION.into(),
-                request_id: "foreign-abort".into(),
-                session_id: Some(session_id.clone()),
-                method: crate::protocol::CanonicalMethod::SessionForceAbort,
-                expected_revision: None,
-                idempotency_key: None,
-                parameters: json!({}),
-            },
+            request(
+                "foreign-abort",
+                Some(&session_id),
+                CanonicalMethod::SessionForceAbort,
+                json!({}),
+            ),
             &Caller::local("different-owner"),
         )
         .await;
     assert_eq!(denied.error.unwrap().code, ErrorCode::PolicyDenied);
-
     let aborted = gateway
         .dispatch(
-            ApiRequest {
-                api_version: API_VERSION.into(),
-                request_id: "force-abort".into(),
-                session_id: Some(session_id),
-                method: crate::protocol::CanonicalMethod::SessionForceAbort,
-                expected_revision: None,
-                idempotency_key: None,
-                parameters: json!({}),
-            },
+            request(
+                "force-abort",
+                Some(&session_id),
+                CanonicalMethod::SessionForceAbort,
+                json!({}),
+            ),
             &caller,
         )
         .await;
     assert!(aborted.error.is_none(), "{:?}", aborted.error);
     assert_eq!(aborted.result.unwrap()["clean_shutdown"], false);
+
+    let connection = rusqlite::Connection::open(sqlite).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_agent_lease BEFORE INSERT ON leases
+         BEGIN SELECT RAISE(ABORT, 'Agent must not create a lease'); END;",
+        )
+        .unwrap();
+    let created = gateway
+        .dispatch_agent(
+            request(
+                "agent-create",
+                None,
+                CanonicalMethod::SessionCreate,
+                json!({}),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(created.error.is_none(), "{:?}", created.error);
+    assert!(
+        created
+            .result
+            .as_ref()
+            .unwrap()
+            .get("write_lease")
+            .is_none()
+    );
+    let session_id = created.session_id.unwrap();
+    let other = Caller::local("lease-test/mcp:other");
+    let denied = gateway
+        .dispatch_agent(
+            request(
+                "foreign-resize",
+                Some(&session_id),
+                CanonicalMethod::InferiorIoResize,
+                json!({"rows": 24, "columns": 80}),
+            ),
+            &other,
+        )
+        .await;
+    assert_eq!(denied.error.unwrap().code, ErrorCode::WriteLeaseRequired);
+    let denied = gateway
+        .dispatch(
+            request(
+                "foreign-acquire",
+                Some(&session_id),
+                CanonicalMethod::SessionAcquireWriteLease,
+                json!({"accept_latest_revision": true}),
+            ),
+            &other,
+        )
+        .await;
+    assert_eq!(denied.error.unwrap().code, ErrorCode::Conflict);
+    let resized = gateway
+        .dispatch_agent(
+            request(
+                "agent-resize",
+                Some(&session_id),
+                CanonicalMethod::InferiorIoResize,
+                json!({"rows": 24, "columns": 80}),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(resized.error.is_none(), "{:?}", resized.error);
+    connection
+        .execute_batch("DROP TRIGGER reject_agent_lease;")
+        .unwrap();
+    let transferred = gateway
+        .dispatch(
+            request(
+                "agent-acquire",
+                Some(&session_id),
+                CanonicalMethod::SessionAcquireWriteLease,
+                json!({"accept_latest_revision": true}),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(transferred.error.is_none(), "{:?}", transferred.error);
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let expired = gateway
+        .dispatch_agent(
+            request(
+                "agent-close",
+                Some(&session_id),
+                CanonicalMethod::SessionClose,
+                json!({}),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(expired.error.unwrap().code, ErrorCode::WriteLeaseExpired);
+    let aborted = gateway
+        .dispatch_agent(
+            request(
+                "agent-abort",
+                Some(&session_id),
+                CanonicalMethod::SessionForceAbort,
+                json!({}),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(aborted.error.is_none(), "{:?}", aborted.error);
     assert!(gateway.sessions.read().await.is_empty());
 }
 
@@ -154,8 +247,10 @@ async fn active_owner_mutation_refreshes_lease_near_half_life() {
     let entry = gateway.entry(&session_id).await.unwrap();
     let shortened_expiry = now_unix_ms().saturating_add(1_000);
     let lease_id = {
-        let mut lease = entry.lease.lock().await;
-        let lease = lease.as_mut().unwrap();
+        let mut controller = entry.controller.lock().await;
+        let Some(Controller::Lease(lease)) = controller.as_mut() else {
+            panic!("canonical lease missing")
+        };
         lease.expires_at_unix_ms = shortened_expiry;
         lease.lease_id.0.clone()
     };
@@ -174,19 +269,14 @@ async fn active_owner_mutation_refreshes_lease_near_half_life() {
             &caller,
             &entry,
             &state,
+            RequestMode::Canonical,
         )
         .await
         .unwrap();
-    assert!(
-        entry
-            .lease
-            .lock()
-            .await
-            .as_ref()
-            .unwrap()
-            .expires_at_unix_ms
-            > shortened_expiry
-    );
+    assert!(matches!(
+        entry.controller.lock().await.as_ref(),
+        Some(Controller::Lease(lease)) if lease.expires_at_unix_ms > shortened_expiry
+    ));
 
     let aborted = gateway
         .dispatch(
@@ -239,7 +329,7 @@ async fn lost_session_recovery_does_not_require_a_business_lease() {
         .await;
     let session_id = created.session_id.unwrap();
     let entry = gateway.entry(&session_id).await.unwrap();
-    entry.lease.lock().await.take();
+    entry.controller.lock().await.take();
     gateway.store.delete_lease(entry.handle.id()).unwrap();
     entry
         .handle
@@ -504,11 +594,45 @@ async fn failed_lease_release_keeps_the_live_lease() {
             .entry(&session_id)
             .await
             .unwrap()
-            .lease
+            .controller
             .lock()
             .await
             .is_some()
     );
+    let replacement = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "replace-lease".into(),
+                session_id: Some(session_id.clone()),
+                method: CanonicalMethod::SessionAcquireWriteLease,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({"accept_latest_revision": true}),
+            },
+            &caller,
+        )
+        .await;
+    assert!(replacement.error.is_none(), "{:?}", replacement.error);
+    let stale_release = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "stale-release".into(),
+                session_id: Some(session_id),
+                method: CanonicalMethod::SessionReleaseWriteLease,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({"lease_id": lease_id, "accept_latest_revision": true}),
+            },
+            &caller,
+        )
+        .await;
+    assert_eq!(
+        stale_release.error.unwrap().code,
+        ErrorCode::WriteLeaseRequired
+    );
+    assert_ne!(replacement.result.unwrap()["lease_id"], lease_id);
     gateway.shutdown().await;
 }
 

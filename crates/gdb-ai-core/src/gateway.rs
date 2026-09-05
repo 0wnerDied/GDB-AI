@@ -36,6 +36,12 @@ pub struct Caller {
     pub admin: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestMode {
+    Canonical,
+    Agent,
+}
+
 impl Caller {
     pub fn local(identity: impl Into<String>) -> Self {
         Self {
@@ -45,13 +51,18 @@ impl Caller {
     }
 }
 
+enum Controller {
+    Agent(String),
+    Lease(WriteLease),
+}
+
 struct SessionEntry {
     handle: SessionHandle,
     slot: Mutex<Option<OwnedSemaphorePermit>>,
     owner: String,
     target_state: tokio::sync::RwLock<()>,
     out_of_band_mutation: Mutex<()>,
-    lease: Mutex<Option<WriteLease>>,
+    controller: Mutex<Option<Controller>>,
     lease_generation: AtomicU64,
 }
 
@@ -165,15 +176,22 @@ impl Gateway {
     }
 
     pub async fn dispatch(&self, request: ApiRequest, caller: &Caller) -> ApiResponse {
-        self.dispatch_inner(request, caller, false).await
+        self.dispatch_inner(request, caller, false, RequestMode::Canonical)
+            .await
+    }
+
+    pub async fn dispatch_agent(&self, request: ApiRequest, caller: &Caller) -> ApiResponse {
+        self.dispatch_inner(request, caller, false, RequestMode::Agent)
+            .await
     }
 
     pub(super) async fn dispatch_admitted(
         &self,
         request: ApiRequest,
         caller: &Caller,
+        mode: RequestMode,
     ) -> ApiResponse {
-        self.dispatch_inner(request, caller, true).await
+        self.dispatch_inner(request, caller, true, mode).await
     }
 
     async fn dispatch_inner(
@@ -181,6 +199,7 @@ impl Gateway {
         request: ApiRequest,
         caller: &Caller,
         admitted: bool,
+        mode: RequestMode,
     ) -> ApiResponse {
         tracing::debug!(
             caller = %caller.identity,
@@ -191,10 +210,15 @@ impl Gateway {
         );
         // 2026-08-28: Caching only completed responses let concurrent retries
         // execute the same mutation twice. Serialize each live idempotency key.
-        let retry_key = request
-            .idempotency_key
-            .as_ref()
-            .map(|_| idempotency_key(&request, caller));
+        let retry_key = request.idempotency_key.as_ref().map(|_| {
+            let key = idempotency_key(&request, caller);
+            // 2026-09-05: Canonical and Agent creates choose different
+            // controllers; a retry must not reuse the other API's result.
+            match mode {
+                RequestMode::Canonical => key,
+                RequestMode::Agent => format!("agent:{key}"),
+            }
+        });
         let retry_hash = retry_key
             .as_ref()
             .map(|_| idempotency_fingerprint(&request));
@@ -264,7 +288,9 @@ impl Gateway {
         // state. Retain the cheap session entry and clone state only on error
         // instead of copying growing registries before every Agent request.
         let initial_entry = self.entry_for_request(&request).await;
-        let result = self.dispatch_checked(&request, caller, admitted).await;
+        let result = self
+            .dispatch_checked(&request, caller, admitted, mode)
+            .await;
         let mut response = match result {
             Ok((state, result, warnings)) => {
                 let mut response = ApiResponse::success(&request, state, result);
@@ -286,7 +312,7 @@ impl Gateway {
         self.bound_response(&request, &mut response);
 
         if request.idempotency_key.is_some() {
-            let key = idempotency_key(&request, caller);
+            let key = retry_key.as_ref().unwrap().clone();
             let request_hash = retry_hash.unwrap_or_else(|| idempotency_fingerprint(&request));
             if let Err(error) = self
                 .store
@@ -333,6 +359,7 @@ impl Gateway {
         request: &ApiRequest,
         caller: &Caller,
         admitted: bool,
+        mode: RequestMode,
     ) -> Result<(Option<crate::domain::SessionState>, Value, Vec<Warning>)> {
         // 2026-08-30: Canonical MCP operations are fully validated before
         // admission. Avoid repeating schema and request-size traversal when
@@ -551,7 +578,7 @@ impl Gateway {
             }
             if effect != Effect::Read
                 && let Err(error) = self
-                    .require_mutation_preconditions(request, caller, entry, &state)
+                    .require_mutation_preconditions(request, caller, entry, &state, mode)
                     .await
             {
                 // 2026-08-28: Lease and revision rejections previously
@@ -601,7 +628,7 @@ impl Gateway {
 
         // 2026-09-05: Inlining the operation future throughout dispatch
         // overflowed default thread stacks. Heap-pin it at the shared boundary.
-        let mut result = Box::pin(self.execute_method(request, caller)).await;
+        let mut result = Box::pin(self.execute_method(request, caller, mode)).await;
         if result.is_ok()
             && let (Some(entry), Some((stop_id, execution_epoch))) = (&entry, observation_baseline)
         {
@@ -775,6 +802,7 @@ impl Gateway {
         caller: &Caller,
         entry: &SessionEntry,
         state: &crate::domain::SessionState,
+        mode: RequestMode,
     ) -> Result<()> {
         // 2026-08-29: Recovery and forced cleanup reused the expiring business
         // lease, leaving an owner unable to govern a LOST session. Ownership
@@ -786,111 +814,68 @@ impl Gateway {
         ) {
             return Ok(());
         }
-        if let Some(expected) = request.expected_revision {
-            state.require_revision(expected)?;
-        } else if request
-            .parameters
-            .get("accept_latest_revision")
-            .and_then(Value::as_bool)
-            != Some(true)
-        {
-            return Err(Error::new(
-                ErrorCode::StaleRevision,
-                "mutation requires expected_revision or accept_latest_revision=true",
-            ));
+        if mode == RequestMode::Canonical {
+            if let Some(expected) = request.expected_revision {
+                state.require_revision(expected)?;
+            } else if request
+                .parameters
+                .get("accept_latest_revision")
+                .and_then(Value::as_bool)
+                != Some(true)
+            {
+                return Err(Error::new(
+                    ErrorCode::StaleRevision,
+                    "mutation requires expected_revision or accept_latest_revision=true",
+                ));
+            }
         }
         if request.method == "session.acquire_write_lease" {
             return Ok(());
         }
-        let lease_id = request
-            .parameters
-            .get("lease_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                Error::new(ErrorCode::WriteLeaseRequired, "mutation requires lease_id")
-            })?;
+        let mut controller = entry.controller.lock().await;
+        // 2026-09-05: MCP rewrote revisions and persisted renewable leases
+        // before checking them again. Its fixed caller controller needs only
+        // ownership; the existing target/control locks still order mutations.
+        let lease = match controller.as_mut() {
+            Some(Controller::Agent(owner))
+                if mode == RequestMode::Agent && owner == &caller.identity =>
+            {
+                return Ok(());
+            }
+            Some(Controller::Lease(lease)) => lease,
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::WriteLeaseRequired,
+                    "caller does not hold the required session controller",
+                ));
+            }
+        };
         let now = now_unix_ms();
-        let mut lease = entry.lease.lock().await;
-        let lease = lease.as_mut().ok_or_else(|| {
-            Error::new(
-                ErrorCode::WriteLeaseRequired,
-                "session has no active write lease",
-            )
-        })?;
         if lease.is_expired(now) {
             return Err(Error::new(
                 ErrorCode::WriteLeaseExpired,
                 "write lease has expired",
             ));
         }
-        if lease.lease_id.0 != lease_id || lease.owner != caller.identity {
+        if lease.owner != caller.identity
+            || (mode == RequestMode::Canonical
+                && request.parameters.get("lease_id").and_then(Value::as_str)
+                    != Some(lease.lease_id.0.as_str()))
+        {
             return Err(Error::new(
                 ErrorCode::WriteLeaseRequired,
                 "write lease does not belong to this caller",
             ));
         }
         let lease_ms = self.config.server.write_lease_ms.max(1);
-        if lease.expires_at_unix_ms.saturating_sub(now) <= lease_ms / 2 {
-            // 2026-08-31: Fixed-expiry leases forced active Agents to acquire
-            // a new controller token throughout long exploit loops. Refresh
-            // only near half-life so abandoned controllers still expire and
-            // active mutations do not add a persistence write each time.
+        if mode == RequestMode::Canonical
+            && lease.expires_at_unix_ms.saturating_sub(now) <= lease_ms / 2
+        {
+            // 2026-08-31: Refresh active canonical leases near half-life so
+            // abandoned controllers expire without writing every mutation.
             lease.expires_at_unix_ms = now.saturating_add(lease_ms);
             self.store.upsert_lease(lease)?;
         }
-        Ok(())
-    }
-
-    pub async fn prepare_agent_request(
-        &self,
-        request: &mut ApiRequest,
-        caller: &Caller,
-    ) -> Result<()> {
-        if effect_for_request(request) == Effect::Read || !request.method.requires_session() {
-            return Ok(());
-        }
-        request.expected_revision = None;
-        let parameters = request.parameters.as_object_mut().ok_or_else(|| {
-            Error::new(ErrorCode::InvalidArgument, "parameters must be an object")
-        })?;
-        parameters.insert("accept_latest_revision".into(), Value::Bool(true));
-        if matches!(
-            request.method,
-            crate::protocol::CanonicalMethod::SessionForceAbort
-                | crate::protocol::CanonicalMethod::SessionAttemptRecovery
-                | crate::protocol::CanonicalMethod::SessionAcquireWriteLease
-        ) {
-            return Ok(());
-        }
-
-        let session_id = request
-            .session_id
-            .as_deref()
-            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "method requires session_id"))?;
-        let entry = self.entry(session_id).await?;
-        let now = now_unix_ms();
-        let mut lease = entry.lease.lock().await;
-        let lease = lease.as_mut().ok_or_else(|| {
-            Error::new(
-                ErrorCode::WriteLeaseRequired,
-                "session has no active write lease",
-            )
-        })?;
-        if lease.owner != caller.identity {
-            return Err(Error::new(
-                ErrorCode::WriteLeaseRequired,
-                "another Agent controls this session",
-            ));
-        }
-        if lease.is_expired(now) {
-            // 2026-08-31: Exposing transport lease expiry made Agents spend
-            // context on coordination unrelated to debugging. The projected
-            // interface revives its own controller while core mutations still
-            // serialize and stop-scoped handles still reject stale context.
-            lease.expires_at_unix_ms = now.saturating_add(self.config.server.write_lease_ms.max(1));
-            self.store.upsert_lease(lease)?;
-        }
-        parameters.insert("lease_id".into(), Value::String(lease.lease_id.0.clone()));
         Ok(())
     }
 
@@ -909,11 +894,14 @@ impl Gateway {
     async fn retire_session(&self, session_id: &str, entry: &Arc<SessionEntry>) -> Option<String> {
         // 2026-08-30: Metadata cleanup failure must not retain a terminated
         // process in the live registry.
-        let lease_warning = self
-            .store
-            .delete_lease(entry.handle.id())
-            .err()
-            .map(|error| error.to_string());
+        let lease_warning = match entry.controller.lock().await.take() {
+            Some(Controller::Lease(_)) => self
+                .store
+                .delete_lease(entry.handle.id())
+                .err()
+                .map(|error| error.to_string()),
+            _ => None,
+        };
         let (retired, live_sessions) = {
             let mut sessions = self.sessions.write().await;
             let retired = sessions

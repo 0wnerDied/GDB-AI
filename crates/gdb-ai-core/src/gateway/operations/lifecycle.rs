@@ -18,7 +18,9 @@ use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
     domain::{DomainEvent, LeaseId, SessionId, StopReason, TargetOrigin, WaitBaseline, WriteLease},
-    gateway::{Caller, Gateway, SessionEntry, now_unix_ms, same_principal},
+    gateway::{
+        Caller, Controller, Gateway, RequestMode, SessionEntry, now_unix_ms, same_principal,
+    },
     policy::Profile,
     protocol::ApiRequest,
     session::SessionHandle,
@@ -29,6 +31,7 @@ impl Gateway {
         &self,
         request: &ApiRequest,
         caller: &Caller,
+        mode: RequestMode,
     ) -> Result<Value> {
         // 2026-08-30: A global mutex covered the complete GDB handshake and
         // serialized independent Agent sessions. A read gate only coordinates
@@ -72,18 +75,22 @@ impl Gateway {
         )
         .await?;
         let id = handle.id().clone();
-        let lease = WriteLease {
+        let lease = (mode == RequestMode::Canonical).then(|| WriteLease {
             lease_id: LeaseId::new(),
             session_id: id.clone(),
             owner: caller.identity.clone(),
             expires_at_unix_ms: now_unix_ms()
                 .saturating_add(self.config.server.write_lease_ms.max(1)),
             generation: 1,
-        };
+        });
         if let Err(error) = self
             .store
             .set_session_owner(&id, &caller.identity)
-            .and_then(|()| self.store.upsert_lease(&lease))
+            .and_then(|()| {
+                lease
+                    .as_ref()
+                    .map_or(Ok(()), |lease| self.store.upsert_lease(lease))
+            })
         {
             let _ = handle.close().await;
             return Err(error);
@@ -94,8 +101,11 @@ impl Gateway {
             owner: caller.identity.clone(),
             target_state: tokio::sync::RwLock::new(()),
             out_of_band_mutation: tokio::sync::Mutex::new(()),
-            lease: tokio::sync::Mutex::new(Some(lease.clone())),
-            lease_generation: std::sync::atomic::AtomicU64::new(1),
+            controller: tokio::sync::Mutex::new(Some(match lease.clone() {
+                Some(lease) => Controller::Lease(lease),
+                None => Controller::Agent(caller.identity.clone()),
+            })),
+            lease_generation: std::sync::atomic::AtomicU64::new(u64::from(lease.is_some())),
         });
         self.sessions
             .write()
@@ -105,15 +115,18 @@ impl Gateway {
             .handle
             .record_api(serde_json::to_value(request)?)
             .await?;
-        Ok(json!({
+        let mut result = json!({
             "session_id": id,
             "resource": format!("gdbai://session/{}/status", id.0),
             "state": entry.handle.state(),
             "backend": entry.handle.capabilities().backend,
             "profile": profile,
-            "write_lease": lease,
             "capabilities": entry.handle.capabilities(),
-        }))
+        });
+        if let Some(lease) = lease {
+            result["write_lease"] = serde_json::to_value(lease)?;
+        }
+        Ok(result)
     }
 
     pub(super) async fn session_acquire_write_lease(
@@ -123,16 +136,20 @@ impl Gateway {
     ) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
         let now = now_unix_ms();
-        let mut current = entry.lease.lock().await;
+        let mut current = entry.controller.lock().await;
         let force =
             request.parameters.get("force").and_then(Value::as_bool) == Some(true) && caller.admin;
-        if current
-            .as_ref()
-            .is_some_and(|lease| !lease.is_expired(now) && lease.owner != caller.identity && !force)
-        {
+        let held_by_other = match current.as_ref() {
+            Some(Controller::Agent(owner)) => owner != &caller.identity,
+            Some(Controller::Lease(lease)) => {
+                !lease.is_expired(now) && lease.owner != caller.identity
+            }
+            None => false,
+        };
+        if held_by_other && !force {
             return Err(Error::new(
                 ErrorCode::Conflict,
-                "another caller holds the write lease",
+                "another caller holds session control",
             ));
         }
         let generation = entry.lease_generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -144,7 +161,7 @@ impl Gateway {
             generation,
         };
         self.store.upsert_lease(&lease)?;
-        current.replace(lease.clone());
+        current.replace(Controller::Lease(lease.clone()));
         drop(current);
         entry
             .handle
@@ -155,18 +172,36 @@ impl Gateway {
         Ok(serde_json::to_value(lease)?)
     }
 
-    pub(super) async fn session_release_write_lease(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn session_release_write_lease(
+        &self,
+        request: &ApiRequest,
+        caller: &Caller,
+    ) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
         // 2026-08-30: Removing memory state before durable state let a
         // concurrent acquire persist a new lease that this old release then
         // deleted. Keep both changes under the one lease serialization point.
         let released = {
-            let mut current = entry.lease.lock().await;
-            let released = current
-                .as_ref()
-                .cloned()
-                .ok_or_else(|| Error::new(ErrorCode::NotFound, "write lease not found"))?;
+            let mut current = entry.controller.lock().await;
+            let Some(Controller::Lease(lease)) = current.as_ref() else {
+                return Err(Error::new(ErrorCode::NotFound, "write lease not found"));
+            };
+            // 2026-09-05: Acquire can transfer control after admission. Recheck
+            // under the controller lock so an old release cannot delete it.
+            if lease.owner != caller.identity
+                || request
+                    .parameters
+                    .get("lease_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id != lease.lease_id.0)
+            {
+                return Err(Error::new(
+                    ErrorCode::WriteLeaseRequired,
+                    "write lease changed before release",
+                ));
+            }
             self.store.delete_lease(entry.handle.id())?;
+            let released = lease.lease_id.clone();
             current.take();
             released
         };
@@ -176,7 +211,7 @@ impl Gateway {
                 kind: "write_lease_released".into(),
             })
             .await?;
-        Ok(json!({ "released": released.lease_id }))
+        Ok(json!({ "released": released }))
     }
 
     pub(super) async fn session_attempt_recovery(&self, request: &ApiRequest) -> Result<Value> {

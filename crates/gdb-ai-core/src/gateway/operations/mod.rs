@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::{
     Result,
-    gateway::{Caller, Gateway},
+    gateway::{Caller, Gateway, RequestMode},
     protocol::{ApiRequest, CanonicalMethod},
 };
 
@@ -30,9 +30,10 @@ impl Gateway {
         &self,
         request: &ApiRequest,
         caller: &Caller,
+        mode: RequestMode,
     ) -> Result<Value> {
         match request.method {
-            CanonicalMethod::SessionCreate => self.session_create(request, caller).await,
+            CanonicalMethod::SessionCreate => self.session_create(request, caller, mode).await,
             CanonicalMethod::SessionGet => self.session_get(request).await,
             CanonicalMethod::SessionList => self.session_list(caller).await,
             CanonicalMethod::SessionClose => self.session_close(request).await,
@@ -41,7 +42,7 @@ impl Gateway {
                 self.session_acquire_write_lease(request, caller).await
             }
             CanonicalMethod::SessionReleaseWriteLease => {
-                self.session_release_write_lease(request).await
+                self.session_release_write_lease(request, caller).await
             }
             CanonicalMethod::SessionAttemptRecovery => self.session_attempt_recovery(request).await,
             CanonicalMethod::SessionCapabilities => Ok(serde_json::to_value(

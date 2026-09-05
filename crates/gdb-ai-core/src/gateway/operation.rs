@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, watch};
 
-use super::{Caller, Gateway, now_unix_ms, same_principal};
+use super::{Caller, Gateway, RequestMode, now_unix_ms, same_principal};
 use crate::{
     Error, ErrorCode, Result,
     domain::OperationId,
@@ -160,6 +160,17 @@ impl Gateway {
         caller: Caller,
         waiter_timeout: Option<Duration>,
     ) -> Result<OperationTicket> {
+        self.admit_operation_with_mode(request, caller, waiter_timeout, RequestMode::Canonical)
+            .await
+    }
+
+    pub async fn admit_operation_with_mode(
+        self: &Arc<Self>,
+        request: ApiRequest,
+        caller: Caller,
+        waiter_timeout: Option<Duration>,
+        mode: RequestMode,
+    ) -> Result<OperationTicket> {
         self.validate_request(&request)?;
         let coordination = self.entry_for_request(&request).await.map(|entry| {
             entry
@@ -225,7 +236,7 @@ impl Gateway {
             }
             let dispatch = tokio::spawn(crate::session::scope_operation(
                 active_operation,
-                async move { gateway.dispatch_admitted(request, &caller).await },
+                async move { gateway.dispatch_admitted(request, &caller, mode).await },
             ));
             let response = match dispatch.await {
                 Ok(response) => response,

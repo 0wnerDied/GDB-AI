@@ -54,7 +54,7 @@ that every Agent frontend would otherwise need to implement:
 | Context | Track selected inferior, thread, and frame | Explicit, stale-checked handles |
 | Target I/O | Configure and drain target streams | Dedicated bounded PTY and separate MI control |
 | Large results | Add limits and storage per command | Pagination, quotas, and content-addressed artifacts |
-| Safety | Build policy around every mutation | Profiles, leases, revisions, audit, and reconciliation |
+| Agent coordination | Track controller and stop changes | Fixed MCP caller control and explicit stop handles |
 
 The repository is independently versioned as `gdb-ai`; the executable is
 `gdb-ai`, the current protocol namespace is `gdb.ai/v1`, and resources use
@@ -220,9 +220,9 @@ If the command fails after producing output, those streams remain available
 in `error.details`.
 
 Canonical mutations require the current revision and write lease. Valid owner
-mutations refresh the lease near half-life. Projected MCP tools keep that
-transport coordination server-side: Agents send the `session_id`, but no lease
-or revision. A stop-scoped call without `stop_id` binds to the current stop;
+mutations refresh the lease near half-life. MCP-created sessions use fixed
+caller control without lease persistence, expiration, or renewal. Agents send
+the `session_id`, but no lease or revision. A stop-scoped call without `stop_id` binds to the current stop;
 provide a returned `stop_id` only when later calls must reject a newer stop.
 Projected continue and step actions wait for the next stop or exit by default;
 request `accepted` or `running` only for asynchronous interaction. Starting

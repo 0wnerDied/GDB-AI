@@ -29,7 +29,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "tools/list",
         "argv",
         "first_instruction only for pre-run setup",
-        "MCP manages leases and revisions",
+        "MCP keeps caller control without lease renewal",
         "stop_id",
         "byte-exact PTY",
         "stop/exit after continue or step when wait is omitted",
@@ -324,7 +324,7 @@ fn current_stop_binding_matches_canonical_context() {
 }
 
 #[tokio::test]
-async fn projected_tools_hide_and_recover_mutation_coordination() {
+async fn projected_tools_keep_control_without_lease_renewal() {
     if std::process::Command::new("gdb")
         .arg("--version")
         .output()
@@ -344,10 +344,7 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
         ..Config::default()
     };
     config.security.workspace_roots = vec![std::path::PathBuf::from("/")];
-    // 2026-09-01: A 1 ms recovered lease could expire again between the
-    // projected preflight and dispatch on a loaded CI runner. Keep expiry
-    // deliberate while leaving the mutation itself a bounded scheduling window.
-    config.server.write_lease_ms = 1_000;
+    config.server.write_lease_ms = 1;
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller::local("projected-coordination-test");
     let sequence = AtomicU64::new(1);
@@ -492,7 +489,6 @@ async fn projected_tools_hide_and_recover_mutation_coordination() {
     assert!(result["observations"]["stack"].is_object());
     assert!(result.get("operation").is_none());
 
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
     let closed = call_tool(
         &gateway,
         &caller,

@@ -10,9 +10,17 @@ Without an explicit config, persistent state lives under
 without either variable should configure absolute artifact, SQLite, and
 session paths instead of relying on the process-scoped temporary fallback.
 
-The canonical API returns an expiring write lease. A valid owner mutation
-refreshes it near half-life; after inactivity, renew it with
-`session.acquire_write_lease`. Projected MCP tools manage this internally.
+MCP-created sessions keep control with their caller identity until close or
+an explicit transfer; they do not create, expire, or renew write leases.
+Other callers may observe within the same principal's access rights but
+cannot take this control by waiting for a timeout.
+
+The canonical API retains expiring write leases and revision checks. A valid
+canonical owner mutation refreshes its lease near half-life; after inactivity,
+renew it with `session.acquire_write_lease`. That operation also lets the
+current MCP controller switch to a canonical lease. Transferring control from
+another active caller requires administrative `force=true`. Projected calls
+on a session explicitly using a canonical lease retain its expiration rules.
 Expiration never interrupts a running target. If consistency is lost, the
 session owner can attempt recovery or use `gdb_session` action `force_abort`.
 Forced abort terminates resources without claiming a clean debugger shutdown.

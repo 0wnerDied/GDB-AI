@@ -100,8 +100,7 @@ impl RpcFault {
 // loader and immediately continued. Distinguish one-time setup from a direct
 // exploit-trial relaunch in the Agent instructions.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; launch; argv \
-excludes program; patch the interpreter/library path before launch when needed; launch uses the program unchanged; use first_instruction only for pre-run setup. MCP manages leases and \
-revisions. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
+excludes program; patch the interpreter/library path before launch when needed; launch uses the program unchanged; use first_instruction only for pre-run setup. MCP keeps caller control without lease renewal. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
 stop/exit after continue or step when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
 accepted/running only for later I/O. Use gdb_io write steps with wait_for for prompt-driven \
 menus. Reuse the session; gdb_run restart relaunches directly, while gdb_probe restart=true replaces separate restart/continue before arming, batches input or starts trigger.command after arming and returns its bounded stdout/stderr, skips ignore_count hits, and captures memory plus inspect views; continue_to_stop moves those views to the next crash/exit. Use gdb_batch for other current-stop views and gdb_inspect view=crash \
@@ -328,11 +327,14 @@ async fn dispatch_rpc(
     method: &str,
     mut params: Value,
 ) -> Result<Value, RpcFault> {
-    if let Some((mut request, presentation)) =
+    if let Some((request, presentation)) =
         canonical_rpc_request(method, &mut params, advanced_tools, caller.admin, sequence)?
     {
-        prepare_canonical_request(gateway, caller, &mut request, presentation).await?;
-        return present_canonical_response(gateway.dispatch(request, caller).await, presentation);
+        let response = match presentation {
+            CanonicalPresentation::Tool(_) => gateway.dispatch_agent(request, caller).await,
+            CanonicalPresentation::Envelope => gateway.dispatch(request, caller).await,
+        };
+        return present_canonical_response(response, presentation);
     }
     match method {
         "ping" => Ok(json!({})),
@@ -417,13 +419,16 @@ fn present_canonical_response(
 async fn admit_canonical_operation(
     gateway: Arc<Gateway>,
     caller: Caller,
-    mut request: ApiRequest,
+    request: ApiRequest,
     presentation: CanonicalPresentation,
     waiter_timeout: Option<Duration>,
 ) -> Result<(String, JoinHandle<Result<Value, RpcFault>>), RpcFault> {
-    prepare_canonical_request(&gateway, &caller, &mut request, presentation).await?;
+    let mode = match presentation {
+        CanonicalPresentation::Tool(_) => gdb_ai_core::gateway::RequestMode::Agent,
+        CanonicalPresentation::Envelope => gdb_ai_core::gateway::RequestMode::Canonical,
+    };
     let ticket = gateway
-        .admit_operation(request, caller.clone(), waiter_timeout)
+        .admit_operation_with_mode(request, caller.clone(), waiter_timeout, mode)
         .await
         .map_err(|error| core_fault(format!("{:?}", error.code), error.message))?;
     let operation_id = ticket.operation_id.0;
@@ -449,7 +454,7 @@ async fn call_tool(
     sequence: &AtomicU64,
     mut params: Value,
 ) -> Result<Value, RpcFault> {
-    let Some((mut request, presentation)) = canonical_rpc_request(
+    let Some((request, presentation)) = canonical_rpc_request(
         "tools/call",
         &mut params,
         advanced_tools,
@@ -459,23 +464,7 @@ async fn call_tool(
     else {
         unreachable!("tools/call always maps to a canonical request")
     };
-    prepare_canonical_request(gateway, caller, &mut request, presentation).await?;
-    present_canonical_response(gateway.dispatch(request, caller).await, presentation)
-}
-
-async fn prepare_canonical_request(
-    gateway: &Gateway,
-    caller: &Caller,
-    request: &mut ApiRequest,
-    presentation: CanonicalPresentation,
-) -> Result<(), RpcFault> {
-    if matches!(presentation, CanonicalPresentation::Tool(_)) {
-        gateway
-            .prepare_agent_request(request, caller)
-            .await
-            .map_err(|error| core_fault(format!("{:?}", error.code), error.message))?;
-    }
-    Ok(())
+    present_canonical_response(gateway.dispatch_agent(request, caller).await, presentation)
 }
 
 fn map_tool(
