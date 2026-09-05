@@ -309,7 +309,11 @@ impl Gateway {
                 ApiResponse::failure(&request, error, state)
             }
         };
-        self.bound_response(&request, &mut response);
+        // 2026-09-05: Bounding the full canonical envelope turned small Agent
+        // observations into artifacts before projection removed its registries.
+        if mode == RequestMode::Canonical {
+            self.bound_response(&request, &mut response);
+        }
 
         if request.idempotency_key.is_some() {
             let key = retry_key.as_ref().unwrap().clone();
@@ -1032,6 +1036,25 @@ impl Gateway {
                 details: None,
             });
         }
+    }
+
+    pub fn spill_response(
+        &self,
+        session_id: Option<&str>,
+        response: &Value,
+    ) -> Result<Option<Value>> {
+        let bytes = serde_json::to_vec(response)?;
+        if bytes.len() <= self.config.limits.tool_response_bytes {
+            return Ok(None);
+        }
+        self.metrics.response_truncated();
+        let session_id = session_id
+            .map(crate::domain::SessionId::parse)
+            .transpose()?;
+        let uri = self.put_artifact(session_id.as_ref(), &bytes, "protocol-response")?;
+        Ok(Some(
+            serde_json::json!({"artifact": uri, "size": bytes.len()}),
+        ))
     }
 
     fn put_artifact(

@@ -345,19 +345,38 @@ async fn projected_tools_keep_control_without_lease_renewal() {
     };
     config.security.workspace_roots = vec![std::path::PathBuf::from("/")];
     config.server.write_lease_ms = 1;
-    let gateway = Gateway::new(config).unwrap();
+    config.limits.tool_response_bytes = 4_096;
+    let gateway = Arc::new(Gateway::new(config).unwrap());
     let caller = Caller::local("projected-coordination-test");
     let sequence = AtomicU64::new(1);
+    let ticket = gateway
+        .admit_operation_with_mode(
+            map_tool("gdb_session", json!({"action": "create"}), false, false, 0).unwrap(),
+            caller.clone(),
+            None,
+            gdb_ai_core::gateway::RequestMode::Agent,
+        )
+        .await
+        .unwrap();
+    gateway
+        .wait_operation(&ticket.operation_id.0, &caller)
+        .await
+        .unwrap();
     let created = call_tool(
         &gateway,
         &caller,
         false,
         &sequence,
-        json!({"name": "gdb_session", "arguments": {"action": "create"}}),
+        json!({"name": "gdb_session", "arguments": {
+            "action": "operation_status", "operation_id": ticket.operation_id
+        }}),
     )
     .await
     .unwrap();
-    let result = created["structuredContent"]["result"].as_object().unwrap();
+    assert!(serde_json::to_vec(&created).unwrap().len() <= 4_096);
+    let result = created["structuredContent"]["result"]["operation"]["result"]["result"]
+        .as_object()
+        .unwrap();
     assert_eq!(result.len(), 2);
     assert!(result.get("write_lease").is_none());
     let session_id = result["session_id"].as_str().unwrap();

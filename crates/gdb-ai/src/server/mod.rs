@@ -334,7 +334,7 @@ async fn dispatch_rpc(
             CanonicalPresentation::Tool(_) => gateway.dispatch_agent(request, caller).await,
             CanonicalPresentation::Envelope => gateway.dispatch(request, caller).await,
         };
-        return present_canonical_response(response, presentation);
+        return present_canonical_response(gateway, response, presentation);
     }
     match method {
         "ping" => Ok(json!({})),
@@ -405,11 +405,44 @@ fn canonical_rpc_request(
 }
 
 fn present_canonical_response(
+    gateway: &Gateway,
     response: ApiResponse,
     presentation: CanonicalPresentation,
 ) -> Result<Value, RpcFault> {
     match presentation {
-        CanonicalPresentation::Tool(method) => Ok(tool_result(response, method)),
+        CanonicalPresentation::Tool(method) => {
+            let session_id = response.session_id.clone();
+            let tool = tool_result(response, method);
+            // 2026-09-05: Apply the inline budget after Agent projection,
+            // including the MCP wrapper, so only useful output can spill.
+            let structured = match gateway.spill_response(session_id.as_deref(), &tool) {
+                Ok(None) => return Ok(tool),
+                Ok(Some(artifact)) => {
+                    let mut structured = json!({
+                        "truncated": true,
+                        "artifacts": [artifact["artifact"]]
+                    });
+                    if tool["isError"] == true {
+                        structured["error"] = json!({
+                            "code": "OUTPUT_LIMIT", "message": "error response exceeded inline limit",
+                            "retryable": false, "details": artifact
+                        });
+                    } else {
+                        structured["result"] = artifact;
+                    }
+                    structured
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Agent response artifact failed");
+                    json!({
+                        "truncated": true,
+                        "error": {"code": "OUTPUT_LIMIT", "retryable": false,
+                                  "message": "response exceeded inline limit and artifact creation failed"}
+                    })
+                }
+            };
+            Ok(projected_tool_result(structured))
+        }
         CanonicalPresentation::Envelope => {
             serde_json::to_value(response).map_err(|error| RpcFault::invalid(error.to_string()))
         }
@@ -441,7 +474,7 @@ async fn admit_canonical_operation(
         let response = record.result.ok_or_else(|| {
             core_fault("INTERNAL", "completed operation has no canonical response")
         })?;
-        present_canonical_response(response, presentation)
+        present_canonical_response(&gateway, response, presentation)
     });
     Ok((operation_id, waiter))
 }
@@ -464,7 +497,11 @@ async fn call_tool(
     else {
         unreachable!("tools/call always maps to a canonical request")
     };
-    present_canonical_response(gateway.dispatch_agent(request, caller).await, presentation)
+    present_canonical_response(
+        gateway,
+        gateway.dispatch_agent(request, caller).await,
+        presentation,
+    )
 }
 
 fn map_tool(
@@ -586,11 +623,18 @@ fn binds_current_stop(method: CanonicalMethod) -> bool {
 }
 
 fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
-    let is_error = response.error.is_some();
-    let mut summary = response
-        .error
-        .as_ref()
-        .map(|error| format!("{}: {}", error.code.code_name(), error.message));
+    projected_tool_result(compact_tool_response(response, method))
+}
+
+fn projected_tool_result(structured: Value) -> Value {
+    let is_error = structured.get("error").is_some();
+    let mut summary = structured.get("error").map(|error| {
+        format!(
+            "{}: {}",
+            error["code"].as_str().unwrap_or("INTERNAL"),
+            error["message"].as_str().unwrap_or("operation failed")
+        )
+    });
     // 2026-08-31: MCP text duplicated potentially large structured errors.
     // Keep a short compatibility summary and preserve the full error below.
     if let Some(summary) = &mut summary
@@ -603,7 +647,6 @@ fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
         summary.truncate(end);
         summary.push_str("...");
     }
-    let structured = compact_tool_response(response, method);
     // 2026-09-01: A blind trace paid a redundant `ok` text block on every
     // successful structured result. MCP permits an empty content array; keep
     // text only for errors that need a compatibility summary.
@@ -713,6 +756,19 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
             result.remove("state");
         }
         match method {
+            CanonicalMethod::OperationGet | CanonicalMethod::OperationCancel => {
+                // 2026-09-05: Async recovery exposed the full canonical
+                // envelope. Apply the original tool's projection before the
+                // shared output limit, retaining the recovery handle.
+                if let Some(operation) = result.get_mut("operation")
+                    && let Some(method) = operation.get("method").and_then(Value::as_str)
+                    && let Ok(method) = method.parse::<CanonicalMethod>()
+                    && let Some(response) = operation.get_mut("result")
+                    && let Ok(canonical) = serde_json::from_value::<ApiResponse>(response.clone())
+                {
+                    *response = compact_tool_response(canonical, method);
+                }
+            }
             CanonicalMethod::RawConsole => {
                 // 2026-09-05: Console replies repeated helper text as a full
                 // MI AST and copied every registry. Preserve output and any

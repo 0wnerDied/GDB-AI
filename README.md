@@ -353,7 +353,7 @@ gdb-ai storage gc --execute
 ```
 
 If a Streamable HTTP waiter expires, its error data includes an `operation_id`.
-Use `gdb_session` action `operation_status` to retrieve the canonical outcome;
+Use `gdb_session` action `operation_status` to retrieve the projected outcome;
 the timeout does not claim that the debugger operation was cancelled.
 For a record whose `cancellation` is `ACTOR_SCOPED`, use action
 `operation_cancel` with the same ID and mode `interrupt_target` or

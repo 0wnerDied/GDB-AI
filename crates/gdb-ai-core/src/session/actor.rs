@@ -350,7 +350,10 @@ impl SessionWorker {
             next_token: 1,
             timed_out_tokens: HashSet::new(),
             interrupt_fallback_at: None,
-            stream_limit: config.limits.tool_response_bytes,
+            // 2026-09-05: The inline reply budget discarded large GDB records
+            // before projection could return them as artifacts. Capture uses
+            // the existing console retention budget instead.
+            stream_limit: config.limits.console_output_ring_bytes,
             command_timeout: config.server.command_timeout(),
             values: BTreeMap::new(),
             tracking: BTreeMap::new(),

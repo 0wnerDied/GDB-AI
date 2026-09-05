@@ -470,7 +470,7 @@ mod tests {
             return;
         }
         let directory = tempdir().unwrap();
-        let config = Config {
+        let mut config = Config {
             artifacts: ArtifactConfig {
                 path: directory.path().join("artifacts"),
             },
@@ -480,7 +480,8 @@ mod tests {
             },
             ..Config::default()
         };
-        let gateway = Gateway::new(config).unwrap();
+        config.limits.tool_response_bytes = 4_096;
+        let gateway = Arc::new(Gateway::new(config).unwrap());
         let caller = Caller {
             identity: "mcp-test".into(),
             admin: true,
@@ -608,6 +609,62 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains("source language"))
         );
+        let ticket = gateway
+            .admit_operation_with_mode(
+                super::super::map_tool(
+                    "gdb_raw",
+                    json!({
+                        "action": "console", "session_id": session_id,
+                        "command": "printf \"%5000s\", \"x\""
+                    }),
+                    false,
+                    true,
+                    sequence.fetch_add(1, Ordering::Relaxed),
+                )
+                .unwrap(),
+                caller.clone(),
+                None,
+                gdb_ai_core::gateway::RequestMode::Agent,
+            )
+            .await
+            .unwrap();
+        gateway
+            .wait_operation(&ticket.operation_id.0, &caller)
+            .await
+            .unwrap();
+        let large = call_tool(
+            &gateway,
+            &caller,
+            false,
+            &sequence,
+            json!({"name": "gdb_session", "arguments": {
+                "action": "operation_status", "operation_id": ticket.operation_id
+            }}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(large["isError"], false, "{large}");
+        assert!(
+            large["structuredContent"]["result"]["artifact"].is_string(),
+            "{large}"
+        );
+        assert!(serde_json::to_vec(&large).unwrap().len() <= 4_096);
+        let artifact = call_tool(
+            &gateway,
+            &Caller {
+                identity: caller.identity.clone(),
+                admin: false,
+            },
+            false,
+            &sequence,
+            json!({"name": "gdb_memory", "arguments": {
+                "action": "artifact", "uri": large["structuredContent"]["result"]["artifact"],
+                "max_bytes": 128
+            }}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(artifact["isError"], false, "{artifact}");
         let denied = call_tool(
             &gateway,
             &caller,

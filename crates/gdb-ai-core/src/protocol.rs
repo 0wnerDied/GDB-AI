@@ -256,15 +256,34 @@ pub struct ApiError {
 }
 
 impl ApiResponse {
-    pub fn success(request: &ApiRequest, state: Option<SessionState>, result: Value) -> Self {
+    pub fn success(request: &ApiRequest, mut state: Option<SessionState>, result: Value) -> Self {
         // 2026-08-28: session.create has no request session ID, so derive it
         // from returned state to keep the creation response routable.
         // 2026-08-31: A caller-supplied ID on a global method could otherwise
         // mislabel the real session returned by typed state.
-        let session_id = state
-            .as_ref()
-            .map(|state| state.session_id.0.clone())
-            .or_else(|| request.session_id.clone());
+        // 2026-09-05: Polling an operation without a session ID spilled its
+        // result into an unreadable global artifact. Its authorized record,
+        // including a newly created session, owns the result and its evidence.
+        let session_id = if matches!(
+            request.method,
+            CanonicalMethod::OperationGet | CanonicalMethod::OperationCancel
+        ) {
+            let session_id = result
+                .pointer("/operation/result/session_id")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    result
+                        .pointer("/operation/session_id")
+                        .and_then(Value::as_str)
+                });
+            state = state.filter(|state| Some(state.session_id.0.as_str()) == session_id);
+            session_id.map(str::to_owned)
+        } else {
+            state
+                .as_ref()
+                .map(|state| state.session_id.0.clone())
+                .or_else(|| request.session_id.clone())
+        };
         // 2026-08-28: Command evidence stayed buried in result objects and the
         // envelope often pointed at no raw MI record. Promote bounded journal
         // sequence references without traversing large byte arrays.
