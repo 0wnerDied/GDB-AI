@@ -213,6 +213,9 @@ extended-target and mutation actions on the core tools. `gdb_agent` currently
 projects only the stop-attributed bounded probe; experiment and hypothesis
 aliases remain canonical-only. `gdb_raw` is registered separately only with
 `--raw-admin`.
+With `--raw-admin`, session creation defaults to the raw profile. Use
+`gdb_raw action=console` for native GDB commands and runtime helpers;
+the reply includes that command's `console`, `target`, and `log` output.
 
 Canonical mutations require the current revision and write lease. Valid owner
 mutations refresh the lease near half-life. Projected MCP tools keep that

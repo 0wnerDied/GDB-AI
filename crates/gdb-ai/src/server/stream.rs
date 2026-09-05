@@ -538,6 +538,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(raw["isError"], false);
+        assert!(
+            raw["structuredContent"]["result"]["console"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("The current source language")
+        );
+        assert!(raw["structuredContent"]["result"].get("command").is_none());
+        assert!(
+            raw["structuredContent"]["result"]
+                .get("state_after")
+                .is_none()
+        );
         assert_eq!(raw["structuredContent"]["state"]["consistency"], "TAINTED");
         assert!(
             raw["structuredContent"]["state"]

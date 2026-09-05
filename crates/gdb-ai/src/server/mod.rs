@@ -724,6 +724,22 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
             result.remove("state");
         }
         match method {
+            CanonicalMethod::RawConsole => {
+                // 2026-09-05: Console replies repeated helper text as a full
+                // MI AST and copied every registry. Preserve output and any
+                // distinct post-command state through the normal projection.
+                result.remove("command");
+                if let Some(state_after) = result.remove("state_after") {
+                    result.insert("state".into(), state_after);
+                }
+                if let Some(reconciliation) = result
+                    .get_mut("reconciliation")
+                    .and_then(Value::as_object_mut)
+                {
+                    reconciliation.remove("capabilities");
+                    reconciliation.remove("managed_surface");
+                }
+            }
             CanonicalMethod::SessionCreate => {
                 // 2026-08-31: Session creation repeated the hidden lease,
                 // complete capabilities, backend PTY, and initial state before

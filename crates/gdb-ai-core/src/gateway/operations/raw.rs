@@ -1,9 +1,10 @@
 use std::time::Duration;
 
+use gdb_ai_mi::MiRecord;
 use serde_json::{Value, json};
 
 use super::{
-    encoding::first_word,
+    encoding::{byte_content, first_word},
     reconciliation::{
         reconcile_breakpoints, reconcile_inferiors, reconcile_libraries, reconcile_threads,
         reconciliation_command,
@@ -68,11 +69,31 @@ impl Gateway {
             Err(error) => return Err(error),
         };
         let reconciliation = self.reconcile_session(&entry, false).await?;
-        Ok(json!({
+        let mut result = json!({
             "command": reply,
             "state_after": entry.handle.state(),
             "reconciliation": reconciliation
-        }))
+        });
+        // 2026-09-05: Runtime helper output was exposed only as MI byte
+        // arrays or a later console-ring read. Keep each stream in this turn.
+        let (mut console, mut target, mut log) = (Vec::new(), Vec::new(), Vec::new());
+        for record in &reply.stream_records {
+            match record {
+                MiRecord::ConsoleStream(bytes) => console.extend_from_slice(bytes),
+                MiRecord::TargetStream(bytes) => target.extend_from_slice(bytes),
+                MiRecord::LogStream(bytes) => log.extend_from_slice(bytes),
+                _ => {}
+            }
+        }
+        for (name, bytes) in [("console", console), ("target", target), ("log", log)] {
+            if !bytes.is_empty() {
+                result[name] = Value::Object(byte_content(bytes));
+            }
+        }
+        if reply.stream_truncated {
+            result["truncated"] = Value::Bool(true);
+        }
+        Ok(result)
     }
 
     pub(super) async fn raw_mi(&self, request: &ApiRequest) -> Result<Value> {

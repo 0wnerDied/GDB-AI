@@ -328,7 +328,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_raw",
-        description: "Run audited raw MI or console commands with reconciliation.",
+        description: "Run GDB MI or console commands and runtime helpers; console returns this command's console/target/log output with reconciliation.",
         discriminator: Some("action"),
         actions: RAW_ACTIONS,
         read_only: false,
