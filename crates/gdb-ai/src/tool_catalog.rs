@@ -204,7 +204,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_inspect",
-        description: "Read one bounded view; modules includes main-executable mappings. symbols takes query plus functions|types|variables kind and can include one exact type_layout with field offsets.",
+        description: "Read one bounded view; threads with stack_depth returns thread identities and their stacks at one stop (limit/offset page threads). modules includes main-executable mappings. symbols takes query plus functions|types|variables kind and can include one exact type_layout with field offsets.",
         discriminator: Some("view"),
         actions: INSPECTION_ACTIONS,
         read_only: true,

@@ -41,6 +41,179 @@ fn successful(response: ApiResponse) -> ApiResponse {
 }
 
 #[tokio::test]
+async fn thread_stacks_capture_a_deadlock_in_one_stop() {
+    if !support::require_commands(&["gdb", "cc"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let executable = directory.path().join("deadlock");
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0", "-pthread"])
+            .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/deadlock.c"))
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("deadlock-test");
+    let created = successful(
+        gateway
+            .dispatch(
+                request("create", None, "session.create", None, json!({})),
+                &caller,
+            )
+            .await,
+    );
+    let session = created.session_id.unwrap();
+    let call = async |id: &str, method: &str, parameters: Value| {
+        let mut request = request(id, Some(&session), method, None, parameters);
+        gateway
+            .prepare_agent_request(&mut request, &caller)
+            .await
+            .unwrap();
+        gateway.dispatch(request, &caller).await
+    };
+    successful(
+        call(
+            "launch",
+            "target.launch",
+            json!({"program": executable, "stop": "main"}),
+        )
+        .await,
+    );
+    successful(
+        call(
+            "break",
+            "breakpoint.create",
+            json!({"function": "pthread_join", "temporary": true}),
+        )
+        .await,
+    );
+    let stopped = successful(
+        call(
+            "continue",
+            "execution.control",
+            json!({
+                "action": "continue", "wait": {"until": "snapshot", "timeout_ms": 5000},
+                "inspect": [{"view": "threads", "stack_depth": 8}]
+            }),
+        )
+        .await,
+    );
+    let stop = stopped.state.as_ref().unwrap().stop_id.as_ref().unwrap();
+    let threads = stopped.result.as_ref().unwrap()["observations"]["threads"]["threads"]
+        .as_array()
+        .unwrap();
+    assert_eq!(threads.len(), 3);
+    for thread in threads {
+        assert!(thread["target_id"].as_str().unwrap().contains("LWP"));
+        assert!(thread.get("error").is_none(), "{thread}");
+        for frame in thread["frames"].as_array().unwrap() {
+            assert!(frame["frame_id"].as_str().unwrap().starts_with(&format!(
+                "f{}_{}_",
+                thread["thread_id"].as_str().unwrap(),
+                stop
+            )));
+        }
+    }
+    for worker in ["worker_left", "worker_right"] {
+        assert!(threads.iter().any(|thread| {
+            thread["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|frame| frame["function"] == worker)
+        }));
+    }
+    let (page, other) = tokio::join!(
+        call(
+            "page",
+            "inspection.get",
+            json!({"view": "threads", "stop_id": stop, "limit": 1, "offset": 1, "stack_depth": 1})
+        ),
+        call(
+            "other",
+            "inspection.get",
+            json!({"view": "stack", "stop_id": stop, "thread_id": threads[0]["thread_id"], "limit": 2})
+        ),
+    );
+    let page = successful(page).result.unwrap();
+    assert_eq!(page["next_offset"], 2);
+    assert_eq!(page["threads"][0]["thread_id"], threads[1]["thread_id"]);
+    assert_eq!(page["threads"][0]["next_frame_offset"], 1);
+    assert_eq!(page["threads"][0]["frames"].as_array().unwrap().len(), 1);
+    let other = successful(other).result.unwrap();
+    assert_eq!(
+        other["frames"][0]["frame_id"],
+        threads[0]["frames"][0]["frame_id"]
+    );
+    let invalid = call(
+        "invalid",
+        "inspection.get",
+        json!({"view": "threads", "stop_id": stop, "stack_depth": 65}),
+    )
+    .await;
+    assert_eq!(
+        invalid.error.unwrap().code,
+        gdb_ai_core::ErrorCode::InvalidArgument
+    );
+    successful(
+        call(
+            "resume",
+            "execution.control",
+            json!({"action": "continue", "wait": {"until": "running"}}),
+        )
+        .await,
+    );
+    let interrupted = successful(
+        call(
+            "interrupt",
+            "execution.control",
+            json!({
+                "action": "interrupt", "wait": {"until": "snapshot", "timeout_ms": 5000},
+                "inspect": [{"view": "threads", "stack_depth": 8}]
+            }),
+        )
+        .await,
+    );
+    assert_eq!(
+        interrupted.result.as_ref().unwrap()["observations"]["threads"]["threads"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let stale = call(
+        "old-stop",
+        "inspection.get",
+        json!({"view": "threads", "stop_id": stop, "stack_depth": 8}),
+    )
+    .await;
+    assert_eq!(
+        stale.error.unwrap().code,
+        gdb_ai_core::ErrorCode::StaleContext
+    );
+    successful(call("close", "session.close", json!({})).await);
+}
+
+#[tokio::test]
 async fn frame_handles_select_their_owning_thread() {
     if !support::require_commands(&["gdb", "cc"]) {
         return;

@@ -51,6 +51,9 @@ pub(super) fn normalized_threads(
             Some(json!({
                 "thread_id": thread.map(|thread| &thread.id),
                 "backend_id": backend_id,
+                // 2026-09-05: Dropping GDB's target identity hid the OS TID
+                // needed to match a blocked thread to a native lock owner.
+                "target_id": MiResult::find_str(fields, "target-id"),
                 "inferior_id": state.inferiors.values()
                     .find(|inferior| inferior.threads.contains_key(backend_id))
                     .map(|inferior| &inferior.id),

@@ -70,16 +70,7 @@ impl Gateway {
                 });
                 Ok(snapshot)
             }
-            "threads" => {
-                let reply = self
-                    .inspection_command(&entry, request, "-thread-info", vec![])
-                    .await?;
-                Ok(json!({
-                    "stop_id": state.stop_id,
-                    "threads": normalized_threads(&reply.record, &state),
-                    "evidence_seq": reply.evidence_seq
-                }))
-            }
+            "threads" => self.inspection_threads(&entry, request).await,
             "stack" => {
                 let limit =
                     bounded_limit(&request.parameters, 16, self.config.limits.stack_frames)?;
@@ -231,6 +222,96 @@ impl Gateway {
                 "unsupported inspection view",
             )),
         }
+    }
+
+    async fn inspection_threads(
+        &self,
+        entry: &SessionEntry,
+        request: &ApiRequest,
+    ) -> Result<Value> {
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
+        let limit = bounded_limit(
+            &request.parameters,
+            64.min(self.config.limits.value_children),
+            self.config.limits.value_children,
+        )?;
+        let offset = request.parameters["offset"].as_u64().unwrap_or(0);
+        let depth = request.parameters["stack_depth"].as_u64();
+        if depth.is_some_and(|depth| depth == 0 || depth > self.config.limits.stack_frames as u64) {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "stack_depth must be between 1 and {}",
+                    self.config.limits.stack_frames
+                ),
+            ));
+        }
+        // 2026-09-05: Thread discovery followed by per-thread stack calls
+        // split hang diagnosis across turns. Capture the page at one stop,
+        // with explicit thread context so concurrent readers cannot mix frames.
+        entry
+            .handle
+            .stable_observation(
+                &state,
+                Box::pin(async {
+                    let reply = self
+                        .inspection_command(entry, request, "-thread-info", vec![])
+                        .await?;
+                    let threads = normalized_threads(&reply.record, &state);
+                    let total = threads.len();
+                    let mut threads: Vec<_> = threads
+                        .into_iter()
+                        .skip(offset.min(total as u64) as usize)
+                        .take(limit)
+                        .collect();
+                    let mut evidence_seq = reply.evidence_seq;
+                    if let Some(depth) = depth {
+                        for thread in &mut threads {
+                            let thread_id = thread["thread_id"].as_str().ok_or_else(|| {
+                                Error::new(ErrorCode::StaleContext, "thread has no current handle")
+                            })?;
+                            let parameters =
+                                json!({"stop_id": state.stop_id, "thread_id": thread_id});
+                            let command = context_options(
+                                MiCommand::new("-stack-list-frames")?,
+                                &parameters,
+                                &state,
+                            )?
+                            .bare("0")?
+                            .bare((depth - 1).to_string())?;
+                            match entry.handle.command(command).await {
+                                Ok(reply) => {
+                                    let frames =
+                                        normalized_frames(&reply.record, &state, &parameters);
+                                    if frames.len() == depth as usize {
+                                        thread["next_frame_offset"] = Value::from(depth);
+                                    }
+                                    thread["frames"] = json!(frames);
+                                    thread.as_object_mut().unwrap().remove("frame");
+                                    evidence_seq = reply.evidence_seq;
+                                }
+                                Err(error) if error.code == ErrorCode::GdbError => {
+                                    thread["error"] =
+                                        json!({"code": error.code, "message": error.message});
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                    let next = offset.saturating_add(threads.len() as u64);
+                    let mut result = json!({
+                        "stop_id": state.stop_id,
+                        "threads": threads,
+                        "evidence_seq": evidence_seq
+                    });
+                    if next < total as u64 {
+                        result["next_offset"] = Value::from(next);
+                    }
+                    Ok(result)
+                }),
+            )
+            .await
     }
 
     // 2026-09-05: Large C++ targets previously forced Agents through nm,

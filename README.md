@@ -228,6 +228,14 @@ views from its resulting stop in the same `gdb_run` call; each view is its
 result key. Successful input adds no echo; a stalled write reports exact
 `written` and `remaining` byte counts without wedging the session. Use
 `gdb_io` for open-ended interaction.
+For hangs and thread races, use `gdb_inspect view=threads stack_depth=8`, or
+include `{"view":"threads","stack_depth":8}` in `gdb_run inspect` when
+interrupting. One response contains each thread's GDB target identity
+(including Linux LWP IDs), stop-scoped frame handles, and stack. `limit` and
+`offset` page threads; `next_offset` indicates another page. Without
+`stack_depth`, the view returns top frames only. A returned
+`next_frame_offset` means the stack reached the requested depth; use the
+ordinary stack view with that thread ID and offset to continue.
 Inferior stdin, stdout, and stderr use the default `stream: "pty"`;
 `stream: "target"` means GDB/MI `@` output rather than inferior stdout.
 For prompt-driven menus whose broad reads would consume later queued answers,

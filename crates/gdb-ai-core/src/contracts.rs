@@ -394,6 +394,7 @@ const INSPECTION_BATCH_ITEM_FIELDS: &[ParameterField] = &[
     optional("frame_id", ParameterKind::String),
     optional("frame_level", ParameterKind::Unsigned),
     optional("limit", ParameterKind::Unsigned),
+    optional("stack_depth", ParameterKind::Positive),
     optional("offset", ParameterKind::Unsigned),
     optional("roles", ParameterKind::StringArray),
     optional("query", ParameterKind::String),
@@ -427,6 +428,7 @@ const INSPECTION_BATCH_KIND: ParameterKind = ParameterKind::ArrayOf(&INSPECTION_
 const TURN_INSPECTION_ITEM_FIELDS: &[ParameterField] = &[
     required("view", ParameterKind::Enum(INSPECTION_VIEWS)),
     optional("limit", ParameterKind::Unsigned),
+    optional("stack_depth", ParameterKind::Positive),
     optional("roles", ParameterKind::StringArray),
     optional("query", ParameterKind::String),
     optional(
@@ -751,6 +753,7 @@ impl CanonicalMethod {
             InspectionGet => MethodContract::contextual(vec![
                 required("view", Enum(INSPECTION_VIEWS)),
                 optional("limit", Unsigned),
+                optional("stack_depth", Positive),
                 optional("offset", Unsigned),
                 optional("roles", StringArray),
                 optional("query", String),

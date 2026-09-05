@@ -1006,6 +1006,10 @@
                       },
                       "type": "array"
                     },
+                    "stack_depth": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "type_layout": {
                       "type": "string"
                     },
@@ -1161,6 +1165,10 @@
                         "type": "string"
                       },
                       "type": "array"
+                    },
+                    "stack_depth": {
+                      "minimum": 1,
+                      "type": "integer"
                     },
                     "type_layout": {
                       "type": "string"
@@ -1705,6 +1713,10 @@
                 },
                 "type": "array"
               },
+              "stack_depth": {
+                "minimum": 1,
+                "type": "integer"
+              },
               "stop_id": {
                 "type": "string"
               },
@@ -2030,6 +2042,10 @@
                         "type": "string"
                       },
                       "type": "array"
+                    },
+                    "stack_depth": {
+                      "minimum": 1,
+                      "type": "integer"
                     },
                     "thread_id": {
                       "type": "string"
@@ -3787,6 +3803,10 @@
                       },
                       "type": "array"
                     },
+                    "stack_depth": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "type_layout": {
                       "type": "string"
                     },
@@ -4242,6 +4262,10 @@
                         "type": "string"
                       },
                       "type": "array"
+                    },
+                    "stack_depth": {
+                      "minimum": 1,
+                      "type": "integer"
                     },
                     "type_layout": {
                       "type": "string"
