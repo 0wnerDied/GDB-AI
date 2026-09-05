@@ -602,7 +602,9 @@ impl Gateway {
             )?;
         }
 
-        let mut result = self.execute_method(request, caller).await;
+        // 2026-09-05: Inlining the operation future throughout dispatch
+        // overflowed default thread stacks. Heap-pin it at the shared boundary.
+        let mut result = Box::pin(self.execute_method(request, caller)).await;
         if result.is_ok()
             && let (Some(entry), Some((stop_id, execution_epoch))) = (&entry, observation_baseline)
         {
