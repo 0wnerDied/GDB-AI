@@ -174,7 +174,12 @@ impl StateReducer {
                 } else {
                     InferiorStatus::Exited
                 };
-                inferior.exit_code.clone_from(exit_code);
+                // 2026-09-05: A later exit record without a code erased the
+                // proven status and duplicated wait state. Keep known evidence
+                // until the inferior starts a new execution generation.
+                if exit_code.is_some() {
+                    inferior.exit_code.clone_from(exit_code);
+                }
                 if invalidates_stop {
                     self.clear_stop_context();
                 }
@@ -1087,6 +1092,19 @@ mod tests {
         apply(
             &mut reducer,
             5,
+            DomainEvent::InferiorExited {
+                backend_id: Some("i1".into()),
+                exit_code: None,
+                from_stop_record: false,
+            },
+        );
+        assert_eq!(
+            reducer.state().inferiors["i1"].exit_code.as_deref(),
+            Some("0270")
+        );
+        apply(
+            &mut reducer,
+            6,
             DomainEvent::InferiorAdded {
                 backend_id: "i1".into(),
                 pid: Some(43),
@@ -1095,7 +1113,7 @@ mod tests {
 
         let restarted = &reducer.state().inferiors["i1"];
         assert_ne!(restarted.id, first_id);
-        assert_eq!(restarted.generation, 5);
+        assert_eq!(restarted.generation, 6);
         assert_eq!(restarted.pid, Some(43));
         assert_eq!(restarted.status, InferiorStatus::Connecting);
         assert_eq!(restarted.exit_code, None);
