@@ -491,6 +491,25 @@ capture, discarding the response generated once the target resumed. Continued
 probe policies now wait for that client within the existing wall-time budget;
 the stopped-at-hit policy retains immediate cleanup.
 
+### Browser-engine debugger qualification
+
+A matched blind Terra xhigh pair used the same debug-symbol browser-engine
+binary without source. Native GDB ran for 17m37s through five starts and 23
+executed commands; GDB/AI ran for 27m43s through 16 projected calls. Both
+reached cage-local arbitrary read/write and buffer-length corruption, but
+neither completed a sandbox escape, so this run provides no final exploit-speed
+win for either interface.
+
+The GDB/AI time is also contaminated by two sessions that inherited the former
+2 GiB address-space limit and failed while reserving the engine's sparse virtual
+address cage. The default now leaves `RLIMIT_AS` unchanged while retaining an
+explicit configured limit. The remaining clean trace showed one interface gap:
+the Agent left GDB/AI for `nm`, `readelf`, and `objdump` because it could not
+bound symbol searches or request `ptype` output. The existing inspection and
+batch paths now return capped function, type, or variable matches and an
+optional exact type layout. A live replay found the requested engine symbols in
+one projected call without parsing raw CLI output.
+
 ### Blind kernel exploit-speed qualification
 
 A concurrent source-free ring-1 run exposed a different adoption gap. Native

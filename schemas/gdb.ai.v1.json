@@ -976,6 +976,14 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "kind": {
+                      "enum": [
+                        "functions",
+                        "types",
+                        "variables"
+                      ],
+                      "type": "string"
+                    },
                     "limit": {
                       "minimum": 0,
                       "type": "integer"
@@ -989,11 +997,17 @@
                       ],
                       "type": "string"
                     },
+                    "query": {
+                      "type": "string"
+                    },
                     "roles": {
                       "items": {
                         "type": "string"
                       },
                       "type": "array"
+                    },
+                    "type_layout": {
+                      "type": "string"
                     },
                     "view": {
                       "enum": [
@@ -1010,6 +1024,7 @@
                         "registers",
                         "modules",
                         "breakpoints",
+                        "symbols",
                         "source",
                         "mappings",
                         "signals"
@@ -1117,6 +1132,14 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "kind": {
+                      "enum": [
+                        "functions",
+                        "types",
+                        "variables"
+                      ],
+                      "type": "string"
+                    },
                     "limit": {
                       "minimum": 0,
                       "type": "integer"
@@ -1130,11 +1153,17 @@
                       ],
                       "type": "string"
                     },
+                    "query": {
+                      "type": "string"
+                    },
                     "roles": {
                       "items": {
                         "type": "string"
                       },
                       "type": "array"
+                    },
+                    "type_layout": {
+                      "type": "string"
                     },
                     "view": {
                       "enum": [
@@ -1151,6 +1180,7 @@
                         "registers",
                         "modules",
                         "breakpoints",
+                        "symbols",
                         "source",
                         "mappings",
                         "signals"
@@ -1615,6 +1645,14 @@
               "inferior_id": {
                 "type": "string"
               },
+              "kind": {
+                "enum": [
+                  "functions",
+                  "types",
+                  "variables"
+                ],
+                "type": "string"
+              },
               "lease_id": {
                 "type": "string"
               },
@@ -1640,6 +1678,9 @@
                   "standard",
                   "deep"
                 ],
+                "type": "string"
+              },
+              "query": {
                 "type": "string"
               },
               "range": {
@@ -1670,6 +1711,9 @@
               "thread_id": {
                 "type": "string"
               },
+              "type_layout": {
+                "type": "string"
+              },
               "view": {
                 "enum": [
                   "stop_context",
@@ -1685,6 +1729,7 @@
                   "registers",
                   "modules",
                   "breakpoints",
+                  "symbols",
                   "source",
                   "mappings",
                   "signals"
@@ -1926,6 +1971,14 @@
                     "inferior_id": {
                       "type": "string"
                     },
+                    "kind": {
+                      "enum": [
+                        "functions",
+                        "types",
+                        "variables"
+                      ],
+                      "type": "string"
+                    },
                     "limit": {
                       "minimum": 0,
                       "type": "integer"
@@ -1953,6 +2006,9 @@
                       ],
                       "type": "string"
                     },
+                    "query": {
+                      "type": "string"
+                    },
                     "range": {
                       "additionalProperties": false,
                       "properties": {
@@ -1978,6 +2034,9 @@
                     "thread_id": {
                       "type": "string"
                     },
+                    "type_layout": {
+                      "type": "string"
+                    },
                     "view": {
                       "enum": [
                         "stop_context",
@@ -1993,6 +2052,7 @@
                         "registers",
                         "modules",
                         "breakpoints",
+                        "symbols",
                         "source",
                         "mappings",
                         "signals"
@@ -3697,6 +3757,14 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "kind": {
+                      "enum": [
+                        "functions",
+                        "types",
+                        "variables"
+                      ],
+                      "type": "string"
+                    },
                     "limit": {
                       "minimum": 0,
                       "type": "integer"
@@ -3710,11 +3778,17 @@
                       ],
                       "type": "string"
                     },
+                    "query": {
+                      "type": "string"
+                    },
                     "roles": {
                       "items": {
                         "type": "string"
                       },
                       "type": "array"
+                    },
+                    "type_layout": {
+                      "type": "string"
                     },
                     "view": {
                       "enum": [
@@ -3731,6 +3805,7 @@
                         "registers",
                         "modules",
                         "breakpoints",
+                        "symbols",
                         "source",
                         "mappings",
                         "signals"
@@ -4138,6 +4213,14 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "kind": {
+                      "enum": [
+                        "functions",
+                        "types",
+                        "variables"
+                      ],
+                      "type": "string"
+                    },
                     "limit": {
                       "minimum": 0,
                       "type": "integer"
@@ -4151,11 +4234,17 @@
                       ],
                       "type": "string"
                     },
+                    "query": {
+                      "type": "string"
+                    },
                     "roles": {
                       "items": {
                         "type": "string"
                       },
                       "type": "array"
+                    },
+                    "type_layout": {
+                      "type": "string"
                     },
                     "view": {
                       "enum": [
@@ -4172,6 +4261,7 @@
                         "registers",
                         "modules",
                         "breakpoints",
+                        "symbols",
                         "source",
                         "mappings",
                         "signals"

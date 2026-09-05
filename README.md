@@ -199,7 +199,7 @@ modes without claiming legacy HTTP+SSE.
 | `gdb_run` | Direct restart, one-call input, run-to-stop, same-stop views, and waits |
 | `gdb_probe` | Temporary breakpoint, trigger, capture, hit/next-stop inspection, and cleanup in one call |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
-| `gdb_inspect` | Bounded target, stack, variable, source, module, mapping, and snapshot views |
+| `gdb_inspect` | Bounded target, stack, symbol/type, source, module, mapping, and snapshot views |
 | `gdb_batch` | Multiple bounded inspection views at the current or named stop |
 | `gdb_evaluate` | Single or ordered-batch evaluation, with explicit calls or assignments |
 | `gdb_memory` | Bounded stop-consistent literal or expression-addressed memory reads |
@@ -262,6 +262,9 @@ Projected terminal state reports `exit_code` as a decimal integer instead of
 GDB/MI's octal text.
 A standalone `gdb_batch` accepts explicit names when the same view is needed
 more than once.
+The `symbols` inspection requires a regex `query`; `kind` selects functions,
+types, or variables, and `limit` bounds the matches. Optional `type_layout`
+returns the exact `ptype /o` layout in the same inspection or batch item.
 `gdb_probe` arms a temporary breakpoint on a stopped or already-running target
 and combines optional byte-exact input, `ignore_count`, bounded capture, output,
 and cleanup in one call. A running target is not interrupted or resumed first.

@@ -96,6 +96,7 @@ const INSPECTION_ACTIONS: &[ToolAction] = &[
     action!("registers", InspectionGet),
     action!("modules", InspectionGet),
     action!("mappings", InspectionGet),
+    action!("symbols", InspectionGet),
     action!("source", InspectionGet),
     action!("breakpoints", InspectionGet),
     action!("capabilities", InspectionGet),
@@ -203,7 +204,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_inspect",
-        description: "Read one bounded view at a stop; modules includes main-executable mappings.",
+        description: "Read one bounded view; modules includes main-executable mappings. symbols takes query plus functions|types|variables kind and can include one exact type_layout with field offsets.",
         discriminator: Some("view"),
         actions: INSPECTION_ACTIONS,
         read_only: true,

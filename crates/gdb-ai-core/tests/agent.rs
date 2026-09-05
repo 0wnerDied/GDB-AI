@@ -117,6 +117,38 @@ async fn probe_and_experiment_capture_and_clean_up() {
     )
     .await;
 
+    let symbols = call(
+        &gateway,
+        &caller,
+        request(
+            "symbols",
+            Some(&session_id),
+            "inspection.get",
+            None,
+            json!({
+                "view": "symbols",
+                "query": "marker",
+                "kind": "functions",
+                "type_layout": "struct pair",
+                "stop_id": stop_id(&launched)
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        symbols.result.as_ref().unwrap()["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("marker")))
+    );
+    let layout = symbols.result.as_ref().unwrap()["type_layout"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(layout.contains("int left;") && layout.contains("int right;"));
+
     let probe = call(
         &gateway,
         &caller,
@@ -124,7 +156,7 @@ async fn probe_and_experiment_capture_and_clean_up() {
             "probe",
             Some(&session_id),
             "agent.probe",
-            launched.revision,
+            symbols.revision,
             json!({
                 "lease_id": lease_id,
                 "stop_id": stop_id(&launched),

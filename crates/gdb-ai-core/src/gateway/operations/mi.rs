@@ -199,6 +199,57 @@ pub(super) fn normalized_source_files(record: &MiRecord) -> Vec<Value> {
         .collect()
 }
 
+pub(super) fn normalized_symbols(record: &MiRecord) -> Vec<Value> {
+    let Some(groups) = MiResult::find(record.results(), "symbols").and_then(MiValue::results)
+    else {
+        return Vec::new();
+    };
+    let mut output = Vec::new();
+    if let Some(debug) = MiResult::find(groups, "debug") {
+        for file in aggregate_items(debug, "file") {
+            let path = MiResult::find_str(file, "fullname")
+                .or_else(|| MiResult::find_str(file, "filename"));
+            if let Some(symbols) = MiResult::find(file, "symbols") {
+                output.extend(
+                    aggregate_items(symbols, "symbol")
+                        .into_iter()
+                        .filter_map(|symbol| normalized_symbol(symbol, path)),
+                );
+            }
+        }
+    }
+    if let Some(nondebug) = MiResult::find(groups, "nondebug") {
+        output.extend(
+            aggregate_items(nondebug, "symbol")
+                .into_iter()
+                .filter_map(|symbol| normalized_symbol(symbol, None)),
+        );
+    }
+    output
+}
+
+fn normalized_symbol(fields: &[MiResult], path: Option<&str>) -> Option<Value> {
+    let name = MiResult::find_str(fields, "name")?;
+    let mut symbol = json!({
+        "name": name,
+        "type": MiResult::find_str(fields, "type"),
+        "address": MiResult::find_str(fields, "address"),
+        "source": path.map(|path| json!({
+            "path": path,
+            "line": MiResult::find_str(fields, "line")
+                .and_then(|line| line.parse::<u64>().ok())
+        }))
+    });
+    symbol
+        .as_object_mut()
+        .unwrap()
+        .retain(|_, value| !value.is_null());
+    if let Some(source) = symbol.get_mut("source").and_then(Value::as_object_mut) {
+        source.retain(|_, value| !value.is_null());
+    }
+    Some(symbol)
+}
+
 pub(super) fn disassembly_instructions(
     record: &MiRecord,
     current: Option<u64>,

@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use gdb_ai_mi::MiRecord;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -11,9 +12,9 @@ use super::{
     memory::read_memory_bytes,
     mi::{
         disassembly_instructions, frame_summary, normalized_arguments, normalized_frames,
-        normalized_modules, normalized_source_files, normalized_threads, normalized_variables,
-        register_role_candidates, register_values, resolve_register_name, result_string_list,
-        result_text, target_architecture, valid_integer_literal,
+        normalized_modules, normalized_source_files, normalized_symbols, normalized_threads,
+        normalized_variables, register_role_candidates, register_values, resolve_register_name,
+        result_string_list, result_text, target_architecture, valid_integer_literal,
     },
     reconciliation::{optional_command, reconcile_breakpoints},
     request::{bool_value, bounded_limit, required_session, string},
@@ -193,6 +194,7 @@ impl Gateway {
                     "evidence_seq": reply.evidence_seq
                 }))
             }
+            "symbols" => self.symbol_search(&entry, request).await,
             "source" => {
                 if request.parameters.get("path").is_some() {
                     self.source_excerpt(request).await
@@ -229,6 +231,105 @@ impl Gateway {
                 "unsupported inspection view",
             )),
         }
+    }
+
+    // 2026-09-05: Large C++ targets previously forced Agents through nm,
+    // readelf, and repeated GDB CLI sessions for symbol and type layout.
+    // Keep both bounded debugger-native facts in one semantic inspection.
+    async fn symbol_search(&self, entry: &SessionEntry, request: &ApiRequest) -> Result<Value> {
+        let query = string(&request.parameters, "query")?;
+        if query.is_empty() || query.len() > 512 || query.contains(['\r', '\n', '\0']) {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "symbol query must contain 1 to 512 single-line bytes",
+            ));
+        }
+        let kind = request
+            .parameters
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("functions");
+        let command_name = match kind {
+            "functions" => "-symbol-info-functions",
+            "types" => "-symbol-info-types",
+            "variables" => "-symbol-info-variables",
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "symbol kind must be functions, types, or variables",
+                ));
+            }
+        };
+        let limit = bounded_limit(&request.parameters, 32, self.config.limits.value_children)?;
+        let mut command = MiCommand::new(command_name)?;
+        if kind != "types" {
+            command = command.bare("--include-nondebug")?;
+        }
+        command = command
+            .bare("--name")?
+            .string(&query)
+            .bare("--max-results")?
+            .bare(limit.saturating_add(1).to_string())?;
+        let search = entry.handle.command(command).await?;
+        let mut symbols = normalized_symbols(&search.record);
+        let truncated = symbols.len() > limit;
+        symbols.truncate(limit);
+        let mut result = json!({
+            "stop_id": entry.handle.state().stop_id,
+            "query": query,
+            "kind": kind,
+            "limit": limit,
+            "symbols": symbols,
+            "truncated": truncated,
+            "evidence_seq": search.evidence_seq
+        });
+
+        if let Some(type_name) = request
+            .parameters
+            .get("type_layout")
+            .and_then(Value::as_str)
+        {
+            if type_name.is_empty()
+                || type_name.len() > 512
+                || type_name.contains(['\r', '\n', '\0'])
+            {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "type_layout must contain 1 to 512 single-line bytes",
+                ));
+            }
+            let layout = entry
+                .handle
+                .command(
+                    MiCommand::new("-interpreter-exec")?
+                        .bare("console")?
+                        .string(format!("ptype /o {type_name}")),
+                )
+                .await?;
+            let mut bytes = Vec::new();
+            for record in &layout.stream_records {
+                if let MiRecord::ConsoleStream(output) = record {
+                    bytes.extend(output);
+                }
+            }
+            const MAX_LAYOUT_BYTES: usize = 32 * 1024;
+            let mut text = String::from_utf8_lossy(&bytes).into_owned();
+            let layout_truncated = layout.stream_truncated || text.len() > MAX_LAYOUT_BYTES;
+            if text.len() > MAX_LAYOUT_BYTES {
+                let mut end = MAX_LAYOUT_BYTES;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.truncate(end);
+            }
+            result["type_layout"] = json!({
+                "name": type_name,
+                "text": text.trim(),
+                "truncated": layout_truncated
+            });
+            result["evidence_seq"] = Value::from(layout.evidence_seq);
+        }
+        Ok(result)
     }
 
     pub(super) async fn inspection_command(
