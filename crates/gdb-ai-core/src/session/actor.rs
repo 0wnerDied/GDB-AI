@@ -2356,7 +2356,9 @@ impl SessionWorker {
                 self.store_result(stored)?;
             }
         }
-        if !self.state_dirty && !(closing && self.store_failed) {
+        // 2026-09-05: Rust 1.88 rejects the redundant negation. Keep the
+        // close-time retry after failed storage even without a new revision.
+        if !(self.state_dirty || closing && self.store_failed) {
             return Ok(());
         }
         // 2026-09-05: Every revision copied the full state to both JSONL and
