@@ -8,6 +8,78 @@ use crate::{
 };
 
 #[tokio::test]
+#[ignore = "benchmark: run explicitly with real GDB and an optimized build"]
+async fn benchmark_gateway_admission() {
+    assert!(crate::test_support::require_commands(&["gdb"]));
+    for modules in [0, 4096] {
+        let directory = tempdir().unwrap();
+        let mut config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        config.server.requests_per_second = 1_000_000;
+        let gateway = Gateway::new(config).unwrap();
+        let caller = Caller::local("admission-benchmark");
+        let mut request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "benchmark".into(),
+            session_id: None,
+            method: CanonicalMethod::SessionCreate,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({}),
+        };
+        let created = gateway.dispatch_agent(request.clone(), &caller).await;
+        assert!(created.error.is_none(), "{:?}", created.error);
+        request.session_id = created.session_id;
+        request.method = CanonicalMethod::SessionCapabilities;
+        let entry = gateway
+            .entry(request.session_id.as_deref().unwrap())
+            .await
+            .unwrap();
+        for index in 0..modules {
+            entry
+                .handle
+                .record_event(crate::domain::DomainEvent::LibraryLoaded {
+                    id: format!("module-{index}"),
+                    target_name: Some(format!("/target/modules/{index}/libbenchmark.so")),
+                    host_name: Some(format!("/host/modules/{index}/libbenchmark.so")),
+                    symbols_loaded: Some(true),
+                })
+                .await
+                .unwrap();
+        }
+        entry.handle.flush_journal().await.unwrap();
+        let expected = entry.handle.state();
+        let started = std::time::Instant::now();
+        for _ in 0..1_000 {
+            let response = gateway.dispatch_agent(request.clone(), &caller).await;
+            assert!(response.error.is_none(), "{:?}", response.error);
+            let state = response.state.unwrap();
+            assert_eq!(state.revision, expected.revision);
+            assert_eq!(state.modules.len(), expected.modules.len());
+        }
+        let elapsed = started.elapsed();
+        gateway.shutdown().await;
+        eprintln!(
+            "{}",
+            json!({
+                "benchmark": "gateway_admission",
+                "modules": modules,
+                "requests": 1000,
+                "elapsed_ns": elapsed.as_nanos()
+            })
+        );
+    }
+}
+
+#[tokio::test]
 async fn controllers_preserve_agent_ownership_and_canonical_lease_expiry() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
@@ -271,7 +343,7 @@ async fn active_owner_mutation_refreshes_lease_near_half_life() {
             },
             &caller,
             &entry,
-            &state,
+            state.revision,
             RequestMode::Canonical,
         )
         .await

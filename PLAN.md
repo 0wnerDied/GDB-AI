@@ -49,6 +49,7 @@ cargo test --locked --release -p gdb-ai-mi benchmark_fragmented_records -- --ign
 cargo test --locked --release -p gdb-ai-core benchmark_output_replay -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-core benchmark_raw_output_replay -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-core benchmark_large_gdb_output -- --ignored --nocapture
+cargo test --locked --release -p gdb-ai-core benchmark_gateway_admission -- --ignored --nocapture
 ```
 
 Compare identical benchmark sources in baseline and candidate builds. Alternate

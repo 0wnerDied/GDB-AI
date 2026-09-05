@@ -14,7 +14,7 @@ use crate::{
     Error, ErrorCode, Result,
     artifact::ArtifactStore,
     config::Config,
-    domain::{Address, TargetOrigin, WriteLease},
+    domain::{Address, TargetOrigin, WriteLease, require_revision},
     metrics::Metrics,
     persistence::{ArtifactLimits, StorageLock, Store, prune_retained_sessions},
     policy::{Effect, Profile, effect_for_method},
@@ -569,27 +569,32 @@ impl Gateway {
             _ => None,
         };
         if let Some(entry) = &entry {
-            let mut state = entry.handle.state();
-            // 2026-08-28: A timed-out MI mutation may still complete later.
-            // Expose the fence before reconciliation and admit only recovery-safe
-            // status, evidence, interrupt, and close requests while it is active.
-            if !state.outcome_unknown_tokens.is_empty()
-                && !request_allowed_during_unknown_outcome(request)
-            {
-                return Err(Error::new(
-                    ErrorCode::GdbUnresponsive,
-                    format!(
-                        "MI command outcome is unknown for token(s) {:?}; interrupt or close the session",
-                        state.outcome_unknown_tokens
-                    ),
-                ));
-            }
+            // 2026-09-06: Admission cloned every retained registry to inspect
+            // coordination fields. Capture one coherent scalar baseline and
+            // release the watch borrow before awaiting controller ownership.
+            let (revision, reconciliation_required, mut consistency) = entry.handle.with_state(|state| {
+                // 2026-08-28: A timed-out MI mutation may still complete later.
+                // Expose the fence before reconciliation and admit only recovery-safe
+                // status, evidence, interrupt, and close requests while it is active.
+                if !state.outcome_unknown_tokens.is_empty()
+                    && !request_allowed_during_unknown_outcome(request)
+                {
+                    return Err(Error::new(
+                        ErrorCode::GdbUnresponsive,
+                        format!(
+                            "MI command outcome is unknown for token(s) {:?}; interrupt or close the session",
+                            state.outcome_unknown_tokens
+                        ),
+                    ));
+                }
+                Ok((state.revision, state.reconciliation_required, state.consistency))
+            })?;
             // 2026-09-05: Internal reconciliation advances the revision.
             // Validate the caller's admission state first so a valid mutation
             // after raw MI is not rejected by our own refresh.
             if effect != Effect::Read
                 && let Err(error) = self
-                    .require_mutation_preconditions(request, caller, entry, &state, mode)
+                    .require_mutation_preconditions(request, caller, entry, revision, mode)
                     .await
             {
                 self.audit(
@@ -598,7 +603,7 @@ impl Gateway {
                     &request.method,
                     effect,
                     false,
-                    Some(state.revision),
+                    Some(revision),
                     &serde_json::to_value(request)?,
                     "rejected",
                 )?;
@@ -607,13 +612,13 @@ impl Gateway {
             // 2026-09-05: Raw helpers eagerly rebuilt every registry, even
             // when the next call only consumed output or ran another helper.
             // Refresh before a structured operation needs that cached state.
-            if state.reconciliation_required && needs_structured_state {
+            if reconciliation_required && needs_structured_state {
                 self.reconcile_session(entry, true).await?;
-                state = entry.handle.state();
+                consistency = entry.handle.with_state(|state| state.consistency);
             }
             // 2026-08-28: LOST sessions previously blocked transcript access,
             // removing the evidence needed to diagnose and recover the session.
-            if matches!(state.consistency, crate::domain::Consistency::Lost)
+            if matches!(consistency, crate::domain::Consistency::Lost)
                 && !matches!(
                     request.method.as_str(),
                     "session.get"
@@ -859,7 +864,7 @@ impl Gateway {
         request: &ApiRequest,
         caller: &Caller,
         entry: &SessionEntry,
-        state: &crate::domain::SessionState,
+        revision: u64,
         mode: RequestMode,
     ) -> Result<()> {
         // 2026-08-29: Recovery and forced cleanup reused the expiring business
@@ -874,7 +879,7 @@ impl Gateway {
         }
         if mode == RequestMode::Canonical {
             if let Some(expected) = request.expected_revision {
-                state.require_revision(expected)?;
+                require_revision(revision, expected)?;
             } else if request
                 .parameters
                 .get("accept_latest_revision")

@@ -522,6 +522,17 @@ pub struct SessionState {
     pub limitations: Vec<String>,
 }
 
+pub(crate) fn require_revision(current: u64, expected: u64) -> Result<()> {
+    if current == expected {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorCode::StaleRevision,
+            format!("expected revision {expected}, current revision is {current}"),
+        ))
+    }
+}
+
 impl SessionState {
     pub fn creating(session_id: SessionId) -> Self {
         Self {
@@ -550,17 +561,7 @@ impl SessionState {
     }
 
     pub fn require_revision(&self, expected: u64) -> Result<()> {
-        if self.revision == expected {
-            Ok(())
-        } else {
-            Err(Error::new(
-                ErrorCode::StaleRevision,
-                format!(
-                    "expected revision {expected}, current revision is {}",
-                    self.revision
-                ),
-            ))
-        }
+        require_revision(self.revision, expected)
     }
 
     pub fn require_stop(&self, stop_id: &StopId) -> Result<()> {
