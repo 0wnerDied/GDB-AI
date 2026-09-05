@@ -34,6 +34,51 @@ one source revision are not evidence for another.
 Missing host facilities remain explicitly unavailable or conditional; they
 are never converted to success merely because another matrix entry passed.
 
+## Runtime coverage
+
+Native debugging and runtime-language decoding have separate requirements.
+Matching executables, libraries, symbols, and runtime helpers must be supplied
+by the caller; launching an interpreter does not provide its language frames
+or object model automatically.
+
+The runtime compatibility target is the Agent debugging capability provided
+by the same native GDB build. Use the structured tools for common operations.
+Start the server with `--raw-admin` to expose GDB console commands such as
+`source` for the runtime's own GDB helpers; new sessions then use that
+authority without another profile selection. Helpers execute inside the
+session's GDB process and retain its host permissions. A console tool call
+returns its own `console`, `target` and `log` output, so helper output does not
+require a later ring-buffer read. GDB JIT registration remains GDB's own
+mechanism; GDB/AI does not replace it with a language-specific backend.
+
+| Target | Current interface | Verification boundary |
+| --- | --- | --- |
+| Linux user space | Native threads, stacks, values, memory, control, attach and cores | Required native and remote integration tests; multithreaded frame and deadlock inspection |
+| Linux kernel | Native remote debugging plus tasks, modules, symbols, stacks and kernel views | Pinned QEMU kernel lanes described above |
+| V8 / Node.js | Native engine symbols, threads, memory and type layouts when GDB has the matching debug information | Paired native GDB/MCP V8 isolate-initialization breakpoint, stack, helper and exit checks |
+| PHP / CGI | Native interpreter or CGI executable debugging through the ordinary target interface | Paired native GDB/MCP request-startup checks for CLI and CGI |
+| LLVM / Clang | Native compiler debugging and GDB-compatible symbols in compiled or JIT-generated programs | Paired Clang native and LLVM MCJIT breakpoint, stack, helper and exit checks |
+
+Thread inspection with `stack_depth` uses the same MI stack commands as
+single-thread inspection and keeps all returned frames at one stop. Per-thread
+unwind errors are returned on that thread; missing symbols are not inferred.
+
+With GDB, Clang, LLVM `lli`, Node.js, PHP CLI and PHP CGI installed, reproduce
+the runtime lane with:
+
+```sh
+cargo build --locked -p gdb-ai
+python3 tests/runtimes/verify.py target/debug/gdb-ai
+```
+
+Use `--gdb`, `--clang`, `--lli`, `--node`, `--php`, and `--php-cgi` to select
+matching installed builds. `--library-path` supplies a target library path
+for unpacked runtimes. The check uses temporary targets and one MCP connection,
+matches the same native breakpoint in both interfaces, reads its stack, runs
+a GDB command helper, and verifies normal exit and exact target output. It
+does not claim language features or JIT modes unsupported by that GDB/runtime
+combination.
+
 ## Native GDB/MI compatibility
 
 GDB/AI uses only interfaces present in the supported GDB 9 through 17 release

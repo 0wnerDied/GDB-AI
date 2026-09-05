@@ -30,7 +30,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bubblewrap gcc gcc-aarch64-linux-gnu gdb gdb-multiarch \
-            gdbserver qemu-user
+            gdbserver qemu-user clang llvm php-cli php-cgi
       - name: Verify debugger prerequisites
         run: |
           gdb --version
@@ -42,6 +42,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Run Rust tests
         run: cargo test --locked --workspace --all-targets
+      - name: Verify native runtime debugging against GDB
+        run: |
+          cargo build --locked -p gdb-ai
+          python3 tests/runtimes/verify.py target/debug/gdb-ai
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Verify schemas
