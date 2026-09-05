@@ -62,6 +62,17 @@ struct SnapshotResult<'a, T> {
     snapshot: &'a T,
 }
 
+#[derive(Serialize)]
+struct RawBase64<'a> {
+    raw_base64: &'a str,
+}
+
+#[derive(Serialize)]
+struct TokenRawBase64<'a> {
+    raw_base64: &'a str,
+    token: u64,
+}
+
 pub struct Journal {
     writer: Option<BufWriter<File>>,
     next_seq: u64,
@@ -72,6 +83,8 @@ pub struct Journal {
     unflushed_records: usize,
     durability: JournalDurability,
     gap: Option<JournalGap>,
+    encoding: Vec<u8>,
+    base64: String,
 }
 
 impl Journal {
@@ -102,6 +115,8 @@ impl Journal {
             unflushed_records: 0,
             durability,
             gap: None,
+            encoding: Vec::new(),
+            base64: String::new(),
         })
     }
 
@@ -126,24 +141,28 @@ impl Journal {
     }
 
     pub fn append_mi_input(&mut self, token: u64, raw: &[u8]) -> Result<u64> {
-        self.append(
+        // The payload borrows this scratch text while append mutably uses the
+        // journal, so move the allocation out and restore it after encoding.
+        let mut encoded = std::mem::take(&mut self.base64);
+        encoded.clear();
+        BASE64.encode_string(raw, &mut encoded);
+        let result = self.append(
             "mi.input",
-            serde_json::json!({ "token": token, "raw_base64": BASE64.encode(raw) }),
-        )
+            TokenRawBase64 {
+                raw_base64: &encoded,
+                token,
+            },
+        );
+        self.base64 = encoded;
+        result
     }
 
     pub fn append_mi_output(&mut self, raw: &[u8]) -> Result<u64> {
-        self.append(
-            "mi.output",
-            serde_json::json!({ "raw_base64": BASE64.encode(raw) }),
-        )
+        self.append_base64("mi.output", raw)
     }
 
     pub fn append_gdb_stderr(&mut self, bytes: &[u8]) -> Result<u64> {
-        self.append(
-            "gdb.stderr",
-            serde_json::json!({ "raw_base64": BASE64.encode(bytes) }),
-        )
+        self.append_base64("gdb.stderr", bytes)
     }
 
     pub fn append_inferior_output(
@@ -163,10 +182,7 @@ impl Journal {
     }
 
     pub fn append_inferior_input(&mut self, bytes: &[u8]) -> Result<u64> {
-        self.append(
-            "inferior.input",
-            serde_json::json!({ "raw_base64": BASE64.encode(bytes) }),
-        )
+        self.append_base64("inferior.input", bytes)
     }
 
     pub fn append_inferior_output_evidence(&mut self, evidence: Value) -> Result<u64> {
@@ -174,8 +190,28 @@ impl Journal {
     }
 
     pub fn append_domain(&mut self, event: DomainEvent) -> Result<JournaledEvent> {
-        let seq = self.append("normalized.event", &event)?;
+        let seq = self.append_domain_ref(&event)?;
         Ok(JournaledEvent::new(seq, event))
+    }
+
+    pub(crate) fn append_domain_ref(&mut self, event: &DomainEvent) -> Result<u64> {
+        self.append("normalized.event", event)
+    }
+
+    fn append_base64(&mut self, kind: &str, bytes: &[u8]) -> Result<u64> {
+        // Keep one allocation per session instead of allocating encoded text
+        // for every MI, stderr, or inferior I/O record.
+        let mut encoded = std::mem::take(&mut self.base64);
+        encoded.clear();
+        BASE64.encode_string(bytes, &mut encoded);
+        let result = self.append(
+            kind,
+            RawBase64 {
+                raw_base64: &encoded,
+            },
+        );
+        self.base64 = encoded;
+        result
     }
 
     pub fn append_state<T: Serialize>(&mut self, revision: u64, state: &T) -> Result<u64> {
@@ -211,12 +247,13 @@ impl Journal {
         // to allocate an intermediate JSON tree before the journal encoded
         // them. Serialize borrowed payloads directly without changing JSONL.
         let entry = EncodedJournalEntry { seq, kind, data };
-        let mut encoded = serde_json::to_vec(&entry)?;
-        encoded.push(b'\n');
+        self.encoding.clear();
+        serde_json::to_writer(&mut self.encoding, &entry)?;
+        self.encoding.push(b'\n');
         // 2026-08-28: Journals performed an fsync for every record and had no
         // total size bound, so noisy targets could exhaust I/O and disk space.
         let reserved = if self.is_durable() { 0 } else { 256 };
-        if self.bytes_written.saturating_add(encoded.len())
+        if self.bytes_written.saturating_add(self.encoding.len())
             > self.max_bytes.saturating_sub(reserved)
         {
             let error = Error::new(ErrorCode::OutputLimit, "session journal byte limit reached");
@@ -229,26 +266,32 @@ impl Journal {
                     from_seq: seq,
                     reason: error.to_string(),
                 };
-                let mut marker = serde_json::to_vec(&EncodedJournalEntry {
-                    seq,
-                    kind: "journal.gap",
-                    data: &gap,
-                })?;
-                marker.push(b'\n');
-                if self.bytes_written.saturating_add(marker.len()) <= self.max_bytes
+                self.encoding.clear();
+                serde_json::to_writer(
+                    &mut self.encoding,
+                    &EncodedJournalEntry {
+                        seq,
+                        kind: "journal.gap",
+                        data: &gap,
+                    },
+                )?;
+                self.encoding.push(b'\n');
+                if self.bytes_written.saturating_add(self.encoding.len()) <= self.max_bytes
                     && let Some(writer) = self.writer.as_mut()
                 {
-                    let _ = writer.write_all(&marker).and_then(|()| writer.flush());
+                    let _ = writer
+                        .write_all(&self.encoding)
+                        .and_then(|()| writer.flush());
                 }
                 self.stop_recording(error, seq)?;
             }
             return Ok(seq);
         }
-        if let Err(error) = self.writer.as_mut().unwrap().write_all(&encoded) {
+        if let Err(error) = self.writer.as_mut().unwrap().write_all(&self.encoding) {
             self.stop_recording(error.into(), self.flushed_seq + 1)?;
             return Ok(seq);
         }
-        self.bytes_written += encoded.len();
+        self.bytes_written += self.encoding.len();
         self.written_seq = seq;
         self.unflushed_records += 1;
         if self.unflushed_records >= 64 {
@@ -332,7 +375,33 @@ mod tests {
             .collect();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].kind, "mi.output");
+        assert_eq!(entries[0].data["raw_base64"], BASE64.encode(b"*running"));
         assert_eq!(entries[1].kind, "normalized.event");
+    }
+
+    #[test]
+    fn reused_base64_scratch_preserves_each_record() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let mut journal = Journal::create(&path, 4096).unwrap();
+        journal.append_mi_output(b"longer first record").unwrap();
+        journal.append_mi_input(7, &[0, 255]).unwrap();
+        journal.append_gdb_stderr(b"x").unwrap();
+        journal.append_inferior_input(b"").unwrap();
+        journal.flush().unwrap();
+
+        let entries: Vec<JournalEntry> = BufReader::new(File::open(path).unwrap())
+            .lines()
+            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+            .collect();
+        assert_eq!(
+            entries[0].data["raw_base64"],
+            BASE64.encode(b"longer first record")
+        );
+        assert_eq!(entries[1].data["token"], 7);
+        assert_eq!(entries[1].data["raw_base64"], BASE64.encode([0, 255]));
+        assert_eq!(entries[2].data["raw_base64"], BASE64.encode(b"x"));
+        assert_eq!(entries[3].data["raw_base64"], "");
     }
 
     #[test]
@@ -393,5 +462,24 @@ mod tests {
             .unwrap();
         assert_eq!(journal.unflushed_records, 0);
         assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    #[ignore = "microbenchmark: run explicitly with an optimized build"]
+    fn benchmark_journal_encoding() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let mut journal = Journal::create(&path, 128 * 1024 * 1024).unwrap();
+        let record = vec![b'x'; 256];
+        let started = std::time::Instant::now();
+        for _ in 0..50_000 {
+            journal.append_mi_output(&record).unwrap();
+        }
+        journal.flush().unwrap();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "encoded 50,000 MI records in {elapsed:?} ({:.0} records/s)",
+            50_000.0 / elapsed.as_secs_f64()
+        );
     }
 }
