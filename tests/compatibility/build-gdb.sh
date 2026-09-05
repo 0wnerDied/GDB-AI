@@ -19,6 +19,22 @@ curl -fsSL --retry 3 \
     -o "$archive"
 printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
 tar -xf "$archive" -C "$build_dir"
+# 2026-09-05: GDB 9 through 13 use a 2696-byte XSAVE buffer and can fail
+# register restoration when the host layout exceeds it. Widen only that
+# legacy scratch buffer so the historical MI implementations remain testable.
+# ponytail: 16 KiB covers current x86 CI; backport CPUID sizing if it grows.
+for xstate_header in \
+    "$build_dir/gdb-$version/gdbsupport/x86-xstate.h" \
+    "$build_dir/gdb-$version/gdb/gdbsupport/x86-xstate.h"
+do
+    if [ -f "$xstate_header" ] \
+        && grep -q '^#define X86_XSTATE_MAX_SIZE[[:space:]]*2696$' "$xstate_header"
+    then
+        sed -i \
+            's/^#define X86_XSTATE_MAX_SIZE[[:space:]]*2696$/#define X86_XSTATE_MAX_SIZE 16384/' \
+            "$xstate_header"
+    fi
+done
 mkdir "$build_dir/obj"
 cd "$build_dir/obj"
 
