@@ -218,6 +218,8 @@ With `--raw-admin`, session creation defaults to the raw profile. Use
 the reply includes that command's `console`, `target`, and `log` output.
 If the command fails after producing output, those streams remain available
 in `error.details`.
+Raw helpers defer registry reconciliation until a structured operation needs
+it, so consecutive native commands do not repeatedly rebuild cached state.
 
 Canonical mutations require the current revision and write lease. Valid owner
 mutations refresh the lease near half-life. MCP-created sessions use fixed

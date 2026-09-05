@@ -498,12 +498,41 @@ impl Gateway {
         // observations; only preemptive control needs a separate mutex.
         let stable_observation =
             effect == Effect::Read && requires_stable_target(request) && !out_of_band;
-        let _target_observation_guard = match &entry {
-            Some(entry) if stable_observation => Some(entry.target_state.read().await),
+        let needs_structured_state = !out_of_band
+            && (requires_stable_target(request)
+                || matches!(
+                    request.method,
+                    CanonicalMethod::BreakpointList | CanonicalMethod::SessionCapabilities
+                )
+                || (effect != Effect::Read
+                    && !matches!(
+                        request.method,
+                        CanonicalMethod::RawMi
+                            | CanonicalMethod::RawConsole
+                            | CanonicalMethod::SessionAttemptRecovery
+                            | CanonicalMethod::SessionReleaseWriteLease
+                    )));
+        let mut _target_observation_guard = match &entry {
+            Some(entry) if effect == Effect::Read && needs_structured_state => {
+                Some(entry.target_state.read().await)
+            }
             _ => None,
         };
+        // 2026-09-05: Concurrent readers each rebuilt dirty registries, and
+        // registry-only reads could race raw mutations. Upgrade by releasing
+        // the read guard first; recheck dirty state under the existing write
+        // guard so the readers share one refresh without an extra mutex.
+        let refresh_observation = _target_observation_guard.is_some()
+            && entry.as_ref().is_some_and(|entry| {
+                entry
+                    .handle
+                    .with_state(|state| state.reconciliation_required)
+            });
+        if refresh_observation {
+            _target_observation_guard.take();
+        }
         let _target_mutation_guard = match &entry {
-            Some(entry) if effect != Effect::Read && !out_of_band => {
+            Some(entry) if (effect != Effect::Read && !out_of_band) || refresh_observation => {
                 Some(entry.target_state.write().await)
             }
             _ => None,
@@ -543,20 +572,30 @@ impl Gateway {
                     ),
                 ));
             }
-            // 2026-08-28: TAINTED describes an unknowable outer state, but its
-            // managed registries still require one bounded reconciliation.
-            // 2026-08-29: Automatic reconciliation ran before lease recovery
-            // and termination, so an unresponsive backend could prevent the
-            // owner from regaining authority or releasing session resources.
-            if state.reconciliation_required
-                && !matches!(
-                    request.method,
-                    crate::protocol::CanonicalMethod::SessionClose
-                        | crate::protocol::CanonicalMethod::SessionForceAbort
-                        | crate::protocol::CanonicalMethod::SessionAcquireWriteLease
-                        | crate::protocol::CanonicalMethod::SessionAttemptRecovery
-                )
+            // 2026-09-05: Internal reconciliation advances the revision.
+            // Validate the caller's admission state first so a valid mutation
+            // after raw MI is not rejected by our own refresh.
+            if effect != Effect::Read
+                && let Err(error) = self
+                    .require_mutation_preconditions(request, caller, entry, &state, mode)
+                    .await
             {
+                self.store.audit(
+                    &caller.identity,
+                    Some(entry.handle.id()),
+                    &request.method,
+                    effect,
+                    false,
+                    Some(state.revision),
+                    &serde_json::to_value(request)?,
+                    "rejected",
+                )?;
+                return Err(error);
+            }
+            // 2026-09-05: Raw helpers eagerly rebuilt every registry, even
+            // when the next call only consumed output or ran another helper.
+            // Refresh before a structured operation needs that cached state.
+            if state.reconciliation_required && needs_structured_state {
                 self.reconcile_session(entry, true).await?;
                 state = entry.handle.state();
             }
@@ -579,25 +618,6 @@ impl Gateway {
                     ErrorCode::ConsistencyLost,
                     "session consistency is lost; only status, evidence, recovery, or close is allowed",
                 ));
-            }
-            if effect != Effect::Read
-                && let Err(error) = self
-                    .require_mutation_preconditions(request, caller, entry, &state, mode)
-                    .await
-            {
-                // 2026-08-28: Lease and revision rejections previously
-                // bypassed audit even though they are policy decisions.
-                self.store.audit(
-                    &caller.identity,
-                    Some(entry.handle.id()),
-                    &request.method,
-                    effect,
-                    false,
-                    Some(state.revision),
-                    &serde_json::to_value(request)?,
-                    "rejected",
-                )?;
-                return Err(error);
             }
         }
 

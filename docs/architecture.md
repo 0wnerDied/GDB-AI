@@ -131,6 +131,9 @@ starve debugger state events.
   evidence.
 - Every public response is bounded. Large content becomes a content-addressed
   artifact or a paged result with explicit continuation metadata.
+- Raw commands mark cached state dirty and return their output immediately.
+  Structured operations reconcile when they need the registries. Consecutive
+  raw commands and output reads do not trigger registry rebuilds.
 - Journal ordering is always before reducer application. `performance` mode
   batches flushes; `durable` mode also calls `sync_data` at declared API,
   state, snapshot, periodic, and close boundaries.

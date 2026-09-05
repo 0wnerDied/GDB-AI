@@ -48,10 +48,7 @@ impl Gateway {
                 ),
             })
             .await?;
-        // 2026-08-31: Propagating a raw command error before reconciliation
-        // made the next request pay for recovery and then fail its revision.
-        // Reconcile definitive GDB errors, but preserve timeout fences.
-        let reply = match entry
+        let reply = entry
             .handle
             .command_with_timeout(
                 MiCommand::new("-interpreter-exec")?
@@ -59,20 +56,11 @@ impl Gateway {
                     .string(command_text),
                 Duration::from_millis(timeout),
             )
-            .await
-        {
-            Ok(reply) => reply,
-            Err(error) if error.code == ErrorCode::GdbError => {
-                let _ = self.reconcile_session(&entry, false).await;
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-        };
-        let reconciliation = self.reconcile_session(&entry, false).await?;
+            .await?;
         let mut result = json!({
             "command": reply,
             "state_after": entry.handle.state(),
-            "reconciliation": reconciliation
+            "reconciliation": {"status": "deferred"}
         });
         // 2026-09-05: Runtime helper output was exposed only as MI byte
         // arrays or a later console-ring read. Keep each stream in this turn.
@@ -161,23 +149,14 @@ impl Gateway {
                 }
             })
             .await?;
-        let reply = match entry
+        let reply = entry
             .handle
             .command_with_timeout(command, Duration::from_millis(timeout))
-            .await
-        {
-            Ok(reply) => reply,
-            Err(error) if error.code == ErrorCode::GdbError => {
-                let _ = self.reconcile_session(&entry, managed).await;
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-        };
-        let reconciliation = self.reconcile_session(&entry, managed).await?;
+            .await?;
         Ok(json!({
             "command": reply,
             "state_after": entry.handle.state(),
-            "reconciliation": reconciliation
+            "reconciliation": {"status": "deferred"}
         }))
     }
 

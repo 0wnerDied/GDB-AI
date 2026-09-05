@@ -552,10 +552,9 @@ mod tests {
                 .is_none()
         );
         assert_eq!(raw["structuredContent"]["state"]["consistency"], "TAINTED");
-        assert!(
-            raw["structuredContent"]["state"]
-                .get("reconciliation_required")
-                .is_none()
+        assert_eq!(
+            raw["structuredContent"]["state"]["reconciliation_required"],
+            true
         );
         let helper = directory.path().join("failing-helper.gdb");
         std::fs::write(

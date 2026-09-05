@@ -39,7 +39,7 @@ async fn call(gateway: &Gateway, caller: &Caller, request: ApiRequest) -> ApiRes
 }
 
 #[tokio::test]
-async fn raw_admin_reconciles_managed_and_console_commands() {
+async fn raw_admin_defers_reconciliation_until_structured_inspection() {
     if !support::require_commands(&["gdb"]) {
         return;
     }
@@ -95,12 +95,25 @@ async fn raw_admin_reconciles_managed_and_console_commands() {
     .await;
     assert_eq!(
         raw_mi.state.as_ref().unwrap().consistency,
-        Consistency::Clean
+        Consistency::ManagedDirty
     );
     assert_eq!(
         raw_mi.result.as_ref().unwrap()["reconciliation"]["status"],
-        "clean"
+        "deferred"
     );
+    let breakpoint = call(
+        &gateway,
+        &caller,
+        request(
+            "breakpoint",
+            Some(&session_id),
+            "breakpoint.create",
+            raw_mi.revision,
+            json!({"lease_id": lease_id, "location": {"function": "main"}, "pending": true}),
+        ),
+    )
+    .await;
+    assert!(!breakpoint.state.as_ref().unwrap().reconciliation_required);
 
     let raw_console = call(
         &gateway,
@@ -109,7 +122,7 @@ async fn raw_admin_reconciles_managed_and_console_commands() {
             "raw-console",
             Some(&session_id),
             "raw.console",
-            raw_mi.revision,
+            breakpoint.revision,
             json!({
                 "lease_id": lease_id,
                 "command": "show version"
@@ -123,7 +136,7 @@ async fn raw_admin_reconciles_managed_and_console_commands() {
     );
     assert_eq!(
         raw_console.result.as_ref().unwrap()["reconciliation"]["status"],
-        "tainted"
+        "deferred"
     );
 
     let failed = gateway
@@ -145,7 +158,43 @@ async fn raw_admin_reconciles_managed_and_console_commands() {
         failed.error.as_ref().unwrap().code,
         gdb_ai_core::ErrorCode::GdbError
     );
-    assert!(!failed.state.as_ref().unwrap().reconciliation_required);
+    assert!(failed.state.as_ref().unwrap().reconciliation_required);
+    assert!(
+        gateway
+            .metrics()
+            .contains("gdbai_reconciliations_total 1\n")
+    );
+    let (inspected, capabilities) = tokio::join!(
+        call(
+            &gateway,
+            &caller,
+            request(
+                "inspect",
+                Some(&session_id),
+                "breakpoint.list",
+                None,
+                json!({}),
+            ),
+        ),
+        call(
+            &gateway,
+            &caller,
+            request(
+                "capabilities",
+                Some(&session_id),
+                "session.capabilities",
+                None,
+                json!({}),
+            )
+        )
+    );
+    assert!(!inspected.state.as_ref().unwrap().reconciliation_required);
+    assert!(!capabilities.state.as_ref().unwrap().reconciliation_required);
+    assert!(
+        gateway
+            .metrics()
+            .contains("gdbai_reconciliations_total 2\n")
+    );
 
     call(
         &gateway,
@@ -154,7 +203,7 @@ async fn raw_admin_reconciles_managed_and_console_commands() {
             "close",
             Some(&session_id),
             "session.close",
-            failed.revision,
+            inspected.revision,
             json!({"lease_id": lease_id}),
         ),
     )
