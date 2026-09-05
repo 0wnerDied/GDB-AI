@@ -377,7 +377,9 @@ pub struct PtyOutput {
     evidence_mode: OutputEvidenceMode,
     spool: Option<OutputSpool>,
     error: Mutex<Option<String>>,
-    closed: AtomicBool,
+    generation: AtomicU64,
+    closed_generation: AtomicU64,
+    reader_finished: AtomicBool,
     closed_notify: Notify,
     rearm_notify: Notify,
 }
@@ -390,7 +392,9 @@ impl PtyOutput {
             evidence_mode: OutputEvidenceMode::EphemeralRing,
             spool: None,
             error: Mutex::new(None),
-            closed: AtomicBool::new(false),
+            generation: AtomicU64::new(1),
+            closed_generation: AtomicU64::new(0),
+            reader_finished: AtomicBool::new(false),
             closed_notify: Notify::new(),
             rearm_notify: Notify::new(),
         }
@@ -413,14 +417,15 @@ impl PtyOutput {
             evidence_mode: config.evidence,
             spool,
             error: Mutex::new(None),
-            closed: AtomicBool::new(false),
+            generation: AtomicU64::new(1),
+            closed_generation: AtomicU64::new(0),
+            reader_finished: AtomicBool::new(false),
             closed_notify: Notify::new(),
             rearm_notify: Notify::new(),
         })
     }
 
     fn append(&self, bytes: &[u8]) {
-        self.closed.store(false, Ordering::Release);
         let mut ring = self
             .ring
             .lock()
@@ -440,24 +445,20 @@ impl PtyOutput {
         (ring.end_offset(), ring.dropped_bytes())
     }
 
-    fn mark_closed(&self) -> bool {
-        let changed = !self.closed.swap(true, Ordering::AcqRel);
-        if changed {
-            self.closed_notify.notify_waiters();
-        }
-        changed
+    fn mark_closed(&self, generation: u64) {
+        self.closed_generation.store(generation, Ordering::Release);
+        self.closed_notify.notify_waiters();
     }
 
     pub fn reset(&self) {
-        if self.closed.swap(false, Ordering::AcqRel) {
-            self.rearm_notify.notify_waiters();
-        }
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.rearm_notify.notify_waiters();
     }
 
-    async fn wait_rearmed(&self) {
+    async fn wait_rearmed(&self, generation: u64) {
         loop {
             let notified = self.rearm_notify.notified();
-            if !self.closed.load(Ordering::Acquire) {
+            if self.generation.load(Ordering::Acquire) != generation {
                 return;
             }
             notified.await;
@@ -553,14 +554,27 @@ impl PtyOutput {
     }
 
     pub async fn wait_closed(&self, timeout: Duration) -> bool {
-        if self.closed.load(Ordering::Acquire) {
-            return true;
-        }
-        let notified = self.closed_notify.notified();
-        if self.closed.load(Ordering::Acquire) {
-            return true;
-        }
-        tokio::time::timeout(timeout, notified).await.is_ok()
+        let generation = self.generation.load(Ordering::Acquire);
+        let wait = async {
+            loop {
+                let notified = self.closed_notify.notified();
+                if self.closed_generation.load(Ordering::Acquire) >= generation
+                    || self.reader_finished.load(Ordering::Acquire)
+                {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(timeout, wait).await.is_ok()
+    }
+
+    pub(crate) async fn drain(&self, timeout: Duration) -> bool {
+        // 2026-09-05: A reusable PTY's earlier hangup could satisfy the exit
+        // wait before its reopened slave's output was read. Request a fresh
+        // read generation so only a subsequent EOF/EIO completes this drain.
+        self.reset();
+        self.wait_closed(timeout).await
     }
 }
 
@@ -1123,13 +1137,14 @@ where
         if sender.is_closed() {
             break;
         }
+        let generation = output.generation.load(Ordering::Acquire);
         match reader.read(&mut buffer).await {
             Ok(0) => {
-                output.mark_closed();
+                output.mark_closed(generation);
                 // 2026-08-28: A closed reusable PTY master returns EOF/EIO
                 // immediately. Wait for the next run instead of polling it.
                 tokio::select! {
-                    _ = output.wait_rearmed() => {}
+                    _ = output.wait_rearmed(generation) => {}
                     _ = sender.closed() => break,
                 }
             }
@@ -1143,11 +1158,11 @@ where
                 }
             }
             Err(error) if error.raw_os_error() == Some(libc::EIO) => {
-                output.mark_closed();
+                output.mark_closed(generation);
                 // 2026-08-28: Linux reports PTY hangup as EIO. A target run
                 // explicitly rearms the reader when a new slave can appear.
                 tokio::select! {
-                    _ = output.wait_rearmed() => {}
+                    _ = output.wait_rearmed(generation) => {}
                     _ = sender.closed() => break,
                 }
             }
@@ -1155,12 +1170,14 @@ where
                 // 2026-08-30: Non-hangup PTY errors silently ended the reader,
                 // leaving close waiters timing out and evidence looking healthy.
                 output.set_evidence_error(format!("inferior PTY read failed: {error}"));
-                output.mark_closed();
+                output.mark_closed(generation);
                 let _ = try_notify_pty(&sender, BackendInput::InferiorPty);
                 break;
             }
         }
     }
+    output.reader_finished.store(true, Ordering::Release);
+    output.closed_notify.notify_waiters();
 }
 
 fn inferior_write_timeout(written: usize, total: usize) -> Error {
@@ -1282,7 +1299,6 @@ pub fn session_directory(root: &Path, session_id: &str) -> PathBuf {
 mod tests {
     use super::*;
     use std::{
-        io::Read,
         pin::Pin,
         sync::atomic::AtomicUsize,
         task::{Context, Poll},
@@ -1408,14 +1424,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dropping_parent_slave_exposes_master_hangup() {
+    #[tokio::test]
+    async fn reopening_slave_drains_output_after_an_earlier_hangup() {
         let pty = openpty(None, None).unwrap();
-        let mut master = std::fs::File::from(pty.master);
+        configure_inferior_pty(&pty.slave, true).unwrap();
+        let path = ttyname(&pty.slave).unwrap();
+        let master = std::fs::File::from(pty.master);
+        fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
         drop(pty.slave);
+        let (sender, _receiver) = mpsc::channel(1);
+        let output = Arc::new(PtyOutput::new(64));
+        let task = tokio::spawn(read_pty(
+            AsyncPty(AsyncFd::new(master).unwrap()),
+            sender,
+            output.clone(),
+        ));
 
-        let error = master.read(&mut [0]).unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        assert!(output.wait_closed(Duration::from_secs(1)).await);
+        let mut slave = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(path)
+            .unwrap();
+        let expected = b"runtime-result=42\n";
+        slave.write_all(expected).unwrap();
+        drop(slave);
+
+        assert!(output.drain(Duration::from_secs(1)).await);
+        assert_eq!(output.read(0, 64).bytes, expected);
+        task.abort();
     }
 
     #[tokio::test]
@@ -1483,13 +1520,11 @@ mod tests {
         let task = tokio::spawn(read_pty(CountingEof(reads.clone()), sender, output.clone()));
 
         assert!(output.wait_closed(Duration::from_secs(1)).await);
-        assert!(output.closed.load(Ordering::Acquire));
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(reads.load(Ordering::Relaxed), 1);
 
         output.reset();
         assert!(output.wait_closed(Duration::from_secs(1)).await);
-        assert!(output.closed.load(Ordering::Acquire));
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(reads.load(Ordering::Relaxed), 2);
         task.abort();
@@ -1509,7 +1544,7 @@ mod tests {
 
         read_pty(FailingReader, sender, output.clone()).await;
 
-        assert!(output.closed.load(Ordering::Acquire));
+        assert!(output.drain(Duration::from_secs(1)).await);
         assert!(matches!(
             receiver.recv().await,
             Some(BackendInput::InferiorPty)

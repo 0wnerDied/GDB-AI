@@ -911,9 +911,7 @@ impl SessionHandle {
                 .values()
                 .any(|inferior| inferior.status == InferiorStatus::Exited)
             {
-                self.inferior_output
-                    .wait_closed(Duration::from_secs(1))
-                    .await;
+                self.inferior_output.drain(Duration::from_secs(1)).await;
             }
             return Ok(self
                 .inferior_output

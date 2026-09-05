@@ -669,11 +669,7 @@ impl SessionWorker {
         }
         if !self.output_evidence_finalized {
             let _ = self.backend.shutdown().await;
-            if !self
-                .inferior_output
-                .wait_closed(Duration::from_secs(1))
-                .await
-            {
+            if !self.inferior_output.drain(Duration::from_secs(1)).await {
                 // 2026-08-30: Finalizing after a PTY close timeout could
                 // publish complete=true before trailing output was dropped.
                 self.inferior_output.set_evidence_error(
@@ -1137,11 +1133,7 @@ impl SessionWorker {
         let shutdown = self.backend.shutdown().await;
         closing?;
         shutdown?;
-        if !self
-            .inferior_output
-            .wait_closed(Duration::from_secs(1))
-            .await
-        {
+        if !self.inferior_output.drain(Duration::from_secs(1)).await {
             // 2026-08-30: A retained PTY slave can outlive GDB. Preserve the
             // bounded prefix, but do not certify it as complete evidence.
             self.inferior_output.set_evidence_error(
