@@ -232,7 +232,10 @@ jobs:
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/gdb/${{ matrix.version }}
-          key: gdb-${{ matrix.version }}-${{ matrix.sha256 }}-${{ matrix.image }}
+          # 2026-09-05: The cache ignored build-recipe changes, so a source
+          # compatibility fix reused the old installed GDB. Bind binaries to
+          # the exact recipe that produced them.
+          key: gdb-${{ matrix.version }}-${{ matrix.sha256 }}-${{ matrix.image }}-${{ hashFiles('tests/compatibility/build-gdb.sh') }}
       - name: Build GNU GDB ${{ matrix.version }}
         run: |
           tests/compatibility/build-gdb.sh \
