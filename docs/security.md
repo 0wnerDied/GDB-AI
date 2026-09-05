@@ -24,6 +24,8 @@ laboratory mutation, and raw administration. Raw access also requires an
 operator-enabled transport. Raw console accepts GDB's complete single-command
 surface after that authorization; raw MI cannot bypass workspace, attach,
 remote endpoint, inferior TTY, startup-setting, or process-lifecycle policy.
+An administrative caller defaults to `raw_admin` when creating a session;
+an explicitly requested profile still takes precedence.
 
 The default local profile is `lab_mutation`, which permits ordinary inferior
 input, debugger mutations, and remote GDB connections needed by exploit Agents.

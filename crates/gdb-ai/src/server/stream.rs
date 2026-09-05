@@ -493,7 +493,7 @@ mod tests {
             &sequence,
             json!({
                 "name": "gdb_session",
-                "arguments": {"action": "create", "profile": "raw_admin"}
+                "arguments": {"action": "create"}
             }),
         )
         .await

@@ -46,9 +46,13 @@ impl Gateway {
             profile: Option<Profile>,
         }
         let parameters: Parameters = parameters(request)?;
-        let profile = parameters
-            .profile
-            .unwrap_or(self.config.security.default_profile);
+        // 2026-09-05: --raw-admin advertised commands that its default
+        // session denied. Apply that explicit authority unless a profile is chosen.
+        let profile = parameters.profile.unwrap_or(if caller.admin {
+            Profile::RawAdmin
+        } else {
+            self.config.security.default_profile
+        });
         if profile != self.config.security.default_profile && !caller.admin {
             return Err(Error::new(
                 ErrorCode::PolicyDenied,
