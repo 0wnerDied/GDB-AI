@@ -51,6 +51,7 @@ cargo test --locked --release -p gdb-ai-core benchmark_output_replay -- --ignore
 cargo test --locked --release -p gdb-ai-core benchmark_raw_output_replay -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-core benchmark_large_gdb_output -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-core benchmark_gateway_admission -- --ignored --nocapture
+cargo test --locked --release -p gdb-ai-core benchmark_output_reads -- --ignored --nocapture
 ```
 
 Compare identical benchmark sources in baseline and candidate builds. Alternate
@@ -58,7 +59,9 @@ the prebuilt test binaries on the same CPU, exclude warm-up samples, and retain
 the JSON timing samples plus process peak RSS. The GDB benchmark includes
 command execution, output processing, and journaling; startup, shutdown, and
 replay verification are outside its timer. These workloads measure data-path
-costs, not overall Agent task completion time.
+costs, not overall Agent task completion time. Output-read samples distinguish
+ring copying from copying plus lossless text-response construction; they do
+not include JSON serialization or transport dispatch.
 
 ## Agent exploit speed
 

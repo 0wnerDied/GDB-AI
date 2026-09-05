@@ -54,13 +54,19 @@ impl ByteRing {
     pub fn read(&self, after_offset: u64, max_bytes: usize) -> RingRead {
         let actual_start = after_offset.clamp(self.start_offset, self.end_offset);
         let skip = (actual_start - self.start_offset) as usize;
-        let bytes: Vec<u8> = self
-            .bytes
-            .iter()
-            .skip(skip)
-            .take(max_bytes)
-            .copied()
-            .collect();
+        // 2026-09-06: Per-byte collection held output readers in a copy loop.
+        // Copy at most two contiguous slices while preserving the cursor bounds.
+        let length = max_bytes.min(self.bytes.len() - skip);
+        let (first, second) = self.bytes.as_slices();
+        let mut bytes = Vec::with_capacity(length);
+        if skip < first.len() {
+            let end = (skip + length).min(first.len());
+            bytes.extend_from_slice(&first[skip..end]);
+            bytes.extend_from_slice(&second[..length - bytes.len()]);
+        } else {
+            let start = skip - first.len();
+            bytes.extend_from_slice(&second[start..start + length]);
+        }
         RingRead {
             requested_offset: after_offset,
             available_from: self.start_offset,
@@ -88,11 +94,22 @@ mod tests {
         let mut ring = ByteRing::new(4);
         assert_eq!(ring.append(b"abc"), 0);
         assert_eq!(ring.append(b"def"), 3);
-        let read = ring.read(0, 10);
-        assert!(read.gap);
-        assert_eq!(read.available_from, 2);
-        assert_eq!(read.bytes, b"cdef");
-        assert_eq!(read.next_offset, 6);
+        for (offset, limit, expected, next_offset) in [
+            (0, 10, b"cdef".as_slice(), 6),
+            (3, 2, b"de", 5),
+            (4, 10, b"ef", 6),
+            (5, 1, b"f", 6),
+            (6, 10, b"", 6),
+            (100, 10, b"", 6),
+            (0, 0, b"", 2),
+        ] {
+            let read = ring.read(offset, limit);
+            assert_eq!(read.requested_offset, offset);
+            assert_eq!(read.gap, offset < 2);
+            assert_eq!(read.available_from, 2);
+            assert_eq!(read.bytes, expected);
+            assert_eq!(read.next_offset, next_offset);
+        }
     }
 
     #[test]
@@ -105,8 +122,50 @@ mod tests {
 
         assert_eq!(ring.bytes.capacity(), capacity);
         assert_eq!(
-            ring.read(512, 1024).bytes,
+            ring.read(512, usize::MAX).bytes,
             [vec![b'a'; 512], vec![b'b'; 512]].concat()
         );
+    }
+
+    #[test]
+    #[ignore = "microbenchmark: run explicitly with an optimized build"]
+    fn benchmark_output_reads() {
+        for (read_bytes, wrapped, reads) in [
+            (64, false, 200_000),
+            (64 * 1024, false, 4096),
+            (64 * 1024, true, 4096),
+            (256 * 1024, true, 1024),
+        ] {
+            let mut ring = ByteRing::new(read_bytes * 2);
+            ring.append(&vec![b'x'; read_bytes * 2]);
+            if wrapped {
+                ring.append(&vec![b'x'; read_bytes / 2]);
+            }
+            let offset = ring.end_offset() - read_bytes as u64;
+            assert_eq!(ring.read(offset, read_bytes).bytes, vec![b'x'; read_bytes]);
+            for encode in [false, true] {
+                let started = std::time::Instant::now();
+                for _ in 0..reads {
+                    let read = ring.read(std::hint::black_box(offset), read_bytes);
+                    if encode {
+                        std::hint::black_box(crate::normalize::byte_content(read.bytes));
+                    } else {
+                        std::hint::black_box(read);
+                    }
+                }
+                let elapsed = started.elapsed();
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "benchmark": "output_reads",
+                        "read_bytes": read_bytes,
+                        "wrapped": wrapped,
+                        "encode": encode,
+                        "reads": reads,
+                        "elapsed_ns": elapsed.as_nanos()
+                    })
+                );
+            }
+        }
     }
 }

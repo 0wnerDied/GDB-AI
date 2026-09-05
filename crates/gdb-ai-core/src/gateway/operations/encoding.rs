@@ -152,8 +152,8 @@ mod tests {
 
     #[test]
     fn byte_content_uses_one_lossless_representation() {
-        let text = byte_content(b"hello".to_vec());
-        assert_eq!(text["text"], "hello");
+        let text = byte_content("hello, 世界".as_bytes().to_vec());
+        assert_eq!(text["text"], "hello, 世界");
         assert!(!text.contains_key("data_base64"));
 
         let binary = byte_content(vec![0xff]);
