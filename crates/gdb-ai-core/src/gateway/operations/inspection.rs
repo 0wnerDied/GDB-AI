@@ -33,9 +33,11 @@ impl Gateway {
     pub(super) async fn inspection_get(&self, request: &ApiRequest) -> Result<Value> {
         let view = string(&request.parameters, "view")?;
         let entry = self.entry(required_session(request)?).await?;
-        let state = entry.handle.state();
+        // 2026-09-06: Every view copied all registries before dispatch, even
+        // delegated or tiny views. Borrow small projections, retaining owned
+        // snapshots for full views and debugger or provider work.
         match view.as_str() {
-            "stop_context" => {
+            "stop_context" => entry.handle.with_state(|state| {
                 // 2026-08-30: This Agent-facing view returned the complete
                 // session registry, repeating unrelated breakpoints, modules,
                 // threads, and signal policies at every stop.
@@ -55,8 +57,8 @@ impl Gateway {
                     "event_seq": state.event_seq,
                     "partial": state.stop_id.is_some() && frame.is_none()
                 }))
-            }
-            "target" => Ok(serde_json::to_value(state)?),
+            }),
+            "target" => Ok(serde_json::to_value(entry.handle.state())?),
             "capabilities" => Ok(serde_json::to_value(entry.handle.capabilities())?),
             "providers" => self.session_providers(request).await,
             "crash" => {
@@ -72,6 +74,7 @@ impl Gateway {
             }
             "threads" => self.inspection_threads(&entry, request).await,
             "stack" => {
+                let state = entry.handle.state();
                 let limit =
                     bounded_limit(&request.parameters, 16, self.config.limits.stack_frames)?;
                 let offset = request
@@ -107,16 +110,18 @@ impl Gateway {
                 }))
             }
             "frame" => {
+                let stop_id = entry.handle.with_state(|state| state.stop_id.clone());
                 let reply = self
                     .inspection_command(&entry, request, "-stack-info-frame", vec![])
                     .await?;
                 Ok(json!({
-                    "stop_id": state.stop_id,
+                    "stop_id": stop_id,
                     "frame": frame_summary(&reply.record),
                     "evidence_seq": reply.evidence_seq
                 }))
             }
             "locals" => {
+                let stop_id = entry.handle.with_state(|state| state.stop_id.clone());
                 let reply = self
                     .inspection_command(
                         &entry,
@@ -126,12 +131,13 @@ impl Gateway {
                     )
                     .await?;
                 Ok(json!({
-                    "stop_id": state.stop_id,
+                    "stop_id": stop_id,
                     "variables": normalized_variables(&reply.record, "variables"),
                     "evidence_seq": reply.evidence_seq
                 }))
             }
             "arguments" => {
+                let stop_id = entry.handle.with_state(|state| state.stop_id.clone());
                 let limit =
                     bounded_limit(&request.parameters, 16, self.config.limits.stack_frames)?;
                 let offset = request
@@ -154,7 +160,7 @@ impl Gateway {
                     )
                     .await?;
                 Ok(json!({
-                    "stop_id": state.stop_id,
+                    "stop_id": stop_id,
                     "offset": offset,
                     "limit": limit,
                     "arguments": normalized_arguments(&reply.record),
@@ -163,6 +169,7 @@ impl Gateway {
             }
             "registers" => self.register_read(request).await,
             "modules" => {
+                let state = entry.handle.state();
                 let reply = self
                     .inspection_command(&entry, request, "-file-list-shared-libraries", vec![])
                     .await?;
@@ -180,8 +187,9 @@ impl Gateway {
             "breakpoints" => {
                 let reply = entry.handle.command(MiCommand::new("-break-list")?).await?;
                 reconcile_breakpoints(&entry.handle, &reply.record).await?;
+                let breakpoints = entry.handle.with_state(|state| state.breakpoints.clone());
                 Ok(json!({
-                    "breakpoints": entry.handle.state().breakpoints,
+                    "breakpoints": breakpoints,
                     "evidence_seq": reply.evidence_seq
                 }))
             }
@@ -200,6 +208,7 @@ impl Gateway {
                 }
             }
             "mappings" => {
+                let state = entry.handle.state();
                 let limit = bounded_limit(
                     &request.parameters,
                     64.min(self.config.limits.value_children),
@@ -216,7 +225,11 @@ impl Gateway {
                     })?;
                 mappings(&state, offset, limit)
             }
-            "signals" => Ok(serde_json::to_value(state.signal_policies)?),
+            "signals" => Ok(serde_json::to_value(
+                entry
+                    .handle
+                    .with_state(|state| state.signal_policies.clone()),
+            )?),
             _ => Err(Error::new(
                 ErrorCode::InvalidArgument,
                 "unsupported inspection view",
@@ -421,10 +434,13 @@ impl Gateway {
         name: &str,
         arguments: Vec<(&str, String)>,
     ) -> Result<CommandReply> {
-        let state = entry.handle.state();
-        require_stopped_context(&request.parameters, &state)?;
-        let mut command = MiCommand::new(name)?;
-        command = context_options(command, &request.parameters, &state)?;
+        // 2026-09-06: Command construction copied a full state that was never
+        // needed after encoding. Validate and encode from one borrow, released
+        // before queueing the owned command or waiting for GDB.
+        let mut command = entry.handle.with_state(|state| {
+            require_stopped_context(&request.parameters, state)?;
+            context_options(MiCommand::new(name)?, &request.parameters, state)
+        })?;
         for (kind, argument) in arguments {
             command = if kind == "bare" {
                 command.bare(argument)?

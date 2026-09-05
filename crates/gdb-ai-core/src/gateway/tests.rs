@@ -57,25 +57,32 @@ async fn benchmark_gateway_admission() {
         }
         entry.handle.flush_journal().await.unwrap();
         let expected = entry.handle.state();
-        let started = std::time::Instant::now();
-        for _ in 0..1_000 {
-            let response = gateway.dispatch_agent(request.clone(), &caller).await;
-            assert!(response.error.is_none(), "{:?}", response.error);
-            let state = response.state.unwrap();
-            assert_eq!(state.revision, expected.revision);
-            assert_eq!(state.modules.len(), expected.modules.len());
+        for view in [None, Some("stop_context")] {
+            if let Some(view) = view {
+                request.method = CanonicalMethod::InspectionGet;
+                request.parameters = json!({"view": view});
+            }
+            let started = std::time::Instant::now();
+            for _ in 0..1_000 {
+                let response = gateway.dispatch_agent(request.clone(), &caller).await;
+                assert!(response.error.is_none(), "{:?}", response.error);
+                let state = response.state.unwrap();
+                assert_eq!(state.revision, expected.revision);
+                assert_eq!(state.modules.len(), expected.modules.len());
+            }
+            let elapsed = started.elapsed();
+            eprintln!(
+                "{}",
+                json!({
+                    "benchmark": "gateway_admission",
+                    "view": view,
+                    "modules": modules,
+                    "requests": 1000,
+                    "elapsed_ns": elapsed.as_nanos()
+                })
+            );
         }
-        let elapsed = started.elapsed();
         gateway.shutdown().await;
-        eprintln!(
-            "{}",
-            json!({
-                "benchmark": "gateway_admission",
-                "modules": modules,
-                "requests": 1000,
-                "elapsed_ns": elapsed.as_nanos()
-            })
-        );
     }
 }
 

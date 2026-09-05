@@ -267,6 +267,16 @@ async fn local_debugging_vertical_slice() {
     );
     let stop_context = stop_context.result.unwrap();
     assert_eq!(stop_context["stop_id"], first_stop);
+    let launched_state = launched.state.as_ref().unwrap();
+    assert_eq!(
+        stop_context["thread_id"],
+        json!(launched_state.stopped_thread_id)
+    );
+    assert_eq!(stop_context["frame"], json!(launched_state.stopped_frame()));
+    assert_eq!(
+        stop_context["execution_epoch"],
+        launched_state.execution_epoch
+    );
     assert!(stop_context.get("inferiors").is_none());
     assert!(stop_context.get("breakpoints").is_none());
 

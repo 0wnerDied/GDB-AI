@@ -59,9 +59,11 @@ the prebuilt test binaries on the same CPU, exclude warm-up samples, and retain
 the JSON timing samples plus process peak RSS. The GDB benchmark includes
 command execution, output processing, and journaling; startup, shutdown, and
 replay verification are outside its timer. These workloads measure data-path
-costs, not overall Agent task completion time. Output-read samples distinguish
-ring copying from copying plus lossless text-response construction; they do
-not include JSON serialization or transport dispatch.
+costs, not overall Agent task completion time. Gateway samples compare
+capability and stop-context reads with empty and populated module registries.
+Output-read samples distinguish ring copying from copying plus lossless
+text-response construction; they do not include JSON serialization or
+transport dispatch.
 
 ## Agent exploit speed
 
