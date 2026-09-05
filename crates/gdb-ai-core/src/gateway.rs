@@ -14,7 +14,7 @@ use crate::{
     Error, ErrorCode, Result,
     artifact::ArtifactStore,
     config::Config,
-    domain::{Address, SessionState, TargetOrigin, WriteLease},
+    domain::{Address, TargetOrigin, WriteLease},
     metrics::Metrics,
     persistence::{ArtifactLimits, StorageLock, Store, prune_retained_sessions},
     policy::{Effect, Profile, effect_for_method},
@@ -431,7 +431,13 @@ impl Gateway {
             // 2026-08-29: The caller-controlled `volatile` flag previously
             // decided whether a read might mutate a remote device. Classify
             // the target range here instead of trusting request metadata.
-            let range_effect = classify_memory_range(&entry.handle.state(), request)?;
+            let (target_origin, target_pid) = entry.handle.with_state(|state| {
+                (
+                    state.target_origin,
+                    state.inferiors.values().find_map(|inferior| inferior.pid),
+                )
+            });
+            let range_effect = classify_memory_range(target_origin, target_pid, request)?;
             // 2026-09-01: Labeling an admitted target-effect read as a
             // mutation made projected MCP demand a revision for local memory
             // failures. Mutation-capable profiles preserve read coordination;
@@ -555,10 +561,11 @@ impl Gateway {
             // 2026-09-01: execution.wait intentionally changes from its
             // admission state before inspecting the resulting stop. Its
             // nested stable observation validates that new stop instead.
-            (Some(entry), true) if request.method != CanonicalMethod::ExecutionWait => {
-                let state = entry.handle.state();
-                Some((state.stop_id, state.execution_epoch))
-            }
+            (Some(entry), true) if request.method != CanonicalMethod::ExecutionWait => Some(
+                entry
+                    .handle
+                    .with_state(|state| (state.stop_id.clone(), state.execution_epoch)),
+            ),
             _ => None,
         };
         if let Some(entry) = &entry {
@@ -661,8 +668,10 @@ impl Gateway {
         if result.is_ok()
             && let (Some(entry), Some((stop_id, execution_epoch))) = (&entry, observation_baseline)
         {
-            let current = entry.handle.state();
-            if current.stop_id != stop_id || current.execution_epoch != execution_epoch {
+            let changed = entry.handle.with_state(|current| {
+                current.stop_id != stop_id || current.execution_epoch != execution_epoch
+            });
+            if changed {
                 result = Err(Error::new(
                     ErrorCode::StaleContext,
                     "target stop changed during observation",
@@ -1240,7 +1249,11 @@ enum MemoryRangeEffect {
     Unknown,
 }
 
-fn classify_memory_range(state: &SessionState, request: &ApiRequest) -> Result<MemoryRangeEffect> {
+fn classify_memory_range(
+    target_origin: TargetOrigin,
+    target_pid: Option<u64>,
+    request: &ApiRequest,
+) -> Result<MemoryRangeEffect> {
     let address_field = if request.method == crate::protocol::CanonicalMethod::MemorySearch {
         "start"
     } else {
@@ -1261,11 +1274,11 @@ fn classify_memory_range(state: &SessionState, request: &ApiRequest) -> Result<M
         .checked_add(length.saturating_sub(1))
         .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "memory range overflows"))?;
 
-    match state.target_origin {
+    match target_origin {
         TargetOrigin::Core => Ok(MemoryRangeEffect::Ordinary),
         TargetOrigin::Remote | TargetOrigin::Unknown => Ok(MemoryRangeEffect::Unknown),
         TargetOrigin::Local | TargetOrigin::Attach => {
-            let Some(pid) = state.inferiors.values().find_map(|inferior| inferior.pid) else {
+            let Some(pid) = target_pid else {
                 return Ok(MemoryRangeEffect::Unknown);
             };
             let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {

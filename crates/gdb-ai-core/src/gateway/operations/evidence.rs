@@ -134,8 +134,10 @@ impl Gateway {
         // in the gap and left a waiter blocked until timeout. Subscribe first,
         // then use state as the coalescing check for that race window.
         let mut events = entry.handle.subscribe();
-        let current = entry.handle.state();
-        if current.event_seq > after {
+        if let Some(current) = entry
+            .handle
+            .with_state(|state| (state.event_seq > after).then(|| state.clone()))
+        {
             return Ok(json!({ "state": current, "coalesced": true }));
         }
         let timeout_ms = request
@@ -153,13 +155,15 @@ impl Gateway {
             .await
             .map_err(|_| Error::new(ErrorCode::Timeout, "event wait timed out").retryable())?
             .map_err(|error| {
-                let current = entry.handle.state();
+                let (session_id, event_seq) = entry
+                    .handle
+                    .with_state(|state| (state.session_id.0.clone(), state.event_seq));
                 // 2026-08-29: Typed EVENT_GAP errors were visible to callers
                 // but absent from operational metrics, hiding resync pressure.
                 if matches!(&error, tokio::sync::broadcast::error::RecvError::Lagged(_)) {
                     self.metrics.event_gap();
                 }
-                event_receive_error(error, &current.session_id.0, after, current.event_seq)
+                event_receive_error(error, &session_id, after, event_seq)
             })?;
         Ok(serde_json::to_value(event)?)
     }

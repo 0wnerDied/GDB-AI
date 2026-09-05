@@ -276,11 +276,11 @@ impl Gateway {
 
     pub(super) async fn session_providers(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
-        Ok(serde_json::to_value(crate::providers::descriptors(
-            &entry.handle.state(),
-            &entry.handle.capabilities(),
-            self.config.security.kernel_enabled,
-        ))?)
+        let capabilities = entry.handle.capabilities();
+        let descriptors = entry.handle.with_state(|state| {
+            crate::providers::descriptors(state, &capabilities, self.config.security.kernel_enabled)
+        });
+        Ok(serde_json::to_value(descriptors)?)
     }
 
     pub(super) async fn session_transcript(&self, request: &ApiRequest) -> Result<Value> {
@@ -848,14 +848,14 @@ impl Gateway {
             .handle
             .command(MiCommand::new("-stack-info-frame")?)
             .await?;
-        let backend_id = entry
-            .handle
-            .state()
-            .inferiors
-            .keys()
-            .next()
-            .cloned()
-            .unwrap_or_else(|| "i1".into());
+        let backend_id = entry.handle.with_state(|state| {
+            state
+                .inferiors
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| "i1".into())
+        });
         entry
             .handle
             .record_event(DomainEvent::TargetStopped {

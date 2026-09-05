@@ -352,7 +352,7 @@ async fn delete_probe_breakpoint(handle: &SessionHandle, backend_number: String)
     handle
         .cleanup_command(MiCommand::new("-break-delete")?.bare(backend_number.clone())?)
         .await?;
-    if handle.state().breakpoints.contains_key(&backend_number) {
+    if handle.with_state(|state| state.breakpoints.contains_key(&backend_number)) {
         handle
             .record_event(DomainEvent::BreakpointDeleted { backend_number })
             .await?;
@@ -617,12 +617,12 @@ impl Gateway {
         {
             synchronize_breakpoint(&entry.handle, fields).await?;
         }
-        breakpoint.breakpoint_id = entry
-            .handle
-            .state()
-            .breakpoints
-            .get(&backend_number)
-            .map(|state| state.id.clone());
+        breakpoint.breakpoint_id = entry.handle.with_state(|state| {
+            state
+                .breakpoints
+                .get(&backend_number)
+                .map(|state| state.id.clone())
+        });
         // 2026-09-01: Probes rejected stripped PIE offsets before their module
         // mapped, forcing Agents to create and drive a second breakpoint. Use
         // the existing stable-ID rebind path so attribution and cleanup follow

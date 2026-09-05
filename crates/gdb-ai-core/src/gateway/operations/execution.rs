@@ -221,14 +221,14 @@ pub(super) fn breakpoint_number(entry: &SessionEntry, parameters: &Value) -> Res
         return Ok(number.to_owned());
     }
     let public = string(parameters, "breakpoint_id")?;
-    entry
-        .handle
-        .state()
-        .breakpoints
-        .values()
-        .find(|breakpoint| breakpoint.id.0 == public)
-        .map(|breakpoint| breakpoint.backend_number.clone())
-        .ok_or_else(|| Error::new(ErrorCode::NotFound, "breakpoint not found"))
+    entry.handle.with_state(|state| {
+        state
+            .breakpoints
+            .values()
+            .find(|breakpoint| breakpoint.id.0 == public)
+            .map(|breakpoint| breakpoint.backend_number.clone())
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "breakpoint not found"))
+    })
 }
 
 impl Gateway {
@@ -573,31 +573,36 @@ impl Gateway {
         }
         if let (Some((module, offset)), Some(command)) = (pending_module, rebind_command) {
             let backend_number = inserted_breakpoint_number(&reply.record)?;
-            let state = entry.handle.state();
-            if let Some(breakpoint) = state.breakpoints.get(&backend_number) {
+            let breakpoint = entry.handle.with_state(|state| {
+                state
+                    .breakpoints
+                    .get(&backend_number)
+                    .map(|breakpoint| (breakpoint.id.clone(), breakpoint.enabled))
+            });
+            if let Some((id, enabled)) = breakpoint {
                 entry
                     .handle
                     .register_pending_module_breakpoint(PendingModuleBreakpoint {
-                        id: breakpoint.id.clone(),
+                        id,
                         backend_number,
                         module,
                         offset,
-                        enabled: breakpoint.enabled,
+                        enabled,
                         command,
                     })
                     .await?;
             }
         }
-        let state = entry.handle.state();
+        let breakpoints = entry.handle.with_state(|state| state.breakpoints.clone());
         // 2026-08-30: Returning the complete registry after every insert made
         // repeated Agent breakpoint creation produce quadratic MCP output.
         let breakpoint = inserted_number
             .as_ref()
-            .and_then(|number| state.breakpoints.get(number));
+            .and_then(|number| breakpoints.get(number));
         Ok(json!({
             "command": reply,
             "breakpoint": breakpoint,
-            "breakpoints": state.breakpoints
+            "breakpoints": breakpoints
         }))
     }
 
@@ -670,12 +675,12 @@ impl Gateway {
         }
         let replies = update?;
         let list = list?;
-        let state = entry.handle.state();
+        let breakpoints = entry.handle.with_state(|state| state.breakpoints.clone());
         Ok(json!({
             "command": replies.last(),
             "commands": replies,
-            "breakpoint": state.breakpoints.get(&number),
-            "breakpoints": state.breakpoints,
+            "breakpoint": breakpoints.get(&number),
+            "breakpoints": breakpoints,
             "evidence_seq": list.evidence_seq
         }))
     }
@@ -683,22 +688,23 @@ impl Gateway {
     pub(super) async fn breakpoint_delete(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
         let number = breakpoint_number(&entry, &request.parameters)?;
-        let deleted = entry
-            .handle
-            .state()
-            .breakpoints
-            .get(&number)
-            .map(|breakpoint| breakpoint.id.clone());
+        let deleted = entry.handle.with_state(|state| {
+            state
+                .breakpoints
+                .get(&number)
+                .map(|breakpoint| breakpoint.id.clone())
+        });
         let reply = entry
             .handle
             .command(MiCommand::new("-break-delete")?.bare(number.clone())?)
             .await?;
         let list = entry.handle.command(MiCommand::new("-break-list")?).await?;
         reconcile_breakpoints(&entry.handle, &list.record).await?;
+        let breakpoints = entry.handle.with_state(|state| state.breakpoints.clone());
         Ok(json!({
             "command": reply,
             "deleted": {"breakpoint_id": deleted, "backend_number": number},
-            "breakpoints": entry.handle.state().breakpoints,
+            "breakpoints": breakpoints,
             "evidence_seq": list.evidence_seq
         }))
     }
@@ -707,15 +713,19 @@ impl Gateway {
         let entry = self.entry(required_session(request)?).await?;
         let reply = entry.handle.command(MiCommand::new("-break-list")?).await?;
         reconcile_breakpoints(&entry.handle, &reply.record).await?;
+        let breakpoints = entry.handle.with_state(|state| state.breakpoints.clone());
         Ok(json!({
-            "breakpoints": entry.handle.state().breakpoints,
+            "breakpoints": breakpoints,
             "evidence_seq": reply.evidence_seq
         }))
     }
 
     pub(super) async fn signal_get(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
-        Ok(serde_json::to_value(entry.handle.state().signal_policies)?)
+        let policies = entry
+            .handle
+            .with_state(|state| state.signal_policies.clone());
+        Ok(serde_json::to_value(policies)?)
     }
 
     pub(super) async fn signal_update(&self, request: &ApiRequest) -> Result<Value> {

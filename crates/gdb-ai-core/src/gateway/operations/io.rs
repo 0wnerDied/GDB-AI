@@ -120,7 +120,7 @@ async fn wait_for_pty(
             | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
             Ok(Ok(PublishedEvent { event, .. }))
                 if matches!(event, DomainEvent::BackendExited { .. })
-                    || handle.state().attributed_exit(&event) =>
+                    || handle.with_state(|state| state.attributed_exit(&event)) =>
             {
                 return Err(Error::new(
                     ErrorCode::InvalidState,

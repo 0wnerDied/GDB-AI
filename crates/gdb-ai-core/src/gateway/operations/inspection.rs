@@ -355,8 +355,9 @@ impl Gateway {
         let mut symbols = normalized_symbols(&search.record);
         let truncated = symbols.len() > limit;
         symbols.truncate(limit);
+        let stop_id = entry.handle.with_state(|state| state.stop_id.clone());
         let mut result = json!({
-            "stop_id": entry.handle.state().stop_id,
+            "stop_id": stop_id,
             "query": query,
             "kind": kind,
             "limit": limit,

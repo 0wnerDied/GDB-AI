@@ -54,7 +54,7 @@ pub(super) async fn reconcile_inferiors(handle: &SessionHandle, record: &MiRecor
             ))
         })
         .collect::<BTreeMap<_, _>>();
-    let existing = handle.state().inferiors.keys().cloned().collect::<Vec<_>>();
+    let existing = handle.with_state(|state| state.inferiors.keys().cloned().collect::<Vec<_>>());
     for (backend_id, pid) in &observed {
         handle
             .record_event(DomainEvent::InferiorAdded {
@@ -77,13 +77,14 @@ pub(super) async fn reconcile_threads(handle: &SessionHandle, record: &MiRecord)
     let Some(threads) = MiResult::find(record.results(), "threads") else {
         return Ok(());
     };
-    let fallback_group = handle
-        .state()
-        .inferiors
-        .keys()
-        .next()
-        .cloned()
-        .unwrap_or_else(|| "i1".into());
+    let fallback_group = handle.with_state(|state| {
+        state
+            .inferiors
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "i1".into())
+    });
     let observed = aggregate_items(threads, "thread")
         .into_iter()
         .filter_map(|fields| {
@@ -95,19 +96,20 @@ pub(super) async fn reconcile_threads(handle: &SessionHandle, record: &MiRecord)
             ))
         })
         .collect::<BTreeMap<_, _>>();
-    let existing = handle
-        .state()
-        .inferiors
-        .values()
-        .flat_map(|inferior| {
-            inferior
-                .threads
-                .keys()
-                .cloned()
-                .map(|thread| (thread, inferior.backend_id.clone()))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    let existing = handle.with_state(|state| {
+        state
+            .inferiors
+            .values()
+            .flat_map(|inferior| {
+                inferior
+                    .threads
+                    .keys()
+                    .cloned()
+                    .map(|thread| (thread, inferior.backend_id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    });
     for (backend_thread, backend_inferior) in &observed {
         handle
             .record_event(DomainEvent::ThreadCreated {
@@ -148,12 +150,7 @@ pub(super) async fn reconcile_breakpoints(handle: &SessionHandle, record: &MiRec
             Some((number, (enabled, pending)))
         })
         .collect::<BTreeMap<_, _>>();
-    let existing = handle
-        .state()
-        .breakpoints
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
+    let existing = handle.with_state(|state| state.breakpoints.keys().cloned().collect::<Vec<_>>());
     for fields in aggregate_items(body, "bkpt") {
         synchronize_breakpoint(handle, fields).await?;
     }
@@ -177,7 +174,7 @@ pub(super) async fn synchronize_breakpoint(
     let enabled = MiResult::find_str(fields, "enabled").is_none_or(|value| value == "y");
     let pending = MiResult::find_str(fields, "pending").is_some_and(|value| value == "y")
         || MiResult::find_str(fields, "addr") == Some("<PENDING>");
-    let previous = handle.state().breakpoints.get(&backend_number).cloned();
+    let previous = handle.with_state(|state| state.breakpoints.get(&backend_number).cloned());
     // 2026-08-28: Breakpoint reads relied on optional notifications and then
     // emitted unconditional modifications, leaving stale registries or
     // advancing revisions on every list. Synchronize only observed changes.
@@ -200,23 +197,22 @@ pub(super) async fn synchronize_breakpoint(
         };
         handle.record_event(event).await?;
     }
-    let state = handle.state();
-    let existing = state
-        .breakpoints
-        .get(&backend_number)
-        .map(|breakpoint| breakpoint.locations.clone())
-        .unwrap_or_default();
-    let public_id = state
-        .breakpoints
-        .get(&backend_number)
-        .map(|breakpoint| breakpoint.id.0.clone())
-        .unwrap_or_else(|| {
-            if state.session_id.uses_compact_handles() {
-                format!("b{}", backend_number.replace('.', "_"))
-            } else {
-                format!("bp_{}", backend_number.replace('.', "_"))
-            }
-        });
+    let (existing, public_id, event_seq) = handle.with_state(|state| {
+        let breakpoint = state.breakpoints.get(&backend_number);
+        let existing = breakpoint
+            .map(|breakpoint| breakpoint.locations.clone())
+            .unwrap_or_default();
+        let public_id = breakpoint
+            .map(|breakpoint| breakpoint.id.0.clone())
+            .unwrap_or_else(|| {
+                if state.session_id.uses_compact_handles() {
+                    format!("b{}", backend_number.replace('.', "_"))
+                } else {
+                    format!("bp_{}", backend_number.replace('.', "_"))
+                }
+            });
+        (existing, public_id, state.event_seq)
+    });
     let location_fields = MiResult::find(fields, "locations")
         .map(|locations| aggregate_items(locations, "location"))
         .unwrap_or_default();
@@ -237,9 +233,7 @@ pub(super) async fn synchronize_breakpoint(
                     .iter()
                     .find(|existing| existing.backend_number == number)
                     .map(|existing| existing.id.clone())
-                    .unwrap_or_else(|| {
-                        format!("bpl_{public_id}_{}_{}", state.event_seq, index + 1)
-                    }),
+                    .unwrap_or_else(|| format!("bpl_{public_id}_{event_seq}_{}", index + 1)),
                 backend_number: number,
                 address: MiResult::find_str(location, "addr")
                     .filter(|address| *address != "<PENDING>")
@@ -277,7 +271,7 @@ pub(super) async fn reconcile_libraries(handle: &SessionHandle, record: &MiRecor
         .iter()
         .map(|(id, _)| id.clone())
         .collect::<BTreeSet<_>>();
-    let existing = handle.state().modules.keys().cloned().collect::<Vec<_>>();
+    let existing = handle.with_state(|state| state.modules.keys().cloned().collect::<Vec<_>>());
     for (id, fields) in observed {
         handle
             .record_event(DomainEvent::LibraryLoaded {
