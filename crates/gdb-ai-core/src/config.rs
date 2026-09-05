@@ -132,8 +132,7 @@ impl Config {
             && self.limits.total_artifact_bytes >= self.limits.session_artifact_bytes
             && self.limits.total_artifact_bytes <= i64::MAX as usize
             && self.limits.journal_bytes > 0
-            && self.limits.process_cpu_seconds > 0
-            && self.limits.process_open_files >= 32
+            && (self.limits.process_open_files == 0 || self.limits.process_open_files >= 32)
             && self.storage.max_closed_sessions > 0
             && self.storage.max_audit_rows > 0
             && self.storage.max_audit_rows <= i64::MAX as usize
@@ -267,6 +266,7 @@ pub struct Limits {
     pub journal_bytes: usize,
     pub process_memory_bytes: u64,
     pub process_cpu_seconds: u64,
+    pub process_file_bytes: u64,
     pub process_open_files: u64,
     pub process_count: u64,
 }
@@ -292,8 +292,9 @@ impl Default for Limits {
             // sparse address ranges, including engine sandboxes. Leave virtual
             // address space unchanged unless the operator opts into a limit.
             process_memory_bytes: 0,
-            process_cpu_seconds: 3_600,
-            process_open_files: 1_024,
+            process_cpu_seconds: 0,
+            process_file_bytes: 0,
+            process_open_files: 0,
             process_count: 0,
         }
     }

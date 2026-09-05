@@ -752,25 +752,18 @@ impl GdbBackend {
             .kill_on_drop(true);
         let address_space = resource_limits.process_memory_bytes;
         let cpu_seconds = resource_limits.process_cpu_seconds;
-        let file_bytes = resource_limits.session_artifact_bytes as u64;
+        let file_bytes = resource_limits.process_file_bytes;
         let open_files = resource_limits.process_open_files;
         let processes = resource_limits.process_count;
         // SAFETY: pre_exec runs after fork and before exec. The closure uses
         // only async-signal-safe libc calls and captured integer values.
         unsafe {
             command.pre_exec(move || {
-                if address_space > 0 {
-                    set_limit(Resource::RLIMIT_AS, address_space)?;
-                }
+                set_limit(Resource::RLIMIT_AS, address_space)?;
                 set_limit(Resource::RLIMIT_CPU, cpu_seconds)?;
                 set_limit(Resource::RLIMIT_FSIZE, file_bytes)?;
                 set_limit(Resource::RLIMIT_NOFILE, open_files)?;
-                // 2026-08-28: RLIMIT_NPROC is counted for the host UID and
-                // prevented bubblewrap from creating its namespace. Apply it
-                // only when an operator explicitly configures a nonzero value.
-                if processes > 0 {
-                    set_limit(Resource::RLIMIT_NPROC, processes)?;
-                }
+                set_limit(Resource::RLIMIT_NPROC, processes)?;
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -1059,6 +1052,12 @@ fn process_descendants(root: u32) -> Vec<i32> {
 }
 
 fn set_limit(resource: Resource, value: u64) -> std::io::Result<()> {
+    // 2026-09-05: Default caps changed debuggee behavior, and artifact quotas
+    // even limited its files. Zero preserves inherited limits; only explicit
+    // process limits affect GDB and its children.
+    if value == 0 {
+        return Ok(());
+    }
     // 2026-08-29: libc's private resource type differs between GNU and musl;
     // use nix's portable wrapper so both official and developer builds work.
     setrlimit(resource, value as libc::rlim_t, value as libc::rlim_t).map_err(Into::into)
@@ -1326,6 +1325,86 @@ mod tests {
         assert_eq!(
             command.encoded(7),
             b"7-file-exec-and-symbols \"/tmp/a b\"\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn gdb_inherits_process_limits_unless_explicitly_configured() {
+        let config = GdbConfig {
+            path: std::env::var_os("GDB_AI_GDB_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("gdb")),
+            ..GdbConfig::default()
+        };
+        if StdCommand::new(&config.path)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            assert!(std::env::var_os("GDB_AI_REQUIRE_INTEGRATION").is_none());
+            return;
+        }
+        let inherited = std::fs::read_to_string("/proc/self/limits").unwrap();
+        for limits in [
+            Limits {
+                session_artifact_bytes: 1_024,
+                ..Limits::default()
+            },
+            Limits {
+                process_cpu_seconds: 60,
+                process_file_bytes: 4_096,
+                process_open_files: 64,
+                ..Limits::default()
+            },
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut backend = GdbBackend::spawn(
+                &config,
+                "mi3",
+                directory.path(),
+                MiLimits::default(),
+                &limits,
+                &OutputConfig::default(),
+                SandboxOptions {
+                    mode: SandboxMode::Disabled,
+                    allow_network: true,
+                },
+            )
+            .await
+            .unwrap();
+            let child_limits =
+                std::fs::read_to_string(format!("/proc/{}/limits", backend.child.id().unwrap()))
+                    .unwrap();
+            backend.shutdown().await.unwrap();
+            for (name, cap) in [
+                ("Max cpu time", limits.process_cpu_seconds),
+                ("Max file size", limits.process_file_bytes),
+                ("Max open files", limits.process_open_files),
+            ] {
+                let actual = child_limits
+                    .lines()
+                    .find(|line| line.starts_with(name))
+                    .unwrap();
+                if cap == 0 {
+                    assert_eq!(
+                        actual,
+                        inherited
+                            .lines()
+                            .find(|line| line.starts_with(name))
+                            .unwrap()
+                    );
+                } else {
+                    let values = actual[name.len()..]
+                        .split_whitespace()
+                        .take(2)
+                        .collect::<Vec<_>>();
+                    assert_eq!(values, [cap.to_string(), cap.to_string()]);
+                }
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string("/proc/self/limits").unwrap(),
+            inherited
         );
     }
 

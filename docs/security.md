@@ -19,6 +19,14 @@ Bubblewrap hardening is disabled by default. Operators may select `auto` or
 `required` for filesystem isolation. Observation profiles also isolate the
 network; `lab_mutation` and `raw_admin` retain it for remote GDB targets.
 
+GDB and locally launched targets inherit the server's OS resource limits by
+default. Operators may set positive `limits.process_memory_bytes`,
+`process_cpu_seconds`, `process_file_bytes`, `process_open_files`, or
+`process_count` values to cap GDB and its children; zero leaves that resource
+unchanged. `process_count` applies to the host UID, so use a cgroup for a
+per-session process quota. Artifact storage quotas only bound GDB/AI evidence;
+they do not limit files written by a target. `no_new_privs` remains enabled.
+
 Profiles separate offline observation, live observation, debug control,
 laboratory mutation, and raw administration. Raw access also requires an
 operator-enabled transport. Raw console accepts GDB's complete single-command
