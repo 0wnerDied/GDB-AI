@@ -89,7 +89,6 @@ impl Gateway {
             slot: tokio::sync::Mutex::new(Some(slot)),
             owner: caller.identity.clone(),
             target_state: tokio::sync::RwLock::new(()),
-            mutation: tokio::sync::Mutex::new(()),
             out_of_band_mutation: tokio::sync::Mutex::new(()),
             lease: tokio::sync::Mutex::new(Some(lease.clone())),
             lease_generation: std::sync::atomic::AtomicU64::new(1),

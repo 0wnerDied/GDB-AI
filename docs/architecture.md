@@ -102,6 +102,9 @@ starve debugger state events.
   authoritative reducer state.
 - `SessionHandle` is the public facade. Multi-command observations hold its
   command-sequence guard and verify one `stop_id` and `execution_epoch`.
+- Each session's target read/write lock admits stable readers and serializes
+  normal mutations. Sessions have independent locks; preemptive control uses
+  a separate short-operation mutex.
 - Interrupt and close use the actor control lane; they do not wait behind a
   blocking normal operation.
 - Timeout enters `CommandOutcomeUnknown`. Normal commands remain fenced until

@@ -50,7 +50,6 @@ struct SessionEntry {
     slot: Mutex<Option<OwnedSemaphorePermit>>,
     owner: String,
     target_state: tokio::sync::RwLock<()>,
-    mutation: Mutex<()>,
     out_of_band_mutation: Mutex<()>,
     lease: Mutex<Option<WriteLease>>,
     lease_generation: AtomicU64,
@@ -464,7 +463,8 @@ impl Gateway {
                 && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"));
         // 2026-08-28: Composite reads previously released the actor between MI
         // commands, allowing continue to mix multiple stops in one response.
-        // Normal mutations exclude stable observations; control remains preemptive.
+        // The write guard serializes normal mutations and excludes stable
+        // observations; only preemptive control needs a separate mutex.
         let stable_observation =
             effect == Effect::Read && requires_stable_target(request) && !out_of_band;
         let _target_observation_guard = match &entry {
@@ -477,14 +477,11 @@ impl Gateway {
             }
             _ => None,
         };
-        let _mutation_guard = if effect != Effect::Read {
-            match &entry {
-                Some(entry) if out_of_band => Some(entry.out_of_band_mutation.lock().await),
-                Some(entry) => Some(entry.mutation.lock().await),
-                None => None,
+        let _control_guard = match &entry {
+            Some(entry) if effect != Effect::Read && out_of_band => {
+                Some(entry.out_of_band_mutation.lock().await)
             }
-        } else {
-            None
+            _ => None,
         };
         // 2026-08-28: Stable reads for an unknown or closed session reached
         // this point without a registry entry and panicked before returning
