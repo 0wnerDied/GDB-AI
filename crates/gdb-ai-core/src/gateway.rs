@@ -71,6 +71,7 @@ pub struct Gateway {
     store: Arc<Store>,
     artifacts: ArtifactStore,
     sessions: RwLock<BTreeMap<String, Arc<SessionEntry>>>,
+    retired_states: RwLock<BTreeMap<String, crate::domain::SessionState>>,
     metrics: Arc<Metrics>,
     idempotency: Mutex<BTreeMap<String, (String, ApiResponse)>>,
     idempotency_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
@@ -143,6 +144,7 @@ impl Gateway {
             store,
             artifacts,
             sessions: RwLock::new(BTreeMap::new()),
+            retired_states: RwLock::new(BTreeMap::new()),
             metrics,
             idempotency: Mutex::new(BTreeMap::new()),
             idempotency_locks: Mutex::new(BTreeMap::new()),
@@ -395,7 +397,7 @@ impl Gateway {
                     .as_deref()
                     .is_none_or(|owner| !same_principal(owner, &caller.identity))
             {
-                self.store.audit(
+                self.audit(
                     &caller.identity,
                     Some(&session_id),
                     &request.method,
@@ -442,11 +444,14 @@ impl Gateway {
         // tables added six retention statements to every Agent read. Their
         // evidence remains in the session journal; state-changing and volatile
         // operations retain durable admission and completion audit records.
-        let durable_audit = effect != Effect::Read;
+        // 2026-09-05: Default debugging already records API calls in its journal.
+        // SQL audit is an explicit durable-mode cost, not a prerequisite to run.
+        let durable_audit = effect != Effect::Read
+            && self.config.journal.durability == crate::config::JournalDurability::Durable;
         // 2026-08-28: Selecting a profile must not grant raw authority; the
         // transport has to authenticate and explicitly mark an admin caller.
         if profile == Profile::RawAdmin && !caller.admin {
-            self.store.audit(
+            self.audit(
                 &caller.identity,
                 entry.as_ref().map(|entry| entry.handle.id()),
                 &request.method,
@@ -466,7 +471,7 @@ impl Gateway {
         if let Err(error) = profile.authorize_method(request.method, effect) {
             // 2026-08-28: Policy denials previously returned before audit.
             // Persist the denied decision so rejected mutations remain traceable.
-            self.store.audit(
+            self.audit(
                 &caller.identity,
                 entry.as_ref().map(|entry| entry.handle.id()),
                 &request.method,
@@ -580,7 +585,7 @@ impl Gateway {
                     .require_mutation_preconditions(request, caller, entry, &state, mode)
                     .await
             {
-                self.store.audit(
+                self.audit(
                     &caller.identity,
                     Some(entry.handle.id()),
                     &request.method,
@@ -636,7 +641,7 @@ impl Gateway {
             entry.handle.record_api(journal_request).await?;
         }
         if durable_audit {
-            self.store.audit(
+            self.audit(
                 &caller.identity,
                 entry.as_ref().map(|entry| entry.handle.id()),
                 &request.method,
@@ -686,7 +691,7 @@ impl Gateway {
             // 2026-08-30: A post-effect audit failure replaced an already
             // executed mutation with INTERNAL, encouraging an unsafe retry.
             // Admission audit remains fail-closed; completion gaps are explicit.
-            if let Err(error) = self.store.audit(
+            if let Err(error) = self.audit(
                 &caller.identity,
                 Some(entry.handle.id()),
                 &request.method,
@@ -730,6 +735,26 @@ impl Gateway {
         let result = result?;
         let state = completed_entry.map(|entry| entry.handle.state());
         Ok((state, result, warnings))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn audit(
+        &self,
+        caller: &str,
+        session_id: Option<&crate::domain::SessionId>,
+        method: &CanonicalMethod,
+        effect: Effect,
+        allowed: bool,
+        revision: Option<u64>,
+        request: &Value,
+        outcome: &str,
+    ) -> Result<()> {
+        if self.config.journal.durability == crate::config::JournalDurability::Durable {
+            self.store.audit(
+                caller, session_id, method, effect, allowed, revision, request, outcome,
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_request(&self, request: &ApiRequest) -> Result<()> {
@@ -916,6 +941,23 @@ impl Gateway {
     // releasing its registry entry, lease, or max-session slot. Every path
     // that closes the actor must share the same post-shutdown retirement.
     async fn retire_session(&self, session_id: &str, entry: &Arc<SessionEntry>) -> Option<String> {
+        let state = entry.handle.state();
+        if state
+            .limitations
+            .iter()
+            .any(|reason| reason.starts_with("evidence gap: SQLite "))
+        {
+            // 2026-09-05: A failed final SQLite update made a closed GDB look
+            // active again after retirement. Retain the actual final state
+            // within the existing closed-history count, without holding a slot.
+            let mut retired = self.retired_states.write().await;
+            if !retired.contains_key(session_id)
+                && retired.len() >= self.config.storage.max_closed_sessions
+            {
+                retired.pop_first();
+            }
+            retired.insert(session_id.into(), state);
+        }
         // 2026-08-30: Metadata cleanup failure must not retain a terminated
         // process in the live registry.
         let lease_warning = match entry.controller.lock().await.take() {
@@ -946,6 +988,25 @@ impl Gateway {
             tracing::warn!(%error, "closed session retention failed");
         }
         lease_warning
+    }
+
+    async fn retained_session_state(
+        &self,
+        id: &crate::domain::SessionId,
+    ) -> Result<Option<crate::domain::SessionState>> {
+        // The stored row still governs retention and ownership. A memory
+        // checkpoint must not resurrect history removed by garbage collection.
+        let stored = self.store.get_session(id)?;
+        let retired = self.retired_states.read().await;
+        Ok(stored
+            .map(|state| retired.get(&id.0).cloned().unwrap_or(state))
+            .filter(|state| {
+                matches!(
+                    state.lifecycle,
+                    crate::domain::SessionLifecycle::Closed
+                        | crate::domain::SessionLifecycle::Failed
+                )
+            }))
     }
 
     pub async fn shutdown(&self) {

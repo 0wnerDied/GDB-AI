@@ -733,6 +733,9 @@ pub enum DomainEvent {
     ControllerChanged {
         kind: String,
     },
+    EvidenceGap {
+        reason: String,
+    },
     SignalPolicyChanged {
         signal: String,
         policy: SignalPolicyState,

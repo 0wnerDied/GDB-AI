@@ -25,8 +25,8 @@ Expiration never interrupts a running target. If consistency is lost, the
 session owner can attempt recovery or use `gdb_session` action `force_abort`.
 Forced abort terminates resources without claiming a clean debugger shutdown.
 An HTTP waiter timeout returns `operation_id` in the error data. Query it with
-`gdb_session` action `operation_status`; the returned canonical record contains
-the eventual response or an explicit `OUTCOME_UNKNOWN` state. A waiter timeout
+`gdb_session` action `operation_status`; the record contains the projected
+response or an explicit `OUTCOME_UNKNOWN` state. A waiter timeout
 never means the operation stopped or the inferior exited.
 
 MCP cancellation detaches the waiter while an accepted debugger operation
@@ -49,9 +49,28 @@ cancellation behavior.
 
 Journals are stored per session. Use `gdb-ai transcript inspect`, `transcript
 export`, and `replay` for diagnosis without executing the inferior again.
-Replay rejects gaps and mismatches among raw MI, adjacent normalized events,
-and recorded reducer state checkpoints. MI-only transcripts have no checkpoint
-integrity guarantee and reconstruct only MI-derived controller state.
+The default `journal.durability = "performance"` coalesces full-state
+checkpoints and operation history at 250 ms, transcript-read, and close boundaries.
+If the journal fills or becomes unwritable, recording stops while debugging
+continues. `state.limitations` identifies the first sequence whose evidence is
+unavailable. Event identities remain monotonic, but later identities cannot be
+read back from the journal. SQLite failure also appears in limitations; live
+snapshots and execution waits stay available from the actor's current data.
+Final session metadata is retried on close; if that write fails, the daemon
+keeps the final state within `storage.max_closed_sessions` so status and list
+do not report a terminated GDB as active. SQL admission and completion audit
+is enabled only in `durable` mode.
+
+Replay rejects sequence holes and mismatches among raw MI, adjacent normalized
+events, and recorded reducer state checkpoints. A quota-limited journal ends
+with `journal.gap` when storage permits; replay returns the verified prefix with
+`complete: false` and `evidence_gap`. Both replay and transcript inspection
+report `complete: true` only for a journal carrying the final `journal.closed`
+marker. An active, interrupted, or older journal without that marker is a
+prefix, even when all its records are valid. MI-only transcripts have no
+checkpoint integrity guarantee and reconstruct only MI-derived controller
+state. Select `journal.durability = "durable"` when every evidence boundary must
+be synchronized to disk and an evidence-storage failure must end the session.
 
 Artifact storage has per-session, per-owner, and daemon-wide byte limits. Use
 `gdb-ai storage status` for metadata and filesystem inventory, `storage verify`

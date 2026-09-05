@@ -10,14 +10,16 @@ use serde_json::Value;
 
 use crate::{
     Error, ErrorCode, Result,
-    domain::{DomainEvent, JournaledEvent, SessionId, SessionState},
-    journal::{JournalEntry, require_next_sequence},
+    domain::{DomainEvent, JournaledEvent, SessionId, SessionLifecycle, SessionState},
+    journal::{JournalEntry, JournalGap, require_next_sequence},
     normalize::normalize,
     reducer::StateReducer,
 };
 
 #[derive(Debug, Serialize)]
 pub struct ReplayReport {
+    pub complete: bool,
+    pub evidence_gap: Option<JournalGap>,
     pub entries: u64,
     pub parsed_mi_records: u64,
     pub applied_events: u64,
@@ -36,6 +38,8 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
     let mut snapshots = 0;
     let mut latest_snapshot = None;
     let mut last_seq = 0;
+    let mut complete = false;
+    let mut evidence_gap: Option<JournalGap> = None;
 
     for line in BufReader::new(File::open(path)?).lines() {
         let line = line?;
@@ -43,6 +47,12 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
             continue;
         }
         let entry: JournalEntry = serde_json::from_str(&line)?;
+        if complete || evidence_gap.is_some() {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "journal has records after its terminal marker",
+            ));
+        }
         require_next_sequence(last_seq, entry.seq)?;
         last_seq = entry.seq;
         entries += 1;
@@ -132,12 +142,39 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
                 snapshots += 1;
                 latest_snapshot = entry.data.get("snapshot").cloned();
             }
+            "journal.gap" => {
+                let gap: JournalGap = serde_json::from_value(entry.data)?;
+                if gap.from_seq != entry.seq {
+                    return Err(Error::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid journal gap",
+                    ));
+                }
+                evidence_gap = Some(gap);
+            }
+            "journal.closed" => {
+                // 2026-09-05: A storage failure can leave a valid prefix but
+                // no writable gap marker. Only a clean close certifies that
+                // the retained evidence covers the entire session.
+                if reducer.state().lifecycle != SessionLifecycle::Closed {
+                    return Err(Error::new(
+                        ErrorCode::InvalidArgument,
+                        "journal closed before the session",
+                    ));
+                }
+                complete = true;
+            }
             _ => {}
         }
     }
 
     if saw_normalized {
-        if let Some((seq, _, _)) = derived.iter().find(|(_, _, matched)| !matched) {
+        if let Some((seq, _, _)) = derived.iter().find(|(seq, _, matched)| {
+            !matched
+                && evidence_gap
+                    .as_ref()
+                    .is_none_or(|gap| seq + 1 < gap.from_seq)
+        }) {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
                 format!("MI record {seq} has no matching normalized event"),
@@ -151,6 +188,8 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
     }
 
     Ok(ReplayReport {
+        complete,
+        evidence_gap,
         entries,
         parsed_mi_records,
         applied_events,

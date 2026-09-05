@@ -36,6 +36,12 @@ pub struct JournalEntry {
     pub data: Value,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JournalGap {
+    pub from_seq: u64,
+    pub reason: String,
+}
+
 #[derive(Serialize)]
 struct EncodedJournalEntry<'a, T> {
     seq: u64,
@@ -57,12 +63,15 @@ struct SnapshotResult<'a, T> {
 }
 
 pub struct Journal {
-    writer: BufWriter<File>,
+    writer: Option<BufWriter<File>>,
     next_seq: u64,
+    written_seq: u64,
+    flushed_seq: u64,
     bytes_written: usize,
     max_bytes: usize,
     unflushed_records: usize,
     durability: JournalDurability,
+    gap: Option<JournalGap>,
 }
 
 impl Journal {
@@ -84,13 +93,24 @@ impl Journal {
             .mode(0o600)
             .open(path)?;
         Ok(Self {
-            writer: BufWriter::new(file),
+            writer: Some(BufWriter::new(file)),
             next_seq: 1,
+            written_seq: 0,
+            flushed_seq: 0,
             bytes_written: 0,
             max_bytes,
             unflushed_records: 0,
             durability,
+            gap: None,
         })
+    }
+
+    pub fn is_durable(&self) -> bool {
+        self.durability == JournalDurability::Durable
+    }
+
+    pub fn gap(&self) -> Option<&JournalGap> {
+        self.gap.as_ref()
     }
 
     pub fn append_session_created(&mut self, session_id: &str) -> Result<u64> {
@@ -180,6 +200,13 @@ impl Journal {
 
     fn append<T: Serialize>(&mut self, kind: &str, data: T) -> Result<u64> {
         let seq = self.next_seq;
+        self.next_seq += 1;
+        // 2026-09-05: A full or unwritable performance journal killed GDB.
+        // Keep allocating live evidence identities after recording stops;
+        // durable mode still requires every record to reach its boundary.
+        if self.writer.is_none() {
+            return Ok(seq);
+        }
         // 2026-08-30: Domain events, snapshots, and large session states used
         // to allocate an intermediate JSON tree before the journal encoded
         // them. Serialize borrowed payloads directly without changing JSONL.
@@ -188,33 +215,84 @@ impl Journal {
         encoded.push(b'\n');
         // 2026-08-28: Journals performed an fsync for every record and had no
         // total size bound, so noisy targets could exhaust I/O and disk space.
-        if self.bytes_written.saturating_add(encoded.len()) > self.max_bytes {
-            return Err(Error::new(
-                ErrorCode::OutputLimit,
-                "session journal byte limit reached",
-            ));
+        let reserved = if self.is_durable() { 0 } else { 256 };
+        if self.bytes_written.saturating_add(encoded.len())
+            > self.max_bytes.saturating_sub(reserved)
+        {
+            let error = Error::new(ErrorCode::OutputLimit, "session journal byte limit reached");
+            if self.is_durable() {
+                return Err(error);
+            }
+            self.flush()?;
+            if self.gap.is_none() {
+                let gap = JournalGap {
+                    from_seq: seq,
+                    reason: error.to_string(),
+                };
+                let mut marker = serde_json::to_vec(&EncodedJournalEntry {
+                    seq,
+                    kind: "journal.gap",
+                    data: &gap,
+                })?;
+                marker.push(b'\n');
+                if self.bytes_written.saturating_add(marker.len()) <= self.max_bytes
+                    && let Some(writer) = self.writer.as_mut()
+                {
+                    let _ = writer.write_all(&marker).and_then(|()| writer.flush());
+                }
+                self.stop_recording(error, seq)?;
+            }
+            return Ok(seq);
         }
-        self.writer.write_all(&encoded)?;
+        if let Err(error) = self.writer.as_mut().unwrap().write_all(&encoded) {
+            self.stop_recording(error.into(), self.flushed_seq + 1)?;
+            return Ok(seq);
+        }
         self.bytes_written += encoded.len();
+        self.written_seq = seq;
         self.unflushed_records += 1;
         if self.unflushed_records >= 64 {
             self.flush()?;
         }
-        self.next_seq += 1;
         Ok(seq)
     }
 
     pub fn flush(&mut self) -> Result<()> {
-        if self.unflushed_records == 0 {
+        if self.unflushed_records == 0 || self.writer.is_none() {
             return Ok(());
         }
-        self.writer.flush()?;
+        if let Err(error) = self.writer.as_mut().unwrap().flush() {
+            return self.stop_recording(error.into(), self.flushed_seq + 1);
+        }
         // 2026-08-29: A buffered flush only made records visible to the OS;
         // it did not satisfy the documented crash-durable evidence mode.
         if self.durability == JournalDurability::Durable {
-            self.writer.get_ref().sync_data()?;
+            self.writer.as_ref().unwrap().get_ref().sync_data()?;
         }
         self.unflushed_records = 0;
+        self.flushed_seq = self.written_seq;
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> Result<()> {
+        // An I/O failure may prevent writing even a gap marker. Only this
+        // final marker certifies that a transcript covers the whole session.
+        self.append("journal.closed", serde_json::json!({}))?;
+        self.flush()
+    }
+
+    fn stop_recording(&mut self, error: Error, from_seq: u64) -> Result<()> {
+        if self.is_durable() {
+            return Err(error);
+        }
+        self.gap = Some(JournalGap {
+            from_seq,
+            reason: error.to_string(),
+        });
+        if let Some(writer) = self.writer.take() {
+            // Do not retry a failed buffered write from BufWriter::drop.
+            let _ = writer.into_parts();
+        }
         Ok(())
     }
 
@@ -258,14 +336,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_records_beyond_the_session_quota() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("journal.jsonl");
-        let mut journal = Journal::create(&path, 64).unwrap();
-        let error = journal.append_mi_output(&[0; 128]).unwrap_err();
-        assert_eq!(error.code, ErrorCode::OutputLimit);
-        journal.flush().unwrap();
-        assert!(std::fs::metadata(path).unwrap().len() <= 64);
+    fn io_failure_respects_durability() {
+        for durability in [JournalDurability::Performance, JournalDurability::Durable] {
+            let directory = tempdir().unwrap();
+            let mut journal = Journal::create_with_durability(
+                directory.path().join("journal.jsonl"),
+                4096,
+                durability,
+            )
+            .unwrap();
+            journal.writer = Some(BufWriter::new(
+                OpenOptions::new().write(true).open("/dev/full").unwrap(),
+            ));
+            let appended = journal.append_api(serde_json::json!({"method": "test"}));
+            if durability == JournalDurability::Durable {
+                assert!(appended.is_err());
+            } else {
+                let first = appended.unwrap();
+                journal.flush().unwrap();
+                assert_eq!(journal.gap().unwrap().from_seq, first);
+                assert!(journal.append_mi_output(b"(gdb)").unwrap() > first);
+            }
+        }
     }
 
     #[test]

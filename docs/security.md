@@ -36,7 +36,7 @@ An administrative caller defaults to `raw_admin` when creating a session;
 an explicitly requested profile still takes precedence.
 
 The default local profile is `lab_mutation`, which permits ordinary inferior
-input, debugger mutations, and remote GDB connections needed by exploit Agents.
+input, debugger mutations, and remote GDB connections needed by debugging Agents.
 An empty `security.remote_allowlist` accepts any parsed GDB remote endpoint; a
 nonempty list restricts connections to those exact IP-address-and-port entries.
 Operators may configure `debug_control`, `live_observer`, or `offline_core`
@@ -51,6 +51,7 @@ projected Agent tools omit both.
 
 HTTP always binds only to loopback; an optional bearer token authenticates
 clients but does not permit a non-loopback listener. Unix sockets are mode
-`0600`. Memory, register, input, raw, and policy mutations are audited with
-sensitive payloads redacted. Never place secrets in configuration committed
-to this repository.
+`0600`. Accepted session calls are recorded in the journal. Selecting
+`journal.durability = "durable"` additionally retains admission and completion
+audit in SQLite, with sensitive payloads redacted. Never place secrets in
+configuration committed to this repository.

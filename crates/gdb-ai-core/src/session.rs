@@ -25,8 +25,8 @@ use crate::{
     backend::{BackendDescriptor, MiCommand, OutputEvidenceStatus, PtyOutput, session_directory},
     config::Config,
     domain::{
-        BreakpointId, DomainEvent, InferiorStatus, OperationId, SessionId, SessionState,
-        SnapshotStatus, StopId, TrackingDefinition, ValueBinding, WaitBaseline,
+        BreakpointId, DomainEvent, InferiorStatus, OperationId, OperationRecord, SessionId,
+        SessionState, SnapshotStatus, StopId, TrackingDefinition, ValueBinding, WaitBaseline,
     },
     journal::Journal,
     metrics::Metrics,
@@ -563,8 +563,8 @@ impl SessionHandle {
 
     pub async fn record_api(&self, request: Value) -> Result<()> {
         let (sender, receiver) = oneshot::channel();
-        self.requests
-            .send(WorkerRequest::RecordApi {
+        self.controls
+            .send(ControlRequest::RecordApi {
                 request,
                 response: sender,
             })
@@ -618,6 +618,34 @@ impl SessionHandle {
             deadline,
         )
         .await?;
+        receiver
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+    }
+
+    pub(crate) async fn record_operation(&self, operation: &OperationRecord) -> Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        self.controls
+            .send(ControlRequest::RecordOperation {
+                operation: operation.clone(),
+                response: sender,
+            })
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
+        receiver
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+    }
+
+    pub(crate) async fn operation(&self, operation_id: &str) -> Result<OperationRecord> {
+        let (sender, receiver) = oneshot::channel();
+        self.requests
+            .send(WorkerRequest::GetOperation {
+                operation_id: operation_id.into(),
+                response: sender,
+            })
+            .await
+            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
         receiver
             .await
             .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?

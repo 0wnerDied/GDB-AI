@@ -321,16 +321,30 @@ fn transcript_cli(config: Config, command: TranscriptCommand) -> Result<(), AnyE
             let mut kinds = std::collections::BTreeMap::<String, u64>::new();
             let mut entries = 0u64;
             let mut last_seq = 0u64;
+            let mut complete = false;
+            let mut evidence_gap = None;
             for line in std::io::BufReader::new(file).lines() {
                 let entry: gdb_ai_core::journal::JournalEntry = serde_json::from_str(&line?)?;
+                if complete || evidence_gap.is_some() {
+                    return Err(
+                        io::Error::other("journal has records after its terminal marker").into(),
+                    );
+                }
                 gdb_ai_core::journal::require_next_sequence(last_seq, entry.seq)?;
                 last_seq = entry.seq;
                 entries += 1;
+                if entry.kind == "journal.closed" {
+                    complete = true;
+                } else if entry.kind == "journal.gap" {
+                    evidence_gap = Some(entry.data);
+                }
                 *kinds.entry(entry.kind).or_default() += 1;
             }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
+                    "complete": complete,
+                    "evidence_gap": evidence_gap,
                     "entries": entries,
                     "last_seq": last_seq,
                     "kinds": kinds

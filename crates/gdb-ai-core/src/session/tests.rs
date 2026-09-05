@@ -232,13 +232,16 @@ async fn starts_secure_gdb_and_closes_cleanly() {
 }
 
 #[tokio::test]
-async fn state_persistence_failure_fails_session() {
+async fn durable_state_persistence_failure_fails_session() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
     let sqlite = directory.path().join("state.sqlite");
     let config = Config {
+        journal: crate::config::JournalConfig {
+            durability: crate::config::JournalDurability::Durable,
+        },
         artifacts: ArtifactConfig {
             path: directory.path().join("artifacts"),
         },
@@ -1037,6 +1040,10 @@ async fn interrupt_preempts_blocked_command() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let started = std::time::Instant::now();
+    session
+        .record_api(serde_json::json!({"method": "execution.control", "action": "interrupt"}))
+        .await
+        .unwrap();
     let interrupt = session
         .interrupt(MiCommand::new("-exec-interrupt").unwrap())
         .await;

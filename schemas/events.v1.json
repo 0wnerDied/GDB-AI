@@ -19,7 +19,7 @@
         "controller_changed", "signal_policy_changed", "snapshot_started",
         "snapshot_ready", "snapshot_failed", "consistency_dirty",
         "consistency_reconciling", "consistency_tainted",
-        "consistency_restored", "consistency_lost",
+        "consistency_restored", "consistency_lost", "evidence_gap",
         "target_disconnected", "target_detached", "core_opened",
         "target_configured", "output", "output_advanced",
         "unknown_backend_event", "unknown_backend_notification"

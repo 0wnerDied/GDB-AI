@@ -249,6 +249,18 @@ async fn public_session_lifecycle_round_trips() {
             .await,
     );
     assert_eq!(persisted.result.as_ref().unwrap()["session_id"], session_id);
+    assert!(
+        gdb_ai_core::replay::replay(
+            directory
+                .path()
+                .join("sessions")
+                .join(&session_id)
+                .join("journal.jsonl"),
+            gdb_ai_core::domain::SessionId::parse(&session_id).unwrap(),
+        )
+        .unwrap()
+        .complete
+    );
     successful(
         gateway
             .dispatch(

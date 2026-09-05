@@ -1,6 +1,4 @@
-use std::{
-    os::unix::process::ExitStatusExt, path::PathBuf, process::Stdio, sync::Arc, time::Duration,
-};
+use std::{os::unix::process::ExitStatusExt, path::PathBuf, process::Stdio, time::Duration};
 
 use gdb_ai_mi::{MiResult, MiValue};
 use serde::Deserialize;
@@ -31,7 +29,6 @@ use crate::{
     },
     gateway::{Gateway, SessionEntry},
     normalize::breakpoint_number as inserted_breakpoint_number,
-    persistence::Store,
     protocol::{ApiRequest, CanonicalMethod},
     session::{PendingModuleBreakpoint, SessionHandle, WaitUntil},
 };
@@ -343,7 +340,6 @@ fn parse_observed_integer(value: &str) -> Result<i128> {
 
 struct ProbeBreakpoint {
     handle: SessionHandle,
-    store: Arc<Store>,
     operation_id: OperationId,
     breakpoint_id: Option<BreakpointId>,
     backend_number: Option<String>,
@@ -399,13 +395,12 @@ impl Drop for ProbeBreakpoint {
         };
         self.backend_number = None;
         let handle = self.handle.clone();
-        let store = self.store.clone();
         let operation_id = self.operation_id.clone();
         // 2026-08-28: Dropping a cancelled probe skipped its trailing delete
         // and leaked a temporary breakpoint into later Agent operations.
         tokio::spawn(async move {
             let cleanup = delete_probe_breakpoint(&handle, backend_number).await;
-            if let Ok(Some(mut operation)) = store.get_operation(&operation_id.0) {
+            if let Ok(mut operation) = handle.operation(&operation_id.0).await {
                 // 2026-08-28: Drop also retries failed explicit cleanup. Only
                 // an in-flight operation represents cancellation; preserve any
                 // completed, timed-out, or failed terminal result.
@@ -418,7 +413,7 @@ impl Drop for ProbeBreakpoint {
                     operation.error = cleanup.as_ref().err().map(ToString::to_string);
                     operation.completed_event_seq =
                         Some(handle.with_state(|state| state.event_seq));
-                    let _ = store.upsert_operation(&operation);
+                    let _ = handle.record_operation(&operation).await;
                 }
             }
             if let Err(error) = cleanup {
@@ -613,7 +608,6 @@ impl Gateway {
         // cleanup guard leaked the already-inserted breakpoint on SQLite errors.
         let mut breakpoint = ProbeBreakpoint {
             handle: entry.handle.clone(),
-            store: self.store.clone(),
             operation_id: operation.operation_id.clone(),
             breakpoint_id: None,
             backend_number: Some(backend_number.clone()),
@@ -650,7 +644,7 @@ impl Gateway {
                 })
                 .await?;
         }
-        self.store.upsert_operation(&operation)?;
+        entry.handle.record_operation(&operation).await?;
         let started = tokio::time::Instant::now();
         let mut captures = Vec::new();
         let mut calls = 1usize;
@@ -876,7 +870,7 @@ impl Gateway {
                 operation.error = cleanup_error.as_ref().map(ToString::to_string);
                 operation.completed_event_seq =
                     Some(entry.handle.with_state(|state| state.event_seq));
-                self.store.upsert_operation(&operation)?;
+                entry.handle.record_operation(&operation).await?;
                 result["operation"] = serde_json::to_value(operation)?;
                 result["breakpoint"] = Value::String(backend_number);
                 if let Some(resolved) = resolved_location {
@@ -903,7 +897,7 @@ impl Gateway {
                 });
                 operation.completed_event_seq =
                     Some(entry.handle.with_state(|state| state.event_seq));
-                self.store.upsert_operation(&operation)?;
+                entry.handle.record_operation(&operation).await?;
                 Err(error)
             }
         }

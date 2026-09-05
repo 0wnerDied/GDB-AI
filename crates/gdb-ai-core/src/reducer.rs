@@ -468,6 +468,19 @@ impl StateReducer {
             // 2026-08-28: Controller registries and inferior I/O previously
             // changed without advancing optimistic-concurrency revision.
             DomainEvent::ControllerChanged { .. } => true,
+            DomainEvent::EvidenceGap { reason } => {
+                // 2026-09-05: Missing retained evidence does not invalidate
+                // live stop identities or GDB's execution state.
+                let limitation = format!("evidence gap: {reason}");
+                if !self.state.limitations.contains(&limitation) {
+                    self.state.limitations.insert(0, limitation);
+                    if self.state.limitations.len() > MAX_LIMITATIONS {
+                        self.state.limitations.truncate(MAX_LIMITATIONS - 1);
+                        self.state.limitations.push(LIMITATIONS_OMITTED.into());
+                    }
+                }
+                true
+            }
             DomainEvent::SignalPolicyChanged { signal, policy } => {
                 self.state
                     .signal_policies
@@ -569,7 +582,11 @@ impl StateReducer {
                     !warnings.is_empty()
                 } else {
                     self.state.consistency = Consistency::Clean;
-                    self.state.limitations.clear();
+                    // 2026-09-05: Reconciliation can restore live GDB state,
+                    // but cannot recover evidence that was never retained.
+                    self.state
+                        .limitations
+                        .retain(|limitation| limitation.starts_with("evidence gap: "));
                     for warning in warnings {
                         push_limitation(&mut self.state.limitations, warning.clone());
                     }

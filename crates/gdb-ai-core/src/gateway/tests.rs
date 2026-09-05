@@ -471,6 +471,9 @@ async fn completion_audit_failure_preserves_an_executed_mutation() {
             sqlite: sqlite.clone(),
             sessions: directory.path().join("sessions"),
         },
+        journal: crate::config::JournalConfig {
+            durability: crate::config::JournalDurability::Durable,
+        },
         ..Config::default()
     })
     .unwrap();

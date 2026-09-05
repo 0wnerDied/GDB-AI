@@ -63,7 +63,7 @@ values         stop-scoped variable objects
 ```
 
 These are modules below the Gateway rather than independent crates. They use
-the same policy, lease, revision, stable-observation, and audit boundary, so a
+the same policy, caller control, stable-observation, and audit boundary, so a
 crate split would add public interfaces without separating runtime ownership.
 
 ## Request and event flow
@@ -72,7 +72,7 @@ crate split would add public interfaces without separating runtime ownership.
 Agent
   -> MCP stdio / Unix / Streamable HTTP / canonical JSON-RPC
   -> shared server dispatch
-  -> Gateway validation, policy, lease, revision, and audit
+  -> Gateway validation, policy, caller control, and audit
   -> canonical operation
   -> SessionHandle
   -> session actor (`SessionWorker`) control or normal channel
@@ -130,21 +130,34 @@ starve debugger state events.
   execution epoch. A context change returns `STALE_CONTEXT` instead of mixed
   evidence.
 - Every public response is bounded. Large content becomes a content-addressed
-  artifact or a paged result with explicit continuation metadata.
+  artifact or a paged result with explicit continuation metadata. MCP applies
+  this bound after projection, including its tool-result wrapper and recovered
+  operation results; artifacts retain the originating session's ownership.
 - Raw commands mark cached state dirty and return their output immediately.
   Structured operations reconcile when they need the registries. Consecutive
   raw commands and output reads do not trigger registry rebuilds.
-- Journal ordering is always before reducer application. `performance` mode
-  batches flushes; `durable` mode also calls `sync_data` at declared API,
-  state, snapshot, periodic, and close boundaries.
+- Raw MI and normalized events share one monotonic sequence before reducer
+  application. In default `performance` mode, full-state journal checkpoints
+  and operation history are coalesced at the 250 ms flush, transcript-read, and
+  close boundaries. Live inspection reads the actor's current state.
+- A full or unwritable performance journal stops recording and publishes an
+  evidence-gap limitation; it does not stop GDB or invalidate live stop handles.
+  SQLite failure leaves live snapshots and operation waits available, suspends
+  history writes, and retries final session metadata on close. Failed final
+  writes retain a bounded in-memory terminal state. Historical state can
+  lag live state and missing history is never reconstructed from current state.
+- `durable` mode preserves per-revision checkpoints, calls `sync_data` at API,
+  state, snapshot, periodic, and close boundaries, and fails the session when
+  required evidence cannot be retained.
 - Artifact sensitivity is monotonic for each ownership association. Retention
   and garbage collection preserve any content with a live owner.
 
 ## Security boundary
 
 Gateway dispatch keeps authentication identity, ownership, policy effects,
-write leases, optimistic revisions, stable-observation locks, idempotency,
-rate limits, and audit ordering in one lexical boundary. It is intentionally
+caller control, stable-observation locks, idempotency, rate limits, and audit
+ordering in one lexical boundary. Canonical sessions retain write leases and
+optimistic revisions; MCP sessions use fixed caller ownership. It is intentionally
 not divided into independent services. Stable reads retain their target-state
 guard through the complete checked dispatch; snapshot publication occurs only
 after the actor validates and atomically commits the original stop baseline.

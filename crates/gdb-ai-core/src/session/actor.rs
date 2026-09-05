@@ -24,7 +24,7 @@ use crate::{
     },
     config::{Config, OutputEvidenceMode},
     domain::{
-        DomainEvent, InferiorStatus, JournaledEvent, OperationId, OutputSource, SessionState,
+        DomainEvent, InferiorStatus, OperationId, OperationRecord, OutputSource, SessionState,
         StopId, TrackingDefinition, ValueBinding,
     },
     journal::Journal,
@@ -66,9 +66,10 @@ pub(super) enum WorkerRequest {
         breakpoint: PendingModuleBreakpoint,
         response: oneshot::Sender<Result<()>>,
     },
-    RecordApi {
-        request: Value,
-        response: oneshot::Sender<Result<()>>,
+
+    GetOperation {
+        operation_id: String,
+        response: oneshot::Sender<Result<OperationRecord>>,
     },
     FlushJournal {
         response: oneshot::Sender<Result<()>>,
@@ -136,7 +137,17 @@ pub(super) enum WorkerRequest {
     },
 }
 
+// 2026-09-05: Admission metadata on the normal queue blocked interrupts
+// before they reached the control lane. Record it while MI is pending too.
 pub(super) enum ControlRequest {
+    RecordOperation {
+        operation: OperationRecord,
+        response: oneshot::Sender<Result<()>>,
+    },
+    RecordApi {
+        request: Value,
+        response: oneshot::Sender<Result<()>>,
+    },
     Interrupt {
         command: MiCommand,
         deadline: tokio::time::Instant,
@@ -180,7 +191,7 @@ impl PendingControlResponse {
 }
 
 // Owns both GDB input and reducer state. One ordinary MI command may be in
-// flight; the separate control lane admits only interrupt or close.
+// flight; the control lane admits interruption, closure, and admission metadata.
 pub(super) struct SessionWorker {
     backend: GdbBackend,
     journal: Journal,
@@ -221,6 +232,12 @@ pub(super) struct SessionWorker {
     artifact_limit: usize,
     owner_artifact_limit: usize,
     total_artifact_limit: usize,
+    state_dirty: bool,
+    operations: BTreeMap<String, OperationRecord>,
+    dirty_operations: BTreeSet<String>,
+    operation_limit: usize,
+    journal_gap_reported: bool,
+    store_failed: bool,
     fatal: bool,
     pub(super) metric_active: bool,
 }
@@ -368,13 +385,19 @@ impl SessionWorker {
             artifact_limit: config.limits.session_artifact_bytes,
             owner_artifact_limit: config.limits.owner_artifact_bytes,
             total_artifact_limit: config.limits.total_artifact_bytes,
+            state_dirty: false,
+            operations: BTreeMap::new(),
+            dirty_operations: BTreeSet::new(),
+            operation_limit: config.storage.max_operations_per_session,
+            journal_gap_reported: false,
+            store_failed: false,
             fatal: false,
             metric_active: false,
         };
         worker.apply_event(DomainEvent::BackendStarted)?;
         worker.handshake().await?;
         worker.load_extension(&config.gdb).await?;
-        worker.persist()?;
+        worker.checkpoint(true)?;
         Ok(worker)
     }
 
@@ -612,7 +635,8 @@ impl SessionWorker {
                 .unwrap_or_else(tokio::time::Instant::now);
             tokio::select! {
                 _ = journal_flush.tick() => {
-                    if let Err(error) = self.journal.flush() {
+                    let flushed = self.checkpoint(false).and_then(|()| self.journal.flush());
+                    if let Err(error) = self.journal_result(flushed) {
                         tracing::error!(%error, "session journal flush failed");
                         self.mark_failed();
                         let _ = self.backend.shutdown().await;
@@ -680,6 +704,13 @@ impl SessionWorker {
                 tracing::error!(%error, "inferior output evidence finalization failed");
                 self.mark_failed();
             }
+        }
+        if self.fatal {
+            let _ = self
+                .store
+                .upsert_session(self.reducer.state(), self.profile);
+        } else {
+            let _ = self.checkpoint(false);
         }
         let _ = self.journal.flush();
     }
@@ -805,6 +836,15 @@ impl SessionWorker {
                 );
                 self.cleanup_one_stale_value().await;
             }
+            WorkerRequest::GetOperation {
+                operation_id,
+                response,
+            } => {
+                let _ =
+                    response.send(self.operations.get(&operation_id).cloned().ok_or_else(|| {
+                        Error::new(ErrorCode::NotFound, "operation not found in this session")
+                    }));
+            }
             WorkerRequest::RecordEvent { event, response } => {
                 let _ = response.send(self.apply_event(event));
             }
@@ -817,13 +857,8 @@ impl SessionWorker {
                 self.module_rebind_needed = true;
                 let _ = response.send(Ok(()));
             }
-            WorkerRequest::RecordApi { request, response } => {
-                let appended = self.journal.append_api(request).map(|_| ());
-                let result = self.journal_result(appended);
-                let _ = response.send(result);
-            }
             WorkerRequest::FlushJournal { response } => {
-                let flushed = self.journal.flush();
+                let flushed = self.checkpoint(false).and_then(|()| self.journal.flush());
                 let result = self.journal_result(flushed);
                 let _ = response.send(result);
             }
@@ -918,11 +953,15 @@ impl SessionWorker {
                         "tracking definition already exists",
                     ))
                 } else {
-                    self.store
-                        .upsert_tracking(&self.reducer.state().session_id, &definition)
-                        .map(|()| {
-                            self.tracking.insert(definition.id().0.clone(), definition);
-                        })
+                    let stored = if self.store_failed {
+                        Ok(())
+                    } else {
+                        self.store
+                            .upsert_tracking(&self.reducer.state().session_id, &definition)
+                    };
+                    self.store_result(stored).map(|()| {
+                        self.tracking.insert(definition.id().0.clone(), definition);
+                    })
                 };
                 let _ = response.send(result);
             }
@@ -936,8 +975,12 @@ impl SessionWorker {
                     .cloned()
                     .ok_or_else(|| Error::new(ErrorCode::NotFound, "tracking definition not found"))
                     .and_then(|definition| {
-                        self.store
-                            .delete_tracking(&self.reducer.state().session_id, &tracking_id)?;
+                        if !self.store_failed {
+                            let removed = self
+                                .store
+                                .delete_tracking(&self.reducer.state().session_id, &tracking_id);
+                            self.store_result(removed)?;
+                        }
                         self.tracking.remove(&tracking_id);
                         self.tracking_history.remove(&tracking_id);
                         Ok(definition)
@@ -1063,6 +1106,17 @@ impl SessionWorker {
 
     async fn handle_control(&mut self, control: ControlRequest) -> bool {
         match control {
+            ControlRequest::RecordApi { request, response } => {
+                let _ = response.send(self.record_api(request));
+                self.fatal
+            }
+            ControlRequest::RecordOperation {
+                operation,
+                response,
+            } => {
+                let _ = response.send(self.record_operation(operation));
+                self.fatal
+            }
             ControlRequest::Interrupt {
                 command,
                 deadline,
@@ -1142,6 +1196,13 @@ impl SessionWorker {
         }
         self.finalize_output_evidence().await?;
         self.apply_event(DomainEvent::SessionClosed)?;
+        // Final storage failures can themselves publish evidence gaps. Retain
+        // those transitions before the close marker and after its final flush.
+        self.checkpoint(true)?;
+        self.checkpoint(false)?;
+        let finished = self.journal.finish();
+        self.journal_result(finished)?;
+        self.checkpoint(false)?;
         if self.metric_active {
             self.metrics.session_closed();
             self.metric_active = false;
@@ -1617,6 +1678,21 @@ impl SessionWorker {
 
             match input {
                 ExecutionInput::Control(None) => self.controls_open = false,
+                ExecutionInput::Control(Some(ControlRequest::RecordApi { request, response })) => {
+                    let _ = response.send(self.record_api(request));
+                    if self.fatal {
+                        return Err(Error::new(ErrorCode::GdbExited, "required journal failed"));
+                    }
+                }
+                ExecutionInput::Control(Some(ControlRequest::RecordOperation {
+                    operation,
+                    response,
+                })) => {
+                    let _ = response.send(self.record_operation(operation));
+                    if self.fatal {
+                        return Err(Error::new(ErrorCode::GdbExited, "required history failed"));
+                    }
+                }
                 ExecutionInput::Control(Some(ControlRequest::Close { response })) => {
                     let result = self.close().await;
                     let _ = response.send(result);
@@ -2024,9 +2100,11 @@ impl SessionWorker {
     }
 
     fn apply_event(&mut self, event: DomainEvent) -> Result<()> {
-        let result = self.apply_event_inner(event);
+        let result = self
+            .apply_event_inner(event)
+            .and_then(|()| self.report_journal_gap());
         if result.is_err() {
-            // 2026-08-30: Reducer or state persistence failures returned to
+            // 2026-08-30: Reducer or required durable-evidence failures returned to
             // one caller while the worker stayed live and watch clients kept
             // an older healthy state. Authoritative event failure is fatal.
             self.fatal = true;
@@ -2080,8 +2158,7 @@ impl SessionWorker {
                     | DomainEvent::TargetDetached
                     | DomainEvent::BackendExited { .. }
             );
-        let appended = self.journal.append_domain(event.clone());
-        let journaled: JournaledEvent = self.journal_result(appended)?;
+        let journaled = self.journal.append_domain(event.clone())?;
         let changed = self.reducer.apply(&journaled)?;
         match &event {
             DomainEvent::CoreOpened { .. } => {
@@ -2131,14 +2208,9 @@ impl SessionWorker {
         }
         // 2026-08-28: Even non-revision events advance public event_seq. The
         // watch state must publish every journaled event or waits see stale evidence.
-        if changed {
-            // 2026-08-28: State revisions were persisted to SQLite but absent
-            // from the append-only replay evidence.
-            let appended = self
-                .journal
-                .append_state(self.reducer.state().revision, self.reducer.state());
-            self.journal_result(appended)?;
-            self.persist()?;
+        self.state_dirty |= changed;
+        if changed && self.journal.is_durable() {
+            self.checkpoint(false)?;
         }
         self.state_sender.send_replace(self.reducer.state().clone());
         let _ = self.events.send(PublishedEvent {
@@ -2149,7 +2221,7 @@ impl SessionWorker {
         if stopped {
             let snapshot_started = Instant::now();
             // 2026-08-28: SnapshotReady was published without a stored object.
-            // Persist the bounded stop context before advertising readiness.
+            // Commit the bounded stop context before advertising readiness.
             let stop_id = self.reducer.state().stop_id.clone().unwrap();
             let snapshot_id = format!("snap_{stop_id}");
             let frame = self.reducer.state().stopped_frame().cloned();
@@ -2199,8 +2271,14 @@ impl SessionWorker {
     fn store_snapshot_value(&mut self, snapshot_id: String, snapshot: Value) -> Result<()> {
         let appended = self.journal.append_snapshot(&snapshot_id, &snapshot);
         self.journal_result(appended)?;
-        self.store
-            .upsert_snapshot(&self.reducer.state().session_id, &snapshot_id, &snapshot)?;
+        if !self.store_failed {
+            let stored = self.store.upsert_snapshot(
+                &self.reducer.state().session_id,
+                &snapshot_id,
+                &snapshot,
+            );
+            self.store_result(stored)?;
+        }
         if self.snapshots.len() >= 128 {
             self.snapshots.pop_first();
         }
@@ -2213,12 +2291,108 @@ impl SessionWorker {
             self.fatal = true;
             self.mark_failed();
         }
-        result
+        let value = result?;
+        self.report_journal_gap()?;
+        Ok(value)
     }
 
-    fn persist(&mut self) -> Result<()> {
-        self.store
-            .upsert_session(self.reducer.state(), self.profile)
+    fn report_journal_gap(&mut self) -> Result<()> {
+        if !self.journal_gap_reported
+            && let Some(gap) = self.journal.gap()
+        {
+            let reason = format!(
+                "journal evidence unavailable from sequence {}: {}",
+                gap.from_seq, gap.reason
+            );
+            self.journal_gap_reported = true;
+            tracing::warn!(%reason, "session recording stopped");
+            self.apply_event(DomainEvent::EvidenceGap { reason })?;
+        }
+        Ok(())
+    }
+
+    fn record_operation(&mut self, operation: OperationRecord) -> Result<()> {
+        // 2026-09-05: Run and probe control depended on SQLite even
+        // after history failed. Keep current operation records with
+        // the actor and coalesce performance-mode history writes.
+        let stored = if self.journal.is_durable() {
+            let stored = self.store.upsert_operation(&operation);
+            self.store_result(stored)
+        } else {
+            self.dirty_operations
+                .insert(operation.operation_id.0.clone());
+            Ok(())
+        };
+        if stored.is_ok() {
+            let id = operation.operation_id.0.clone();
+            if !self.operations.contains_key(&id)
+                && self.operations.len() >= self.operation_limit
+                && let Some(oldest) = self
+                    .operations
+                    .values()
+                    .min_by_key(|record| record.created_revision)
+                    .map(|record| record.operation_id.0.clone())
+            {
+                self.operations.remove(&oldest);
+                self.dirty_operations.remove(&oldest);
+            }
+            self.operations.insert(id, operation);
+        }
+        stored
+    }
+
+    fn record_api(&mut self, request: Value) -> Result<()> {
+        let appended = self.journal.append_api(request).map(drop);
+        self.journal_result(appended)
+    }
+
+    fn checkpoint(&mut self, closing: bool) -> Result<()> {
+        for id in std::mem::take(&mut self.dirty_operations) {
+            if self.store_failed {
+                break;
+            }
+            if let Some(operation) = self.operations.get(&id) {
+                let stored = self.store.upsert_operation(operation);
+                self.store_result(stored)?;
+            }
+        }
+        if !self.state_dirty && !(closing && self.store_failed) {
+            return Ok(());
+        }
+        // 2026-09-05: Every revision copied the full state to both JSONL and
+        // the shared SQLite connection. Performance mode coalesces those
+        // copies at flush/close boundaries; live state remains actor-owned.
+        self.state_dirty = false;
+        let appended = self
+            .journal
+            .append_state(self.reducer.state().revision, self.reducer.state());
+        self.journal_result(appended)?;
+        if !self.store_failed || closing {
+            let stored = self
+                .store
+                .upsert_session(self.reducer.state(), self.profile);
+            self.store_result(stored)?;
+        }
+        Ok(())
+    }
+
+    fn store_result(&mut self, result: Result<()>) -> Result<()> {
+        // 2026-09-05: A failed history write discarded usable live state.
+        // Keep the actor's data available and report the missing persistence.
+        if let Err(error) = result {
+            if self.journal.is_durable() {
+                self.fatal = true;
+                self.mark_failed();
+                return Err(error);
+            }
+            if !self.store_failed {
+                self.store_failed = true;
+                self.apply_event(DomainEvent::EvidenceGap {
+                    reason: format!("SQLite history is incomplete: {error}"),
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn mark_failed(&mut self) {
@@ -2227,6 +2401,7 @@ impl SessionWorker {
         // stale READY/ACTIVE state. The reducer still owns this emergency
         // terminal transition even though the failed journal cannot record it.
         if self.reducer.fail_closed() {
+            self.state_dirty = true;
             self.state_sender.send_replace(self.reducer.state().clone());
         }
         if self.metric_active {

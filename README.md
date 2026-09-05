@@ -90,8 +90,8 @@ qualify. Agent-effect comparisons are not part of the compatibility claim.
   values, content-addressed artifacts, and owner-checked resource access
 - Agent probes, experiments, hypothesis checks, observation budgets, tracked
   expressions/memory, crash signatures, and provider provenance
-- Write leases, optimistic revisions, idempotency, profiles, rate limits,
-  redacted SQLite audit, WAL metadata, JSONL evidence, and reconciliation
+- Fixed MCP caller control, canonical write leases and revisions, idempotency,
+  profiles, JSONL evidence, optional durable SQLite audit, and reconciliation
 - MCP stdio, MCP Streamable HTTP, Unix socket, canonical JSON-RPC, Python SDK,
   TypeScript SDK, CLI operations, schema files, and Prometheus text metrics
 - Secure GDB startup, clean or allowlisted inherited inferior environments,
@@ -224,7 +224,8 @@ it, so consecutive native commands do not repeatedly rebuild cached state.
 Canonical mutations require the current revision and write lease. Valid owner
 mutations refresh the lease near half-life. MCP-created sessions use fixed
 caller control without lease persistence, expiration, or renewal. Agents send
-the `session_id`, but no lease or revision. A stop-scoped call without `stop_id` binds to the current stop;
+the `session_id`, but no lease or revision. A stop-scoped call without `stop_id`
+binds to the current stop;
 provide a returned `stop_id` only when later calls must reject a newer stop.
 Projected continue and step actions wait for the next stop or exit by default;
 request `accepted` or `running` only for asynchronous interaction. Starting
@@ -366,6 +367,12 @@ journal ordering and reconstructs controller state and stored snapshots. A
 recorded `session.created` ID overrides `--session-id`; the flag supplies a
 legacy MI-only fallback. Replay never executes or claims to restore an
 inferior.
+
+The default `performance` journal coalesces full-state checkpoints. A history
+storage failure reports an evidence gap while live debugging continues;
+`durable` mode requires evidence storage to succeed. Inline MCP size limits
+apply after projection, including recovered operation results. Oversized
+results become artifacts owned by the original session.
 
 Storage GC is dry-run unless `--execute` is present. Status and GC never hash
 all content; `storage verify` performs that explicit integrity scan. Daemon

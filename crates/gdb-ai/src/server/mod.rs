@@ -670,7 +670,7 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         revision: _,
         mut state,
         mut result,
-        warnings,
+        mut warnings,
         truncated,
         continuation,
         artifacts,
@@ -678,6 +678,20 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         error,
         ..
     } = response;
+    // 2026-09-05: Compact views often omit state; evidence gaps must remain
+    // visible even when their stop and registry metadata is redundant.
+    if let Some(state) = &state {
+        warnings.extend(
+            state
+                .limitations
+                .iter()
+                .filter(|reason| reason.starts_with("evidence gap: "))
+                .map(|reason| gdb_ai_core::protocol::Warning {
+                    code: "EVIDENCE_GAP".into(),
+                    message: reason.clone(),
+                }),
+        );
+    }
     // 2026-08-31: Remove only byte-identical nested command state here;
     // field-name removal also stripped explicitly requested target data.
     if let Some(Value::Object(result)) = result.as_mut() {

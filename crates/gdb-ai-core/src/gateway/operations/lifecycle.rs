@@ -240,6 +240,19 @@ impl Gateway {
             })
             .map(|(state, _)| (state.session_id.0.clone(), state))
             .collect::<BTreeMap<_, _>>();
+        for (id, state) in self.retired_states.read().await.iter() {
+            if let Some(stored) = states.get_mut(id) {
+                *stored = state.clone();
+            }
+        }
+        // Rows without a retained terminal state cannot represent live GDBs.
+        // The registered actors below are the authority for active sessions.
+        states.retain(|_, state| {
+            matches!(
+                state.lifecycle,
+                crate::domain::SessionLifecycle::Closed | crate::domain::SessionLifecycle::Failed
+            )
+        });
         for entry in entries {
             let state = entry.handle.state();
             states.insert(state.session_id.0.clone(), state);
@@ -254,8 +267,8 @@ impl Gateway {
         if let Ok(entry) = self.entry(&session_id.0).await {
             return Ok(serde_json::to_value(entry.handle.state())?);
         }
-        self.store
-            .get_session(&session_id)?
+        self.retained_session_state(&session_id)
+            .await?
             .map(serde_json::to_value)
             .transpose()?
             .ok_or_else(|| Error::new(ErrorCode::NotFound, "session not found"))
@@ -312,6 +325,21 @@ impl Gateway {
             "truncated": offset + (bytes.len() as u64) < length
         });
         result.as_object_mut().unwrap().extend(byte_content(bytes));
+        if self.entry(&session_id.0).await.is_err()
+            && let Some(state) = self.retained_session_state(&session_id).await?
+        {
+            // 2026-09-05: Retained transcript pages have no live response
+            // state, so a missing tail marker hid their known evidence gap.
+            let warnings: Vec<_> = state
+                .limitations
+                .iter()
+                .filter(|limitation| limitation.starts_with("evidence gap: "))
+                .map(|message| json!({"code": "EVIDENCE_GAP", "message": message}))
+                .collect();
+            if !warnings.is_empty() {
+                result["warnings"] = json!(warnings);
+            }
+        }
         Ok(result)
     }
 
@@ -330,6 +358,20 @@ impl Gateway {
 
             for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
                 let entry: crate::journal::JournalEntry = serde_json::from_str(&line?)?;
+                // 2026-09-05: A live event ID can outlast journal recording;
+                // its gap marker is not a substitute for the requested event.
+                if entry.kind == "journal.gap"
+                    && entry.data["from_seq"]
+                        .as_u64()
+                        .is_some_and(|first| wanted >= first)
+                {
+                    return Err(
+                        Error::new(ErrorCode::EventGap, "event evidence was not retained")
+                            .with_details(
+                                json!({"requested_event_seq": wanted, "evidence_gap": entry.data}),
+                            ),
+                    );
+                }
                 if entry.seq == wanted {
                     return Ok(Some(entry));
                 }
@@ -346,10 +388,25 @@ impl Gateway {
                 format!("journal scan task failed: {error}"),
             )
         })??;
-        entry
-            .map(serde_json::to_value)
-            .transpose()?
-            .ok_or_else(|| Error::new(ErrorCode::NotFound, "journal event not found"))
+        if let Some(entry) = entry {
+            return Ok(serde_json::to_value(entry)?);
+        }
+        let state = match self.entry(&session_id.0).await {
+            Ok(entry) => Some(entry.handle.state()),
+            Err(_) => self.retained_session_state(&session_id).await?,
+        };
+        if let Some(reason) = state.as_ref().and_then(|state| {
+            state
+                .limitations
+                .iter()
+                .find(|limitation| limitation.starts_with("evidence gap: journal "))
+        }) {
+            return Err(
+                Error::new(ErrorCode::EventGap, "event evidence was not retained")
+                    .with_details(json!({"requested_event_seq": wanted, "reason": reason})),
+            );
+        }
+        Err(Error::new(ErrorCode::NotFound, "journal event not found"))
     }
 
     pub(super) async fn session_journal_path(

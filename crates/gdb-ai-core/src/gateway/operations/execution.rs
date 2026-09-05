@@ -260,7 +260,7 @@ impl Gateway {
             completed_event_seq: None,
             error: None,
         };
-        self.store.upsert_operation(&operation)?;
+        entry.handle.record_operation(&operation).await?;
         let mut command = match action.as_str() {
             "continue" => MiCommand::new("-exec-continue")?,
             "interrupt" => MiCommand::new("-exec-interrupt")?,
@@ -291,7 +291,7 @@ impl Gateway {
                 operation.error = Some(error.to_string());
                 operation.completed_event_seq =
                     Some(entry.handle.with_state(|state| state.event_seq));
-                self.store.upsert_operation(&operation)?;
+                entry.handle.record_operation(&operation).await?;
                 return Err(error);
             }
         };
@@ -311,12 +311,12 @@ impl Gateway {
         if let Some(wait) = wait {
             let report_settled_by = wait.until == "settled";
             operation.status = OperationStatus::WaitingForState;
-            self.store.upsert_operation(&operation)?;
+            entry.handle.record_operation(&operation).await?;
             match apply_wait(&entry.handle, wait, Some(&state)).await {
                 Ok(state) => {
                     operation.status = OperationStatus::Completed;
                     operation.completed_event_seq = Some(state.event_seq);
-                    self.store.upsert_operation(&operation)?;
+                    entry.handle.record_operation(&operation).await?;
                     let mut result = json!({
                         "operation_id": operation.operation_id,
                         "wait_status": "COMPLETED",
@@ -345,7 +345,7 @@ impl Gateway {
                     let state = entry.handle.state();
                     operation.status = OperationStatus::TimedOut;
                     operation.completed_event_seq = Some(state.event_seq);
-                    self.store.upsert_operation(&operation)?;
+                    entry.handle.record_operation(&operation).await?;
                     let mut result = json!({
                         "operation_id": operation.operation_id,
                         "wait_status": "TIMEOUT",
@@ -362,14 +362,14 @@ impl Gateway {
                     operation.error = Some(error.to_string());
                     operation.completed_event_seq =
                         Some(entry.handle.with_state(|state| state.event_seq));
-                    self.store.upsert_operation(&operation)?;
+                    entry.handle.record_operation(&operation).await?;
                     Err(error)
                 }
             }
         } else {
             operation.status = OperationStatus::Completed;
             operation.completed_event_seq = Some(entry.handle.with_state(|state| state.event_seq));
-            self.store.upsert_operation(&operation)?;
+            entry.handle.record_operation(&operation).await?;
             let mut result = json!({
                 "operation_id": operation.operation_id,
                 "wait_status": "ACCEPTED",
@@ -385,16 +385,14 @@ impl Gateway {
         let input = turn_input(&request.parameters)?;
         let entry = self.entry(required_session(request)?).await?;
         let output_offset = entry.handle.inferior_output_position();
-        let mut operation = request
+        let mut operation = match request
             .parameters
             .get("operation_id")
             .and_then(Value::as_str)
-            .map(|operation_id| {
-                self.store
-                    .get_operation(operation_id)?
-                    .ok_or_else(|| Error::new(ErrorCode::NotFound, "operation not found"))
-            })
-            .transpose()?;
+        {
+            Some(id) => Some(entry.handle.operation(id).await?),
+            None => None,
+        };
         if operation
             .as_ref()
             .is_some_and(|operation| operation.session_id != *entry.handle.id())
@@ -449,7 +447,7 @@ impl Gateway {
         if let Some(operation) = &mut operation {
             operation.status = OperationStatus::Completed;
             operation.completed_event_seq = Some(state.event_seq);
-            self.store.upsert_operation(operation)?;
+            entry.handle.record_operation(operation).await?;
         }
         let mut result = json!({ "operation": operation, "state": state });
         append_input(&mut result, input.as_ref());
