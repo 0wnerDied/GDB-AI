@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use gdb_ai_mi::{MiFramer, MiLimits, MiRecord, parse_record, quote_c_string};
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
@@ -634,26 +633,6 @@ impl BackendInputs {
     }
 }
 
-#[async_trait]
-pub trait DebugBackend: Send {
-    fn descriptor(&self) -> &BackendDescriptor;
-    fn pty_path(&self) -> &str;
-    async fn send(&mut self, raw: &[u8]) -> Result<()>;
-    async fn next_input(&mut self) -> Option<BackendInput>;
-    async fn write_inferior(
-        &mut self,
-        bytes: &[u8],
-        eof: bool,
-        deadline: tokio::time::Instant,
-    ) -> Result<usize>;
-    fn flush_inferior_input(&mut self) -> Result<()>;
-    async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()>;
-    fn inferior_output(&self) -> Arc<PtyOutput>;
-    fn signal_interrupt(&mut self) -> Result<()>;
-    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>>;
-    async fn shutdown(&mut self) -> Result<()>;
-}
-
 impl GdbBackend {
     pub async fn spawn(
         config: &GdbConfig,
@@ -1030,58 +1009,6 @@ impl GdbBackend {
             }
         }
         Ok(())
-    }
-}
-
-#[async_trait]
-impl DebugBackend for GdbBackend {
-    fn descriptor(&self) -> &BackendDescriptor {
-        self.descriptor()
-    }
-
-    fn pty_path(&self) -> &str {
-        self.pty_path()
-    }
-
-    async fn send(&mut self, raw: &[u8]) -> Result<()> {
-        self.send(raw).await
-    }
-
-    async fn next_input(&mut self) -> Option<BackendInput> {
-        self.next_input().await
-    }
-
-    async fn write_inferior(
-        &mut self,
-        bytes: &[u8],
-        eof: bool,
-        deadline: tokio::time::Instant,
-    ) -> Result<usize> {
-        self.write_inferior(bytes, eof, deadline).await
-    }
-
-    fn flush_inferior_input(&mut self) -> Result<()> {
-        self.flush_inferior_input()
-    }
-
-    async fn resize_inferior(&self, rows: u16, columns: u16) -> Result<()> {
-        self.resize_inferior(rows, columns).await
-    }
-
-    fn inferior_output(&self) -> Arc<PtyOutput> {
-        self.inferior_output()
-    }
-
-    fn signal_interrupt(&mut self) -> Result<()> {
-        self.signal_interrupt()
-    }
-
-    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
-        self.try_wait()
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        self.shutdown().await
     }
 }
 

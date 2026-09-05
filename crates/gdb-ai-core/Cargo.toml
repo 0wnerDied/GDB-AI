@@ -7,7 +7,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-async-trait.workspace = true
 base64.workspace = true
 gdb-ai-mi = { path = "../gdb-ai-mi" }
 libc.workspace = true

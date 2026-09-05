@@ -19,8 +19,8 @@ use crate::{
     Error, ErrorCode, Result,
     artifact::ArtifactStore,
     backend::{
-        BackendInput, DebugBackend, GdbBackend, MiArgument, MiCommand, OutputEvidenceStatus,
-        PtyOutput, SandboxOptions,
+        BackendInput, GdbBackend, MiArgument, MiCommand, OutputEvidenceStatus, PtyOutput,
+        SandboxOptions,
     },
     config::{Config, OutputEvidenceMode},
     domain::{
@@ -182,7 +182,7 @@ impl PendingControlResponse {
 // Owns both GDB input and reducer state. One ordinary MI command may be in
 // flight; the separate control lane admits only interrupt or close.
 pub(super) struct SessionWorker {
-    backend: Box<dyn DebugBackend>,
+    backend: GdbBackend,
     journal: Journal,
     artifacts: ArtifactStore,
     reducer: StateReducer,
@@ -259,26 +259,24 @@ impl SessionWorker {
         }
 
         for version in versions {
-            let mut backend: Box<dyn DebugBackend> = Box::new(
-                GdbBackend::spawn(
-                    &config.gdb,
-                    &version,
-                    &session_dir,
-                    limits,
-                    &config.limits,
-                    &config.output,
-                    SandboxOptions {
-                        mode: config.security.sandbox,
-                        // 2026-09-04: Lab sessions may connect GDB remote
-                        // targets, so optional sandboxing must preserve their
-                        // network rather than silently isolating the stub.
-                        allow_network: matches!(profile, Profile::LabMutation | Profile::RawAdmin),
-                    },
-                )
-                .await?,
-            );
+            let mut backend = GdbBackend::spawn(
+                &config.gdb,
+                &version,
+                &session_dir,
+                limits,
+                &config.limits,
+                &config.output,
+                SandboxOptions {
+                    mode: config.security.sandbox,
+                    // 2026-09-04: Lab sessions may connect GDB remote
+                    // targets, so optional sandboxing must preserve their
+                    // network rather than silently isolating the stub.
+                    allow_network: matches!(profile, Profile::LabMutation | Profile::RawAdmin),
+                },
+            )
+            .await?;
             match wait_for_prompt(
-                backend.as_mut(),
+                &mut backend,
                 &mut journal,
                 &mut reducer,
                 &mut target_output,
@@ -2245,7 +2243,7 @@ impl SessionWorker {
 }
 
 async fn wait_for_prompt(
-    backend: &mut dyn DebugBackend,
+    backend: &mut GdbBackend,
     journal: &mut Journal,
     reducer: &mut StateReducer,
     target_output: &mut ByteRing,
