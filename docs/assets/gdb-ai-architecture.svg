@@ -1,188 +1,109 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000"
-     viewBox="0 0 1600 1000" role="img"
-     aria-labelledby="title description">
-  <title id="title">GDB/AI system architecture</title>
-  <desc id="description">
-    Paper-style component diagram showing Agent clients, protocol adapters,
-    the GDB/AI gateway and session actor, evidence storage, the native GDB/MI
-    backend, a separate inferior PTY, GNU GDB, and supported target types.
-  </desc>
-
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="930"
+     viewBox="0 0 1120 930" role="img" aria-labelledby="title description">
+  <title id="title">GDB/AI: session ownership and data paths</title>
+  <desc id="description">Agent clients reach a shared MCP or canonical JSON-RPC
+    interface and Gateway. Each session actor owns live state and a dedicated
+    GDB process. The local inferior exchanges bytes through a separate PTY
+    capture path. History and artifacts are recorded separately; performance
+    mode reports history gaps, while durable mode requires evidence writes.
+    GDB also supports attached processes, core files, and remote RSP targets.
+    Solid arrows represent live interaction; dashed arrows represent recording.</desc>
+  <!-- 2026-09-05: The old figure made leases and durable evidence universal.
+       Show caller control, actor-owned live state, and mode-dependent history. -->
   <defs>
-    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="9"
-            refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L9,3 z" fill="#315d8a"/>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="4"
+            orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#315d8a"/>
     </marker>
-    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="9"
-            refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L9,3 z" fill="#b46a2b"/>
+    <marker id="io-arrow" markerWidth="8" markerHeight="8" refX="8" refY="4"
+            orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#236955"/>
     </marker>
-    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="9"
-            refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L9,3 z" fill="#3f7c68"/>
-    </marker>
-    <marker id="arrow-gray" markerWidth="10" markerHeight="10" refX="9"
-            refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L9,3 z" fill="#6b7280"/>
+    <marker id="record-arrow" markerWidth="8" markerHeight="8" refX="8" refY="4"
+            orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#687281"/>
     </marker>
     <style>
-      text { font-family: Inter, "Segoe UI", Arial, sans-serif; fill: #172033; }
-      .layer { fill: #ffffff; stroke: #aeb8c5; stroke-width: 1.5; }
-      .core { fill: #f8fafc; stroke: #52667d; stroke-width: 2; }
-      .box { fill: #ffffff; stroke: #7c8998; stroke-width: 1.5; }
-      .blue-box { fill: #eef5fb; stroke: #527da8; stroke-width: 1.5; }
-      .orange-box { fill: #fff6ec; stroke: #c08046; stroke-width: 1.5; }
-      .green-box { fill: #eef8f4; stroke: #568b79; stroke-width: 1.5; }
-      .gray-box { fill: #f3f4f6; stroke: #7b8490; stroke-width: 1.5; }
-      .layer-label { font-size: 18px; font-weight: 700; letter-spacing: .4px; }
-      .box-title { font-size: 17px; font-weight: 700; }
-      .body { font-size: 14px; }
-      .small { font-size: 12px; fill: #536174; }
-      .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 13px; }
-      .blue { stroke: #315d8a; stroke-width: 2.2; fill: none;
-              marker-end: url(#arrow-blue); }
-      .orange { stroke: #b46a2b; stroke-width: 2.2; fill: none;
-                stroke-dasharray: 7 5; marker-end: url(#arrow-orange); }
-      .green { stroke: #3f7c68; stroke-width: 2.5; fill: none;
-               marker-end: url(#arrow-green); }
-      .gray { stroke: #6b7280; stroke-width: 1.8; fill: none;
-              stroke-dasharray: 3 4; marker-end: url(#arrow-gray); }
-      .rule { stroke: #d7dde5; stroke-width: 1; }
+      text { font-family: "DejaVu Sans", Arial, sans-serif; fill: #172231; }
+      .title { font-size: 24px; font-weight: 700; }
+      .body { font-size: 19px; }
+      .note { font-size: 17px; fill: #465366; }
+      .box { fill: #fff; stroke: #728195; stroke-width: 1.6; }
+      .live { fill: #eff5fb; stroke: #537ca5; stroke-width: 1.6; }
+      .io-box { fill: #edf6f2; stroke: #397761; stroke-width: 1.6; }
+      .flow { fill: none; stroke: #315d8a; stroke-width: 2;
+              marker-end: url(#arrow); }
+      .io { fill: none; stroke: #236955; stroke-width: 2;
+            marker-end: url(#io-arrow); }
+      .record { fill: none; stroke: #687281; stroke-width: 2;
+                stroke-dasharray: 6 5; marker-end: url(#record-arrow); }
     </style>
   </defs>
+  <rect width="1120" height="930" fill="#fff"/>
 
-  <rect width="1600" height="1000" fill="#ffffff"/>
+  <rect class="box" x="36" y="36" width="1048" height="90" rx="6"/>
+  <text class="title" x="560" y="72" text-anchor="middle">Agent clients</text>
+  <text class="body" x="560" y="105" text-anchor="middle">MCP clients · Python / TypeScript SDKs</text>
 
-  <!-- Agent clients. -->
-  <rect class="layer" x="45" y="35" width="1510" height="110" rx="8"/>
-  <text class="layer-label" x="68" y="66">Agent clients</text>
-  <rect class="box" x="230" y="56" width="245" height="66" rx="5"/>
-  <text class="box-title" x="352" y="84" text-anchor="middle">Autonomous Agent</text>
-  <text class="small" x="352" y="105" text-anchor="middle">plan · act · observe</text>
-  <rect class="box" x="510" y="56" width="245" height="66" rx="5"/>
-  <text class="box-title" x="632" y="84" text-anchor="middle">IDE / debugger UI</text>
-  <text class="small" x="632" y="105" text-anchor="middle">human-in-the-loop</text>
-  <rect class="box" x="790" y="56" width="245" height="66" rx="5"/>
-  <text class="box-title" x="912" y="84" text-anchor="middle">Python SDK</text>
-  <text class="small" x="912" y="105" text-anchor="middle">research frameworks</text>
-  <rect class="box" x="1070" y="56" width="245" height="66" rx="5"/>
-  <text class="box-title" x="1192" y="84" text-anchor="middle">TypeScript SDK</text>
-  <text class="small" x="1192" y="105" text-anchor="middle">Node.js Agents</text>
+  <rect x="36" y="166" width="1048" height="468" rx="8"
+        fill="#f8fafc" stroke="#728195" stroke-width="1.6"/>
+  <text class="title" x="64" y="195">GDB/AI server</text>
+  <rect class="live" x="64" y="218" width="992" height="66" rx="5"/>
+  <text class="title" x="560" y="245" text-anchor="middle">MCP tools / canonical JSON-RPC</text>
+  <text class="body" x="560" y="271" text-anchor="middle">stdio · Unix socket · loopback HTTP</text>
+  <path class="flow" d="M560 126 V218"/>
+  <path class="flow" d="M560 218 V126"/>
 
-  <!-- Protocol adapters. -->
-  <rect class="layer" x="45" y="175" width="1510" height="125" rx="8"/>
-  <text class="layer-label" x="68" y="206">Versioned Agent interface</text>
-  <rect class="blue-box" x="180" y="218" width="250" height="58" rx="5"/>
-  <text class="box-title" x="305" y="243" text-anchor="middle">MCP</text>
-  <text class="small" x="305" y="263" text-anchor="middle">stdio · Streamable HTTP</text>
-  <rect class="blue-box" x="470" y="218" width="250" height="58" rx="5"/>
-  <text class="box-title" x="595" y="243" text-anchor="middle">Canonical JSON-RPC</text>
-  <text class="mono" x="595" y="263" text-anchor="middle">gdb.ai/v1</text>
-  <rect class="blue-box" x="760" y="218" width="250" height="58" rx="5"/>
-  <text class="box-title" x="885" y="243" text-anchor="middle">Typed tool projection</text>
-  <text class="small" x="885" y="263" text-anchor="middle">bounded semantic operations</text>
-  <rect class="blue-box" x="1050" y="218" width="300" height="58" rx="5"/>
-  <text class="box-title" x="1200" y="243" text-anchor="middle">Resources and artifacts</text>
-  <text class="mono" x="1200" y="263" text-anchor="middle">gdbai://…</text>
+  <rect class="live" x="64" y="320" width="570" height="82" rx="5"/>
+  <text class="title" x="349" y="353" text-anchor="middle">Gateway and operations</text>
+  <text class="body" x="349" y="382" text-anchor="middle">Caller control · context checks · coordination</text>
+  <path class="flow" d="M349 284 V320"/>
+  <path class="flow" d="M349 320 V284"/>
 
-  <!-- GDB/AI core. -->
-  <rect class="core" x="45" y="330" width="1510" height="390" rx="8"/>
-  <text class="layer-label" x="68" y="362">GDB/AI core — one authoritative owner per session</text>
+  <rect class="live" x="64" y="442" width="570" height="138" rx="5"/>
+  <text class="title" x="349" y="476" text-anchor="middle">Session actor</text>
+  <text class="body" x="349" y="508" text-anchor="middle">MI command queue · interrupt / close lane</text>
+  <text class="body" x="349" y="536" text-anchor="middle">Live state · stop IDs · execution epochs</text>
+  <text class="note" x="349" y="561" text-anchor="middle">One actor and one GDB process per session</text>
+  <path class="flow" d="M349 402 V442"/>
+  <path class="flow" d="M349 442 V402"/>
 
-  <rect class="blue-box" x="85" y="388" width="330" height="254" rx="6"/>
-  <text class="box-title" x="250" y="419" text-anchor="middle">Gateway</text>
-  <line class="rule" x1="110" y1="435" x2="390" y2="435"/>
-  <text class="body" x="125" y="465">• schema and protocol validation</text>
-  <text class="body" x="125" y="493">• authentication and owner routing</text>
-  <text class="body" x="125" y="521">• effect and policy evaluation</text>
-  <text class="body" x="125" y="549">• write lease + expected revision</text>
-  <text class="body" x="125" y="577">• idempotency and rate limits</text>
-  <text class="body" x="125" y="605">• session and resource registry</text>
+  <rect class="box" x="746" y="320" width="310" height="204" rx="5"/>
+  <text class="title" x="901" y="353" text-anchor="middle">History / artifacts</text>
+  <text class="body" x="901" y="386" text-anchor="middle">JSONL · SQLite · artifacts</text>
+  <text class="body" x="901" y="423" text-anchor="middle">Performance (default):</text>
+  <text class="body" x="901" y="449" text-anchor="middle">history gaps are reported</text>
+  <text class="body" x="901" y="490" text-anchor="middle">Durable: writes required</text>
+  <path class="record" d="M634 477 H746"/>
+  <text class="note" x="690" y="463" text-anchor="middle">record</text>
 
-  <rect class="orange-box" x="455" y="388" width="710" height="254" rx="6"/>
-  <text class="box-title" x="810" y="419" text-anchor="middle">Session actor</text>
-  <text class="small" x="810" y="439" text-anchor="middle">the only writer to its GDB process and session state</text>
+  <rect class="io-box" x="746" y="558" width="310" height="64" rx="5"/>
+  <text class="title" x="901" y="585" text-anchor="middle">PTY capture</text>
+  <text class="note" x="901" y="610" text-anchor="middle">Bounded bytes / optional spool</text>
+  <path class="io" d="M634 545 H690 V590 H746"/>
+  <path class="io" d="M746 590 H690 V545 H634"/>
 
-  <rect class="box" x="480" y="460" width="200" height="68" rx="4"/>
-  <text class="box-title" x="580" y="486" text-anchor="middle">Control lane</text>
-  <text class="small" x="580" y="508" text-anchor="middle">interrupt · cancel · close</text>
-  <rect class="box" x="700" y="460" width="200" height="68" rx="4"/>
-  <text class="box-title" x="800" y="486" text-anchor="middle">Scheduler</text>
-  <text class="small" x="800" y="508" text-anchor="middle">token · deadline · fence</text>
-  <rect class="box" x="920" y="460" width="220" height="68" rx="4"/>
-  <text class="box-title" x="1030" y="486" text-anchor="middle">State reducer</text>
-  <text class="small" x="1030" y="508" text-anchor="middle">revision · epoch · stop ID</text>
+  <rect class="live" x="64" y="704" width="570" height="70" rx="5"/>
+  <text class="title" x="349" y="733" text-anchor="middle">GNU GDB</text>
+  <text class="body" x="349" y="760" text-anchor="middle">Target control · symbols · unwinding · JIT</text>
+  <path class="flow" d="M349 580 V704"/>
+  <path class="flow" d="M349 704 V580"/>
+  <text class="body" x="374" y="675">GDB/MI 3 or 4</text>
 
-  <rect class="box" x="480" y="548" width="200" height="68" rx="4"/>
-  <text class="box-title" x="580" y="574" text-anchor="middle">Capability registry</text>
-  <text class="small" x="580" y="596" text-anchor="middle">probe · scope · limitation</text>
-  <rect class="box" x="700" y="548" width="200" height="68" rx="4"/>
-  <text class="box-title" x="800" y="574" text-anchor="middle">Observation engine</text>
-  <text class="small" x="800" y="596" text-anchor="middle">snapshot · diff · tracking</text>
-  <rect class="box" x="920" y="548" width="220" height="68" rx="4"/>
-  <text class="box-title" x="1030" y="574" text-anchor="middle">Reconciliation</text>
-  <text class="small" x="1030" y="596" text-anchor="middle">managed state · raw taint</text>
+  <rect class="io-box" x="746" y="704" width="310" height="70" rx="5"/>
+  <text class="title" x="901" y="733" text-anchor="middle">Launched inferior</text>
+  <text class="note" x="901" y="760" text-anchor="middle">stdin / stdout / stderr</text>
+  <path class="io" d="M901 622 V704"/>
+  <path class="io" d="M901 704 V622"/>
+  <text class="body" x="925" y="675">PTY</text>
+  <path class="flow" d="M634 739 H746"/>
+  <path class="flow" d="M746 739 H634"/>
+  <text class="note" x="690" y="724" text-anchor="middle">control</text>
 
-  <rect class="gray-box" x="1205" y="388" width="310" height="254" rx="6"/>
-  <text class="box-title" x="1360" y="419" text-anchor="middle">Evidence and persistence</text>
-  <line class="rule" x1="1230" y1="435" x2="1490" y2="435"/>
-  <text class="body" x="1245" y="465">• bounded output rings / spool</text>
-  <text class="body" x="1245" y="493">• append-only JSONL journal</text>
-  <text class="body" x="1245" y="521">• SQLite WAL metadata</text>
-  <text class="body" x="1245" y="549">• SHA-256 artifact store</text>
-  <text class="body" x="1245" y="577">• snapshots and replay</text>
-  <text class="body" x="1245" y="605">• audit and retention policy</text>
-
-  <rect x="85" y="665" width="1430" height="35" rx="4"
-        fill="#edf1f5" stroke="#c4ccd5"/>
-  <text class="small" x="800" y="688" text-anchor="middle">
-    Invariants: reducer-only state changes · explicit context · stale handles after resume · bounded responses · evidence before transition
-  </text>
-
-  <!-- Backend boundary. -->
-  <rect class="layer" x="45" y="750" width="1510" height="105" rx="8"/>
-  <text class="layer-label" x="68" y="781">Native debugger boundary</text>
-  <rect class="blue-box" x="210" y="790" width="500" height="45" rx="5"/>
-  <text class="box-title" x="460" y="818" text-anchor="middle">GDB/MI transport · framer · parser · normalizer</text>
-  <rect class="green-box" x="890" y="790" width="500" height="45" rx="5"/>
-  <text class="box-title" x="1140" y="818" text-anchor="middle">Inferior PTY · stdin / stdout / stderr</text>
-
-  <!-- GDB and targets. -->
-  <rect class="layer" x="45" y="885" width="1510" height="80" rx="8"/>
-  <text class="layer-label" x="68" y="917">Debug substrate</text>
-  <rect class="orange-box" x="235" y="900" width="250" height="48" rx="5"/>
-  <text class="box-title" x="360" y="929" text-anchor="middle">GNU GDB · MI4 / MI3</text>
-  <rect class="box" x="560" y="900" width="210" height="48" rx="5"/>
-  <text class="box-title" x="665" y="929" text-anchor="middle">Local / attach</text>
-  <rect class="box" x="800" y="900" width="180" height="48" rx="5"/>
-  <text class="box-title" x="890" y="929" text-anchor="middle">Core file</text>
-  <rect class="box" x="1010" y="900" width="300" height="48" rx="5"/>
-  <text class="box-title" x="1160" y="929" text-anchor="middle">gdbserver / RSP / kernel</text>
-
-  <!-- Cross-layer data paths. -->
-  <path class="blue" d="M800 145 L800 175"/>
-  <path class="blue" d="M800 300 L800 330"/>
-  <path class="blue" d="M415 515 L455 515"/>
-  <path class="gray" d="M1165 515 L1205 515"/>
-
-  <path class="blue" d="M735 642 L520 790"/>
-  <path class="orange" d="M435 790 L650 642"/>
-  <path class="green" d="M1000 642 L1100 790"/>
-
-  <path class="blue" d="M460 835 L385 900"/>
-  <path class="orange" d="M335 900 L410 835"/>
-  <path class="green" d="M1140 835 L680 900"/>
-  <path class="blue" d="M485 924 L560 924"/>
-  <path class="blue" d="M485 924 C620 870 755 870 800 914"/>
-  <path class="blue" d="M485 924 C700 850 940 850 1010 914"/>
-
-  <!-- Legend. -->
-  <line x1="940" y1="370" x2="980" y2="370" class="blue"/>
-  <text class="small" x="988" y="375">request</text>
-  <line x1="1070" y1="370" x2="1110" y2="370" class="orange"/>
-  <text class="small" x="1118" y="375">event</text>
-  <line x1="1190" y1="370" x2="1230" y2="370" class="green"/>
-  <text class="small" x="1238" y="375">inferior I/O</text>
-  <line x1="1360" y1="370" x2="1400" y2="370" class="gray"/>
-  <text class="small" x="1408" y="375">evidence</text>
+  <rect class="box" x="64" y="830" width="992" height="58" rx="5"/>
+  <text class="body" x="560" y="865" text-anchor="middle">Other targets: PID attach · core files · gdbserver / QEMU RSP</text>
+  <path class="flow" d="M349 774 V830"/>
+  <path class="flow" d="M349 830 V774"/>
+  <text class="note" x="374" y="812">Target access</text>
+  <text class="note" x="560" y="918" text-anchor="middle">Solid: live interaction · dashed: recording · PTY path: local launches</text>
 </svg>

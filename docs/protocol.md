@@ -8,8 +8,8 @@ optional session ID, method, expected revision, idempotency key, and
 parameters. Mutations require the current revision and write lease.
 Stop-sensitive canonical reads require the current `stop_id` or an explicit
 `accept_current_stop` binding.
-Projected MCP tools manage revisions, write leases, retry metadata, and waiter
-cancellation outside their Agent-visible schemas. An omitted projected
+MCP-created sessions use fixed caller control without write-lease renewal.
+Projected tools omit canonical revision and lease fields. An omitted projected
 `stop_id` binds the current stop; a supplied ID remains a stale-stop pin.
 
 Session recovery authority is separate from a business write lease. The owner
@@ -26,7 +26,7 @@ Schema branches and MCP tool input schemas. MCP itself remains UTF-8 JSON-RPC;
 large binary evidence uses bounded artifact resources instead of embedding a
 second wire format inside tool calls.
 
-MCP discovery defaults to ten bounded tools for ordinary Agent debugging,
+MCP discovery defaults to eleven bounded tools for ordinary Agent debugging,
 including same-stop inspection batching. Starting the server with
 `--advanced-tools` exposes the existing advanced target, mutation, value,
 tracking, and kernel projections; `--raw-admin` independently exposes the
