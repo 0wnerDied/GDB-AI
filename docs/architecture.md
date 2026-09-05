@@ -157,6 +157,11 @@ starve debugger state events.
   state, snapshot, periodic, and close boundaries, and fails the session when
   required evidence cannot be retained. Revised state remains staged until its
   checkpoint succeeds, then becomes visible to readers as one publication.
+- Replay validates raw MI and adjacent normalized events incrementally,
+  retaining one pending pair rather than all decoded output. Memory depends
+  on the largest journal entry and reconstructed state, including the latest
+  snapshot. Normalized event sequences determine revisions and handles;
+  MI-only transcripts reconstruct state from raw record sequences.
 - Artifact sensitivity is monotonic for each ownership association. Retention
   and garbage collection preserve any content with a live owner.
 

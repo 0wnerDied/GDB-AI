@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::{
     Error, ErrorCode, Result,
-    domain::{DomainEvent, JournaledEvent, SessionId, SessionLifecycle, SessionState},
+    domain::{DomainEvent, SessionId, SessionLifecycle, SessionState},
     journal::{JournalEntry, JournalGap, require_next_sequence},
     normalize::normalize,
     reducer::StateReducer,
@@ -34,15 +34,32 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
     let mut parsed_mi_records = 0;
     let mut applied_events = 0;
     let mut saw_normalized = false;
-    let mut derived = Vec::new();
+    // 2026-09-06: Replay retained every decoded MI event, even after its
+    // normalized pair was verified. Adjacency needs only the pending event
+    // and the earliest missing pair, not a second copy of the whole journal.
+    let mut pending_derived = None;
+    let mut first_unmatched = None;
     let mut snapshots = 0;
     let mut latest_snapshot = None;
     let mut last_seq = 0;
     let mut complete = false;
     let mut evidence_gap: Option<JournalGap> = None;
 
-    for line in BufReader::new(File::open(path)?).lines() {
-        let line = line?;
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut line = String::new();
+    let mut raw = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        // Preserve BufRead::lines' exact JSON parse-error locations.
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+        }
         if line.trim().is_empty() {
             continue;
         }
@@ -76,12 +93,13 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
                 ));
             }
             "mi.output" => {
-                let raw = entry
+                let encoded = entry
                     .data
                     .get("raw_base64")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "missing raw_base64"))?;
-                let raw = BASE64.decode(raw).map_err(|error| {
+                raw.clear();
+                BASE64.decode_vec(encoded, &mut raw).map_err(|error| {
                     Error::new(
                         ErrorCode::InvalidArgument,
                         format!("invalid base64: {error}"),
@@ -90,30 +108,46 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
                 let record = gdb_ai_mi::parse_record(&raw, gdb_ai_mi::MiLimits::default())?;
                 parsed_mi_records += 1;
                 if let Some(event) = normalize(&record) {
-                    derived.push((entry.seq, event, false));
+                    if !saw_normalized {
+                        reducer.apply_event(entry.seq, &event)?;
+                        applied_events += 1;
+                    }
+                    if let Some((seq, _)) = pending_derived.replace((entry.seq, event)) {
+                        first_unmatched.get_or_insert(seq);
+                    }
                 }
             }
             "normalized.event" => {
-                saw_normalized = true;
+                if !saw_normalized {
+                    // Raw-only transcripts reduce as they stream. Once a
+                    // normalized event appears, only normalized sequences
+                    // may determine public revisions and generated handles.
+                    reducer = StateReducer::new(SessionState::creating(
+                        reducer.state().session_id.clone(),
+                    ));
+                    applied_events = 0;
+                    saw_normalized = true;
+                }
                 let event: DomainEvent = serde_json::from_value(entry.data)?;
                 // 2026-08-28: Complete journals carried both raw MI and
                 // normalized events but replay trusted the latter blindly.
                 // Verify adjacent MI-derived events before reducing them.
-                if let Some((raw_seq, derived_event, matched)) = derived.last_mut()
-                    && *raw_seq + 1 == entry.seq
-                {
-                    if *derived_event != event {
-                        return Err(Error::new(
-                            ErrorCode::InvalidArgument,
-                            format!(
-                                "normalized event {} differs from MI record {}",
-                                entry.seq, raw_seq
-                            ),
-                        ));
+                if let Some((raw_seq, derived_event)) = pending_derived.take() {
+                    if raw_seq + 1 == entry.seq {
+                        if derived_event != event {
+                            return Err(Error::new(
+                                ErrorCode::InvalidArgument,
+                                format!(
+                                    "normalized event {} differs from MI record {}",
+                                    entry.seq, raw_seq
+                                ),
+                            ));
+                        }
+                    } else {
+                        first_unmatched.get_or_insert(raw_seq);
                     }
-                    *matched = true;
                 }
-                reducer.apply(&JournaledEvent::for_replay(entry.seq, event))?;
+                reducer.apply_event(entry.seq, &event)?;
                 applied_events += 1;
             }
             "state.revision" => {
@@ -156,7 +190,7 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
                 // 2026-09-05: A storage failure can leave a valid prefix but
                 // no writable gap marker. Only a clean close certifies that
                 // the retained evidence covers the entire session.
-                if reducer.state().lifecycle != SessionLifecycle::Closed {
+                if !saw_normalized || reducer.state().lifecycle != SessionLifecycle::Closed {
                     return Err(Error::new(
                         ErrorCode::InvalidArgument,
                         "journal closed before the session",
@@ -168,23 +202,16 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
         }
     }
 
-    if saw_normalized {
-        if let Some((seq, _, _)) = derived.iter().find(|(seq, _, matched)| {
-            !matched
-                && evidence_gap
-                    .as_ref()
-                    .is_none_or(|gap| seq + 1 < gap.from_seq)
-        }) {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                format!("MI record {seq} has no matching normalized event"),
-            ));
-        }
-    } else {
-        for (seq, event, _) in derived {
-            reducer.apply(&JournaledEvent::for_replay(seq, event))?;
-            applied_events += 1;
-        }
+    if saw_normalized
+        && let Some(seq) = first_unmatched.or(pending_derived.map(|(seq, _)| seq))
+        && evidence_gap
+            .as_ref()
+            .is_none_or(|gap| seq + 1 < gap.from_seq)
+    {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            format!("MI record {seq} has no matching normalized event"),
+        ));
     }
 
     Ok(ReplayReport {
@@ -206,6 +233,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::domain::JournaledEvent;
 
     #[test]
     fn raw_transcript_replay_is_deterministic() {
@@ -273,7 +301,7 @@ mod tests {
             kind: "session.created".into(),
             data: serde_json::json!({"session_id": session_id}),
         };
-        let raw = b"*running,thread-id=\"all\"";
+        let raw = b"*stopped,reason=\"breakpoint-hit\",thread-group=\"i1\",thread-id=\"1\"";
         let event =
             normalize(&gdb_ai_mi::parse_record(raw, gdb_ai_mi::MiLimits::default()).unwrap())
                 .unwrap();
@@ -311,33 +339,78 @@ mod tests {
     }
 
     #[test]
-    fn rejects_normalized_events_that_disagree_with_mi() {
-        let mut transcript = NamedTempFile::new().unwrap();
-        for entry in [
-            JournalEntry {
-                seq: 1,
-                kind: "session.created".into(),
-                data: serde_json::json!({"session_id": "sess_recorded"}),
-            },
-            JournalEntry {
-                seq: 2,
-                kind: "mi.output".into(),
-                data: serde_json::json!({
-                    "raw_base64": BASE64.encode("*running,thread-id=\"all\"")
-                }),
-            },
-            JournalEntry {
-                seq: 3,
-                kind: "normalized.event".into(),
-                data: serde_json::to_value(DomainEvent::BackendStarted).unwrap(),
-            },
+    fn validates_mi_pairs_and_evidence_gaps() {
+        let raw = (
+            "mi.output",
+            serde_json::json!({"raw_base64": BASE64.encode("*running,thread-id=\"all\"")}),
+        );
+        let prompt = (
+            "mi.output",
+            serde_json::json!({"raw_base64": BASE64.encode("(gdb)")}),
+        );
+        let started = (
+            "normalized.event",
+            serde_json::to_value(DomainEvent::BackendStarted).unwrap(),
+        );
+        let running = (
+            "normalized.event",
+            serde_json::to_value(DomainEvent::TargetRunning {
+                backend_inferiors: vec![],
+            })
+            .unwrap(),
+        );
+        let gap = |seq| {
+            (
+                "journal.gap",
+                serde_json::json!({"from_seq": seq, "reason": "quota"}),
+            )
+        };
+        for (entries, expected_error) in [
+            (
+                vec![raw.clone(), started.clone()],
+                Some("normalized event 2 differs from MI record 1"),
+            ),
+            (
+                vec![started.clone(), raw.clone()],
+                Some("MI record 2 has no matching normalized event"),
+            ),
+            (
+                vec![raw.clone(), prompt.clone(), started.clone()],
+                Some("MI record 1 has no matching normalized event"),
+            ),
+            (
+                vec![started.clone(), raw.clone(), raw.clone(), running, gap(5)],
+                Some("MI record 2 has no matching normalized event"),
+            ),
+            (
+                vec![started.clone(), raw.clone(), prompt, gap(4)],
+                Some("MI record 2 has no matching normalized event"),
+            ),
+            (vec![started, raw, gap(3)], None),
         ] {
-            writeln!(transcript, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+            let mut transcript = NamedTempFile::new().unwrap();
+            for (index, (kind, data)) in entries.into_iter().enumerate() {
+                let entry = JournalEntry {
+                    seq: index as u64 + 1,
+                    kind: kind.into(),
+                    data,
+                };
+                writeln!(transcript, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+            }
+            let result = replay(transcript.path(), SessionId("sess_test".into()));
+            if let Some(message) = expected_error {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, ErrorCode::InvalidArgument);
+                assert_eq!(error.message, message);
+            } else {
+                let report = result.unwrap();
+                assert!(!report.complete);
+                assert_eq!(report.evidence_gap.unwrap().from_seq, 3);
+                assert_eq!(report.applied_events, 1);
+                assert_eq!(report.state.event_seq, 1);
+                assert_eq!(report.state.execution_epoch, 0);
+            }
         }
-
-        let error = replay(transcript.path(), SessionId("ignored".into())).unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidArgument);
-        assert!(error.message.contains("differs from MI record"));
     }
 
     #[test]
@@ -368,5 +441,71 @@ mod tests {
         let error = replay(transcript.path(), SessionId("ignored".into())).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
         assert!(error.message.contains("does not match replay"));
+    }
+
+    #[test]
+    #[ignore = "microbenchmark: run explicitly with an optimized build"]
+    fn benchmark_output_replay() {
+        benchmark_replay(true);
+    }
+
+    #[test]
+    #[ignore = "microbenchmark: run explicitly with an optimized build"]
+    fn benchmark_raw_output_replay() {
+        benchmark_replay(false);
+    }
+
+    fn benchmark_replay(normalized: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let mut journal = crate::journal::Journal::create(&path, 64 * 1024 * 1024).unwrap();
+        journal.append_session_created("sess_benchmark").unwrap();
+        let output = vec![b'x'; 512];
+        let raw = format!("~{}", gdb_ai_mi::quote_c_string(&output));
+        let event = DomainEvent::Output {
+            source: crate::domain::OutputSource::GdbConsoleStream,
+            bytes: output,
+        };
+        if normalized {
+            journal
+                .append_domain_ref(&DomainEvent::BackendStarted)
+                .unwrap();
+        }
+        for _ in 0..20_000 {
+            journal.append_mi_output(raw.as_bytes()).unwrap();
+            if normalized {
+                journal.append_domain_ref(&event).unwrap();
+            }
+        }
+        if normalized {
+            journal
+                .append_domain_ref(&DomainEvent::SessionClosed)
+                .unwrap();
+            journal.finish().unwrap();
+        } else {
+            journal.flush().unwrap();
+        }
+        assert!(journal.gap().is_none());
+        drop(journal);
+
+        let started = std::time::Instant::now();
+        let report = replay(&path, SessionId("ignored".into())).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(report.parsed_mi_records, 20_000);
+        assert_eq!(
+            report.applied_events,
+            if normalized { 20_002 } else { 20_000 }
+        );
+        assert_eq!(report.complete, normalized);
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "benchmark": "output_replay",
+                "normalized": normalized,
+                "journal_bytes": std::fs::metadata(&path).unwrap().len(),
+                "records": report.parsed_mi_records,
+                "elapsed_ns": elapsed.as_nanos()
+            })
+        );
     }
 }

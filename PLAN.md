@@ -35,6 +35,29 @@ the default MCP catalog. Removing `agent.experiment` or
 version-1 maintenance release. `agent.hypothesis_check` remains experimental
 and outside the default catalog.
 
+## Runtime data-path verification
+
+Keep framing and replay incremental as retained output grows, without changing
+the three-crate ownership boundaries, record limits, normalized sequence
+authority, checkpoint checks, or evidence-gap rules. Qualify these paths with
+the workspace tests and the MI framer fuzz target.
+
+Run the focused release benchmarks explicitly:
+
+```sh
+cargo test --locked --release -p gdb-ai-mi benchmark_fragmented_records -- --ignored --nocapture
+cargo test --locked --release -p gdb-ai-core benchmark_output_replay -- --ignored --nocapture
+cargo test --locked --release -p gdb-ai-core benchmark_raw_output_replay -- --ignored --nocapture
+cargo test --locked --release -p gdb-ai-core benchmark_large_gdb_output -- --ignored --nocapture
+```
+
+Compare identical benchmark sources in baseline and candidate builds. Alternate
+the prebuilt test binaries on the same CPU, exclude warm-up samples, and retain
+the JSON timing samples plus process peak RSS. The GDB benchmark includes
+command execution, output processing, and journaling; startup, shutdown, and
+replay verification are outside its timer. These workloads measure data-path
+costs, not overall Agent task completion time.
+
 ## Agent exploit speed
 
 The only optimization target is shorter wall time from the first debugger turn
