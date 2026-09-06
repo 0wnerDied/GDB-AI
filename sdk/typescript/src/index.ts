@@ -1,6 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 const MCP_VERSION = "2025-11-25";
+const STATELESS_MCP_VERSION = "2026-07-28";
+
+export type ProtocolVersion = typeof MCP_VERSION | typeof STATELESS_MCP_VERSION;
+
+export interface ClientOptions {
+  token?: string;
+  allowRaw?: boolean;
+  protocolVersion?: ProtocolVersion;
+  timeoutMs?: number;
+}
+
+export interface CallOptions {
+  sessionId?: string;
+  expectedRevision?: number;
+  idempotencyKey?: string;
+}
 
 export interface ApiResponse<T = unknown> {
   api_version: "gdb.ai/v1";
@@ -17,9 +33,62 @@ export interface ApiResponse<T = unknown> {
   error?: { code: string; message: string; retryable: boolean; details?: unknown };
 }
 
+// Projected tools omit healthy defaults and canonical coordination fields.
+// Keep their optional metadata distinct from the canonical response envelope.
+export type ToolResponse<T = unknown> = Partial<Pick<ApiResponse<T>,
+  "state" | "result" | "warnings" | "truncated" | "continuation"
+  | "artifacts" | "evidence" | "error"
+>>;
+
+export interface Tool {
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface Resource {
+  uri: string;
+  name: string;
+  mimeType?: string;
+  [key: string]: unknown;
+}
+
+export interface ResourceTemplate {
+  uriTemplate: string;
+  name: string;
+  mimeType?: string;
+  [key: string]: unknown;
+}
+
+export type ResourceContents = {
+  uri: string;
+  mimeType?: string;
+  _meta?: Record<string, unknown>;
+} & ({ text: string; blob?: never } | { blob: string; text?: never });
+
 export class ApiError extends Error {
-  constructor(public readonly response: ApiResponse) {
+  constructor(public readonly response: Partial<ApiResponse>) {
     super(`${response.error?.code ?? "INTERNAL"}: ${response.error?.message ?? "request failed"}`);
+    this.name = "ApiError";
+  }
+
+  get code(): string { return this.response.error?.code ?? "INTERNAL"; }
+  get details(): unknown { return this.response.error?.details; }
+  get retryable(): boolean { return this.response.error?.retryable ?? false; }
+}
+
+export class RpcError extends Error {
+  readonly code: number;
+  readonly data?: unknown;
+
+  constructor(error: { code: number; message: string; data?: unknown }) {
+    super(`${error.code}: ${error.message}`);
+    this.name = "RpcError";
+    // 2026-09-06: Stringified faults discarded operation_id, preventing
+    // recovery of a timed-out waiter without repeating the target mutation.
+    this.code = error.code;
+    this.data = error.data;
   }
 }
 
@@ -27,14 +96,45 @@ export class Client {
   private nextId = 1;
   private mcpSession?: string;
   private mcpVersion?: string;
+  private readonly endpoint: string;
+  private readonly token?: string;
+  private readonly allowRaw: boolean;
+  private readonly timeoutMs?: number;
+  readonly protocolVersion: ProtocolVersion;
 
+  constructor(endpoint: string, options?: ClientOptions);
+  constructor(endpoint: string, token?: string, allowRaw?: boolean);
   constructor(
-    private readonly endpoint: string,
-    private readonly token?: string,
-    private readonly allowRaw = false,
-  ) {}
+    endpoint: string,
+    optionsOrToken: ClientOptions | string = {},
+    allowRaw = false,
+  ) {
+    const options = typeof optionsOrToken === "string"
+      ? { token: optionsOrToken, allowRaw }
+      : { allowRaw, ...optionsOrToken };
+    this.protocolVersion = options.protocolVersion ?? MCP_VERSION;
+    if (![MCP_VERSION, STATELESS_MCP_VERSION].includes(this.protocolVersion)) {
+      throw new Error("unsupported MCP protocol version");
+    }
+    // 2026-09-06: Accept both the server base URL and its documented /mcp URL.
+    const base = endpoint.replace(/\/+$/, "");
+    this.endpoint = base.endsWith("/mcp") ? base : `${base}/mcp`;
+    this.token = options.token;
+    this.allowRaw = options.allowRaw ?? false;
+    this.timeoutMs = options.timeoutMs;
+  }
 
   async connect(): Promise<void> {
+    if (this.protocolVersion === STATELESS_MCP_VERSION) {
+      await this.rpc("server/discover", {});
+      return;
+    }
+    if (this.mcpSession) {
+      // 2026-09-06: Reuse the existing HTTP session instead of leaking it
+      // on repeated connect, including a previously interrupted handshake.
+      await this.notify("notifications/initialized", {});
+      return;
+    }
     const { result, response } = await this.rpc("initialize", {
       protocolVersion: MCP_VERSION,
       clientInfo: { name: "gdb-ai-typescript", version: "1.1.1" },
@@ -52,7 +152,7 @@ export class Client {
   // matching DELETE operation, leaving server state until idle eviction.
   async disconnect(): Promise<void> {
     if (!this.mcpSession) return;
-    const response = await fetch(`${this.endpoint.replace(/\/$/, "")}/mcp`, {
+    const response = await this.request({
       method: "DELETE",
       headers: this.headers(true),
     });
@@ -66,7 +166,7 @@ export class Client {
   async call<T = unknown>(
     method: string,
     parameters: Record<string, unknown> = {},
-    options: { sessionId?: string; expectedRevision?: number; idempotencyKey?: string } = {},
+    options: CallOptions = {},
   ): Promise<ApiResponse<T>> {
     if (method.startsWith("raw.") && !this.allowRaw) {
       throw new Error("raw methods require allowRaw=true");
@@ -86,25 +186,78 @@ export class Client {
     return response;
   }
 
+  async listTools(): Promise<Tool[]> {
+    const { result } = await this.rpc("tools/list", {});
+    return (result as { tools: Tool[] }).tools;
+  }
+
+  async callTool<T = unknown>(
+    name: string,
+    arguments_: Record<string, unknown> = {},
+  ): Promise<ToolResponse<T>> {
+    if (name === "gdb_raw" && !this.allowRaw) {
+      throw new Error("raw tools require allowRaw=true");
+    }
+    const { result } = await this.rpc("tools/call", { name, arguments: arguments_ });
+    const tool = result as { structuredContent?: ToolResponse<T>; isError?: boolean };
+    const structured = tool.structuredContent;
+    if (!structured || typeof structured !== "object" || Array.isArray(structured)) {
+      throw new Error("tool returned no structuredContent");
+    }
+    if (structured.error) throw new ApiError(structured);
+    if (tool.isError) throw new Error("tool failed without a structured error");
+    return structured;
+  }
+
+  async listResources(): Promise<Resource[]> {
+    const { result } = await this.rpc("resources/list", {});
+    return (result as { resources: Resource[] }).resources;
+  }
+
+  async listResourceTemplates(): Promise<ResourceTemplate[]> {
+    const { result } = await this.rpc("resources/templates/list", {});
+    return (result as { resourceTemplates: ResourceTemplate[] }).resourceTemplates;
+  }
+
+  async readResource(uri: string): Promise<ResourceContents[]> {
+    const { result } = await this.rpc("resources/read", { uri });
+    return (result as { contents: ResourceContents[] }).contents;
+  }
+
   private async rpc(
     method: string,
-    params: unknown,
+    params: Record<string, unknown>,
     includeSession = true,
   ): Promise<{ result: unknown; response: Response }> {
     const id = this.nextId++;
-    const response = await fetch(`${this.endpoint.replace(/\/$/, "")}/mcp`, {
+    if (this.protocolVersion === STATELESS_MCP_VERSION) {
+      params = {
+        ...params,
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": STATELESS_MCP_VERSION,
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      };
+    }
+    const response = await this.request({
       method: "POST",
       headers: this.headers(includeSession),
       body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
     });
+    if (!response.ok && !response.headers.get("Content-Type")?.includes("application/json")) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const message = await response.json() as {
+      result?: unknown;
+      error?: { code: number; message: string; data?: unknown };
+    };
+    if (message.error) throw new RpcError(message.error);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const message = await response.json() as { result?: unknown; error?: unknown };
-    if (message.error) throw new Error(JSON.stringify(message.error));
     return { result: message.result, response };
   }
 
   private async notify(method: string, params: unknown): Promise<void> {
-    const response = await fetch(`${this.endpoint.replace(/\/$/, "")}/mcp`, {
+    const response = await this.request({
       method: "POST",
       headers: this.headers(true),
       body: JSON.stringify({ jsonrpc: "2.0", method, params }),
@@ -118,13 +271,19 @@ export class Client {
       Accept: "application/json, text/event-stream",
     };
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
-    if (includeSession) {
+    if (includeSession && this.protocolVersion === MCP_VERSION) {
       if (!this.mcpSession) throw new Error("connect() must be called first");
       headers["Mcp-Session-Id"] = this.mcpSession;
       // 2026-08-29: Bind every HTTP request to the negotiated MCP version.
       headers["Mcp-Protocol-Version"] = this.mcpVersion ?? MCP_VERSION;
     }
     return headers;
+  }
+
+  private request(init: RequestInit): Promise<Response> {
+    return fetch(this.endpoint, this.timeoutMs === undefined
+      ? init
+      : { ...init, signal: AbortSignal.timeout(this.timeoutMs) });
   }
 }
 
@@ -148,6 +307,7 @@ export class Session {
   async call<T = unknown>(
     method: string,
     parameters: Record<string, unknown> = {},
+    options: { idempotencyKey?: string } = {},
   ): Promise<ApiResponse<T>> {
     const managedLease = !Object.hasOwn(parameters, "lease_id");
     const request: Record<string, unknown> = {
@@ -175,19 +335,20 @@ export class Session {
           expectedRevision: request.accept_latest_revision === true
             ? undefined
             : this.revision,
+          idempotencyKey: options.idempotencyKey,
         });
-        if (response.revision !== undefined) this.revision = response.revision;
+        this.observeRevision(response);
         return response;
       } catch (error) {
-        if (error instanceof ApiError && error.response.revision !== undefined) {
-          this.revision = error.response.revision;
-        }
+        if (error instanceof ApiError) this.observeRevision(error.response);
         // 2026-08-31: Lease expiry rejects before the target effect. Renewing
         // and retrying one managed call keeps coordination out of Agent turns.
         if (
           !(error instanceof ApiError)
           || error.response.error?.code !== "WRITE_LEASE_EXPIRED"
           || !managedLease
+          // Keyed responses pin the revision and lease in their fingerprint.
+          || options.idempotencyKey !== undefined
           || renewed
         ) throw error;
         await this.renew();
@@ -205,15 +366,25 @@ export class Session {
       { accept_latest_revision: true },
       { sessionId: this.sessionId },
     );
-    this.revision = response.revision!;
+    this.observeRevision(response);
     this.leaseId = response.result!.lease_id;
   }
 
-  async close(): Promise<void> {
-    await this.call("session.close");
+  async close(): Promise<ApiResponse> {
+    // 2026-09-06: Retain finalized output artifacts and completeness metadata
+    // instead of discarding the close response needed to preserve evidence.
+    return this.call("session.close");
   }
 
-  async forceAbort(): Promise<void> {
-    await this.client.call("session.force_abort", {}, { sessionId: this.sessionId });
+  async forceAbort(): Promise<ApiResponse> {
+    const response = await this.client.call("session.force_abort", {}, { sessionId: this.sessionId });
+    this.observeRevision(response);
+    return response;
+  }
+
+  private observeRevision(response: Partial<ApiResponse>): void {
+    // 2026-09-06: Cached idempotent responses can precede newer observations.
+    // Keep the session's known revision monotonic across replies and errors.
+    if (response.revision !== undefined) this.revision = Math.max(this.revision, response.revision);
   }
 }

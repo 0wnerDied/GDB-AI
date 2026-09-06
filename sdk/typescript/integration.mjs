@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { ApiError, Client, RpcError, Session } from "./dist/index.js";
+
+async function verifyOutput(client, sessionId, result, expected) {
+  assert.notEqual(Object.hasOwn(result, "text"), Object.hasOwn(result, "data_base64"));
+  const actual = result.text !== undefined ? Buffer.from(result.text) : Buffer.from(result.data_base64, "base64");
+  assert.deepEqual(actual, expected);
+  assert.equal(result.next_offset, expected.length);
+  assert.equal(result.gap, false);
+  const uri = `gdbai://session/${sessionId}/output/pty`;
+  const manifest = JSON.parse((await client.readResource(uri))[0].text);
+  assert.equal(manifest.end_offset, expected.length);
+  const rangeUri = `${uri}?offset=0&length=${expected.length}`;
+  const contents = (await client.readResource(rangeUri))[0];
+  assert.equal(contents.uri, rangeUri);
+  assert.deepEqual(contents.text !== undefined ? Buffer.from(contents.text) : Buffer.from(contents.blob, "base64"), expected);
+}
+
+async function verifyClose(client, response, expected) {
+  assert.equal(response.result.closed, true);
+  assert.equal(response.result.clean_shutdown, true);
+  const evidence = response.result.inferior_output_evidence;
+  assert.equal(evidence.complete, true);
+  assert.equal(evidence.dropped_bytes, 0);
+  assert.equal(evidence.captured_bytes, expected.length);
+  const digest = createHash("sha256").update(expected).digest("hex");
+  assert.equal(evidence.sha256, digest);
+  const uri = evidence.artifact_uri;
+  const manifest = JSON.parse((await client.readResource(uri))[0].text);
+  assert.equal(manifest.size, expected.length);
+  assert.equal(manifest.sha256, digest);
+  const page = (await client.readResource(`${uri}?offset=0&length=${expected.length}`))[0];
+  assert.deepEqual(Buffer.from(page.blob, "base64"), expected);
+}
+
+async function canonical(client, program) {
+  const session = await Session.create(client);
+  const expected = Buffer.from("environment: sdk-世界\nmarker reached\ninput received: Q\n");
+  let closed;
+  try {
+    await session.renew();
+    const launched = await session.call("target.launch", {
+      program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
+      wait: { until: "snapshot", timeout_ms: 5000 },
+    });
+    const stopId = launched.state.stop_id;
+    const context = await session.call("inspection.get", { view: "stop_context" });
+    assert.equal(context.result.stop_id, stopId);
+    const stack = await session.call("inspection.get", { view: "stack", stop_id: stopId, limit: 4 });
+    assert.ok(stack.result.frames.length);
+    await assert.rejects(session.call("inspection.get", { view: "stack", stop_id: "stale" }),
+      (error) => error instanceof ApiError && error.code === "STALE_CONTEXT" && error.response.revision !== undefined);
+    // I/O accepts the latest revision, so this keyed replay does not change
+    // the server fingerprint after Session updates its cached revision.
+    const written = await session.call("inferior_io.write", { text: "Q\n" }, { idempotencyKey: "input-once" });
+    const replayed = await session.call("inferior_io.write", { text: "Q\n" }, { idempotencyKey: "input-once" });
+    assert.deepEqual(replayed.result, written.result);
+    const exited = await session.call("execution.control", {
+      action: "continue", wait: { until: "exited", timeout_ms: 5000 },
+    });
+    assert.ok(Object.values(exited.state.inferiors).some(
+      (inferior) => inferior.status === "EXITED" && Number(inferior.exit_code) === 0,
+    ));
+    const output = await session.call("inferior_io.read", { after_offset: 0, max_bytes: 4096 });
+    assert.equal(output.truncated, false);
+    await verifyOutput(client, session.sessionId, output.result, expected);
+  } finally {
+    closed = await session.close();
+  }
+  await verifyClose(client, closed, expected);
+}
+
+async function projected(client, program) {
+  const created = await client.callTool("gdb_session", { action: "create" });
+  assert.equal(created.api_version, undefined);
+  assert.equal(created.revision, undefined);
+  assert.equal(created.result.write_lease, undefined);
+  const sessionId = created.result.session_id;
+  const expected = Buffer.from("environment: sdk-世界\nmarker reached\ninput received: \0\n");
+  const call = (name, arguments_) => client.callTool(name, { session_id: sessionId, ...arguments_ });
+  let closed;
+  try {
+    const launched = await call("gdb_session", {
+      action: "launch", program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
+    });
+    assert.ok(launched.state.stop_id);
+    assert.equal(launched.state.backend, undefined);
+    const stack = await call("gdb_inspect", { view: "stack", limit: 4 });
+    assert.ok(stack.result.frames.length);
+    const statusUri = `gdbai://session/${sessionId}/status`;
+    assert.ok((await client.listResources()).some((resource) => resource.uri === statusUri));
+    const status = JSON.parse((await client.readResource(statusUri))[0].text);
+    assert.equal(status.stop_id, launched.state.stop_id);
+    await assert.rejects(call("gdb_inspect", { view: "stack", stop_id: "stale" }),
+      (error) => error instanceof ApiError && error.code === "STALE_CONTEXT" && error.response.revision === undefined);
+    const exited = await call("gdb_run", { action: "continue", input: { data_base64: "AAo=" } });
+    assert.equal(exited.result.settled_by, "exited");
+    assert.equal(exited.state.exit_code, 0);
+    const output = await call("gdb_io", { action: "read", after_offset: 0, max_bytes: 4096 });
+    assert.ok(!output.truncated);
+    await verifyOutput(client, sessionId, output.result, expected);
+  } finally {
+    closed = await call("gdb_session", { action: "close" });
+  }
+  await verifyClose(client, closed, expected);
+}
+
+const [endpoint, program, protocolVersion] = process.argv.slice(2);
+const client = new Client(endpoint, { protocolVersion });
+try {
+  await client.connect();
+  const names = (await client.listTools()).map((tool) => tool.name);
+  assert.ok(["gdb_session", "gdb_run", "gdb_inspect", "gdb_io"].every((name) => names.includes(name)));
+  assert.ok(!names.includes("gdb_raw"));
+  assert.ok((await client.listResourceTemplates()).length);
+  await assert.rejects(client.callTool("not_a_tool"), (error) => error instanceof RpcError && error.code === -32601);
+  await canonical(client, program);
+  await projected(client, program);
+} finally {
+  await client.disconnect();
+}
+console.log(`TypeScript ${protocolVersion}: canonical, projected, resources and output artifacts passed`);

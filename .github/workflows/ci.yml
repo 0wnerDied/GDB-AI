@@ -52,13 +52,15 @@ jobs:
         run: cd schemas && sha256sum -c SHA256SUMS
       - name: Verify Python sources
         run: |
-          python3 -m compileall -q gdb-extension sdk/python benchmarks/python
+          python3 -m compileall -q gdb-extension sdk/python sdk/verify.py benchmarks/python
           PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests
       - name: Build TypeScript SDK
         run: |
           npm --prefix sdk/typescript ci
           npm --prefix sdk/typescript run build
-          node sdk/typescript/test.mjs
+          npm --prefix sdk/typescript test
+      - name: Verify SDKs against the HTTP server and GDB
+        run: python3 sdk/verify.py target/debug/gdb-ai
       - name: Install fuzz toolchain
         run: |
           rustup toolchain install nightly-2026-08-01 --profile minimal

@@ -75,8 +75,9 @@ an explicit `--trusted-origin` entry.
 The [Agent connection guide](docs/mcp-clients.md) documents client setup,
 transport negotiation, and examples. MCP tools and the canonical
 `gdb.ai/call` method share the server; the canonical namespace is `gdb.ai/v1`.
-The [Python and TypeScript SDKs](sdk) provide canonical clients. Python also
-offers `Client.call_tool` for projected MCP calls.
+The [Python and TypeScript SDKs](sdk/README.md) provide canonical session
+clients, projected MCP tool calls, and bounded resource access over both
+supported HTTP protocol paths.
 
 ## System model
 
