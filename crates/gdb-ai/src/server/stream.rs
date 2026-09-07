@@ -115,7 +115,7 @@ where
                 };
                 let mut params = object.remove("params").unwrap_or_else(|| json!({}));
 
-                if id.is_none() {
+                let Some(id) = id else {
                     handle_notification(
                         &method,
                         &params,
@@ -126,8 +126,7 @@ where
                         &sequence,
                     );
                     continue;
-                }
-                let id = id.unwrap();
+                };
                 if !valid_request_id(&id) {
                     write_rpc(&mut output, rpc_error(Value::Null, -32600, "id must be a string or integer")).await?;
                     continue;

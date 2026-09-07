@@ -15,7 +15,7 @@ mod storage_cli;
 mod tool_catalog;
 
 use server::{
-    ErrorCodeName, MAX_MESSAGE_BYTES, MCP_VERSION, read_line_bounded, serve_http, serve_stdio,
+    MAX_MESSAGE_BYTES, MCP_VERSION, error_code_name, read_line_bounded, serve_http, serve_stdio,
     serve_unix, write_rpc,
 };
 use tool_catalog::tool_names;
@@ -488,9 +488,12 @@ async fn doctor(config: Config) -> Result<(), AnyError> {
         )
         .await;
     if let Some(error) = &created.error {
-        return Err(
-            io::Error::other(format!("{}: {}", error.code.code_name(), error.message)).into(),
-        );
+        return Err(io::Error::other(format!(
+            "{}: {}",
+            error_code_name(error.code),
+            error.message
+        ))
+        .into());
     }
     let session_id = created
         .session_id

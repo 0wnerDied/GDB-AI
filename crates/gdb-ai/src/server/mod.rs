@@ -1256,17 +1256,11 @@ pub(super) async fn write_rpc<W: AsyncWriteExt + Unpin>(
     writer.flush().await
 }
 
-pub(super) trait ErrorCodeName {
-    fn code_name(&self) -> String;
-}
-
-impl ErrorCodeName for gdb_ai_core::ErrorCode {
-    fn code_name(&self) -> String {
-        serde_json::to_value(self)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_else(|| "INTERNAL".into())
-    }
+pub(super) fn error_code_name(code: gdb_ai_core::ErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "INTERNAL".into())
 }
 
 #[cfg(test)]

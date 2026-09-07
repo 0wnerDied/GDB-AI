@@ -3,7 +3,7 @@ use std::{
     io,
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -104,30 +104,8 @@ pub(crate) async fn serve_http(
     validate_http_address(address)?;
     let trusted_origins = parse_trusted_origins(&trusted_origins)?;
     let auth_token = auth_token_file
-        .map(|path| -> Result<Arc<str>, AnyError> {
-            let metadata = std::fs::metadata(&path)?;
-            if !metadata.is_file()
-                || metadata.len() == 0
-                || metadata.len() > 4_096
-                || metadata.permissions().mode() & 0o077 != 0
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "token file must be regular, private, and contain 1 to 4096 bytes",
-                )
-                .into());
-            }
-            let token = std::fs::read_to_string(path)?;
-            let token = token.trim();
-            if token.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "authentication token is empty",
-                )
-                .into());
-            }
-            Ok(Arc::from(token))
-        })
+        .as_deref()
+        .map(read_auth_token)
         .transpose()?;
     let max_sessions = config.server.max_http_sessions;
     let idle_timeout = Duration::from_millis(config.server.http_session_idle_ms);
@@ -206,50 +184,7 @@ async fn http_mcp(
         return http_mcp_stateless(state, id, &method, params).await;
     }
     if method == "initialize" {
-        let Some(id) = id else {
-            return StatusCode::ACCEPTED.into_response();
-        };
-        if params.get("protocolVersion").and_then(Value::as_str) != Some(MCP_VERSION) {
-            let mut response = json_http_response(
-                rpc_error(id, -32602, "Streamable HTTP supports only 2025-11-25"),
-                None,
-            );
-            *response.status_mut() = StatusCode::BAD_REQUEST;
-            return response;
-        }
-        let mut phase = Phase::New;
-        let mut caller = Caller {
-            identity: "mcp-http".into(),
-            admin: state.raw_admin,
-        };
-        let response = initialize(&params, &mut phase, &mut caller).map_or_else(
-            |error| rpc_fault(id.clone(), error),
-            |result| rpc_result(id.clone(), result),
-        );
-        if phase == Phase::New {
-            return json_http_response(response, None);
-        }
-        let session_id = format!("mcp_{}", SessionId::new().0);
-        let mut sessions = state.sessions.write().await;
-        evict_expired_http_clients(&mut sessions, Instant::now(), state.idle_timeout);
-        if sessions.len() >= state.max_sessions {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                "MCP HTTP session limit reached",
-            )
-                .into_response();
-        }
-        sessions.insert(
-            session_id.clone(),
-            HttpClient {
-                phase,
-                protocol_version: MCP_VERSION.into(),
-                caller,
-                pending: HashMap::new(),
-                last_active: Instant::now(),
-            },
-        );
-        return json_http_response(response, Some(&session_id));
+        return http_initialize(&state, id, &params).await;
     }
     let Some(session_id) = headers
         .get("mcp-session-id")
@@ -273,7 +208,7 @@ async fn http_mcp(
         client.last_active = Instant::now();
         (client.phase, client.caller.clone())
     };
-    if id.is_none() {
+    let Some(id) = id else {
         let mut sessions = state.sessions.write().await;
         if let Some(client) = sessions.get_mut(session_id) {
             if method == "notifications/initialized" && client.phase == Phase::AwaitingInitialized {
@@ -286,8 +221,7 @@ async fn http_mcp(
             }
         }
         return StatusCode::ACCEPTED.into_response();
-    }
-    let id = id.unwrap();
+    };
     if !valid_request_id(&id) {
         return json_http_response(
             rpc_error(Value::Null, -32600, "id must be a string or integer"),
@@ -464,6 +398,53 @@ async fn http_mcp(
     json_http_response(response, Some(session_id))
 }
 
+async fn http_initialize(state: &HttpState, id: Option<Value>, params: &Value) -> Response {
+    let Some(id) = id else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    if params.get("protocolVersion").and_then(Value::as_str) != Some(MCP_VERSION) {
+        let mut response = json_http_response(
+            rpc_error(id, -32602, "Streamable HTTP supports only 2025-11-25"),
+            None,
+        );
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        return response;
+    }
+    let mut phase = Phase::New;
+    let mut caller = Caller {
+        identity: "mcp-http".into(),
+        admin: state.raw_admin,
+    };
+    let response = initialize(params, &mut phase, &mut caller).map_or_else(
+        |error| rpc_fault(id.clone(), error),
+        |result| rpc_result(id.clone(), result),
+    );
+    if phase == Phase::New {
+        return json_http_response(response, None);
+    }
+    let session_id = format!("mcp_{}", SessionId::new().0);
+    let mut sessions = state.sessions.write().await;
+    evict_expired_http_clients(&mut sessions, Instant::now(), state.idle_timeout);
+    if sessions.len() >= state.max_sessions {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "MCP HTTP session limit reached",
+        )
+            .into_response();
+    }
+    sessions.insert(
+        session_id.clone(),
+        HttpClient {
+            phase,
+            protocol_version: MCP_VERSION.into(),
+            caller,
+            pending: HashMap::new(),
+            last_active: Instant::now(),
+        },
+    );
+    json_http_response(response, Some(&session_id))
+}
+
 async fn http_mcp_stateless(
     state: HttpState,
     id: Option<Value>,
@@ -494,9 +475,8 @@ async fn http_mcp_stateless(
             STATELESS_MCP_VERSION,
         );
     }
-    let permit = match state.stateless_pending.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
+    let Ok(permit) = state.stateless_pending.clone().try_acquire_owned() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
     // 2026-08-30: Releasing admission when a client drops its socket let it
     // accumulate detached work. Completion owns the permit until termination.
@@ -783,6 +763,29 @@ async fn http_metrics(State(state): State<HttpState>, headers: HeaderMap) -> Res
         HeaderValue::from_static("text/plain; version=0.0.4"),
     );
     response
+}
+
+fn read_auth_token(path: &Path) -> io::Result<Arc<str>> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > 4_096
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "token file must be regular, private, and contain 1 to 4096 bytes",
+        ));
+    }
+    let token = std::fs::read_to_string(path)?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "authentication token is empty",
+        ));
+    }
+    Ok(Arc::from(token))
 }
 
 fn authorize_http(state: &HttpState, headers: &HeaderMap) -> bool {

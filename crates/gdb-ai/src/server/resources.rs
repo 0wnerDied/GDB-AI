@@ -6,12 +6,12 @@ use gdb_ai_core::{
 };
 use serde_json::{Value, json};
 
-use super::{ErrorCodeName, RpcFault, canonical_request, core_fault};
+use super::{RpcFault, canonical_request, core_fault, error_code_name};
 
 pub(super) async fn list_resources(gateway: &Gateway, caller: &Caller) -> Result<Value, RpcFault> {
     let resources = gateway
         .list_session_ids(caller)
-        .map_err(|error| core_fault(error.code.code_name(), error.message))?
+        .map_err(|error| core_fault(error_code_name(error.code), error.message))?
         .into_iter()
         .map(|id| {
             json!({
@@ -485,7 +485,7 @@ pub(super) async fn read_resource(
             )
             .await;
         if let Some(error) = response.error {
-            return Err(core_fault(error.code.code_name(), error.message));
+            return Err(core_fault(error_code_name(error.code), error.message));
         }
         let result = response
             .result
@@ -504,7 +504,7 @@ pub(super) async fn read_resource(
         )
         .await;
     if let Some(error) = response.error {
-        return Err(core_fault(error.code.code_name(), error.message));
+        return Err(core_fault(error_code_name(error.code), error.message));
     }
     // 2026-08-29: Session resources returned paged bytes under a base URI,
     // leaving clients unable to name or verify the next page. Base URIs now
