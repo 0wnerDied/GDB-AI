@@ -35,5 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ulid = { version = "1", features = ["serde"] }
 
 [profile.release]
-lto = "thin"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 strip = "debuginfo"
