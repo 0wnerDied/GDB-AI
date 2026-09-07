@@ -137,7 +137,7 @@ export class Client {
     }
     const { result, response } = await this.rpc("initialize", {
       protocolVersion: MCP_VERSION,
-      clientInfo: { name: "gdb-ai-typescript", version: "1.1.1" },
+      clientInfo: { name: "gdb-ai-typescript", version: "1.2.0" },
     }, false);
     if ((result as { protocolVersion?: string }).protocolVersion !== MCP_VERSION) {
       throw new Error("server returned an unsupported MCP protocol version");

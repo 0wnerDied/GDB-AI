@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-ai-core"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "base64",
  "gdb-ai-mi",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "gdb-ai-mi"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "bytes",
  "serde",
