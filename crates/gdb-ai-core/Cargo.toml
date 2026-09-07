@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 base64.workspace = true
 gdb-ai-mi = { path = "../gdb-ai-mi" }

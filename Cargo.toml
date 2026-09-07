@@ -13,12 +13,18 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 rust-version = "1.88"
 
+[workspace.lints.clippy]
+allow_attributes = "warn"
+manual_let_else = "warn"
+redundant_clone = "warn"
+undocumented_unsafe_blocks = "deny"
+unnecessary_wraps = "warn"
+
 [workspace.dependencies]
 axum = "0.8"
 base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
-futures = "0.3"
 libc = "0.2"
 nix = { version = "0.30", features = ["fs", "process", "resource", "signal", "term"] }
 rusqlite = { version = "0.37", features = ["bundled"] }

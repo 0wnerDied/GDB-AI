@@ -1,6 +1,19 @@
 Do not overengineer, anticipate nonexistent extreme scenarios, or add
 excessive fallback handling.
 
+# Code Style
+
+Follow each language's standard conventions and the existing formatter.
+Use `cargo fmt --all` for Rust. Keep functions focused on one responsibility;
+prefer guard clauses to deeply nested success paths. Reuse existing helpers
+and standard-library operations before introducing an abstraction. Keep
+internal dispatch on typed methods and strings at protocol boundaries.
+
+Preserve lock lifetimes, cancellation ordering, and cleanup ownership when
+restructuring control flow. Explain every `unsafe` block with a `SAFETY`
+comment. Scope lint exceptions to the smallest affected item, give a reason,
+and prefer `expect` when the exception must remain necessary.
+
 # Documentation Audience
 
 Write README and public documentation for GDB/AI users and Agents. Describe
