@@ -3,30 +3,13 @@ use std::{path::PathBuf, process::Command};
 use gdb_ai_core::{
     config::{ArtifactConfig, Config, PersistenceConfig, SandboxMode},
     gateway::{Caller, Gateway},
-    protocol::{API_VERSION, ApiRequest},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::tempdir;
 
 mod support;
 
-fn request(
-    id: &str,
-    session_id: Option<&str>,
-    method: &str,
-    revision: Option<u64>,
-    parameters: Value,
-) -> ApiRequest {
-    ApiRequest {
-        api_version: API_VERSION.into(),
-        request_id: id.into(),
-        session_id: session_id.map(str::to_owned),
-        method: method.parse().unwrap(),
-        expected_revision: revision,
-        idempotency_key: None,
-        parameters,
-    }
-}
+use support::request;
 
 #[tokio::test]
 async fn attaches_and_detaches_allowlisted_process() {

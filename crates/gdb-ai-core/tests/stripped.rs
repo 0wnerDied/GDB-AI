@@ -4,37 +4,14 @@ use gdb_ai_core::{
     config::{ArtifactConfig, Config, PersistenceConfig},
     domain::SessionId,
     gateway::{Caller, Gateway},
-    protocol::{API_VERSION, ApiRequest, ApiResponse},
     replay::replay,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::tempdir;
 
 mod support;
 
-fn request(
-    id: &str,
-    session_id: Option<&str>,
-    method: &str,
-    revision: Option<u64>,
-    parameters: Value,
-) -> ApiRequest {
-    ApiRequest {
-        api_version: API_VERSION.into(),
-        request_id: id.into(),
-        session_id: session_id.map(str::to_owned),
-        method: method.parse().unwrap(),
-        expected_revision: revision,
-        idempotency_key: None,
-        parameters,
-    }
-}
-
-async fn call(gateway: &Gateway, caller: &Caller, request: ApiRequest) -> ApiResponse {
-    let response = gateway.dispatch(request, caller).await;
-    assert!(response.error.is_none(), "{:?}", response.error);
-    response
-}
+use support::{call, request};
 
 #[tokio::test]
 async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {

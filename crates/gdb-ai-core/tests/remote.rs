@@ -4,35 +4,18 @@ use gdb_ai_core::{
     config::{ArtifactConfig, Config, PersistenceConfig},
     gateway::{Caller, Gateway},
     policy::Profile,
-    protocol::{API_VERSION, ApiRequest},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
 
 mod support;
 
+use support::request;
+
 // 2026-08-29: The tests release their ephemeral port before gdbserver binds
 // it, so parallel fixtures could select the same port and strand one client.
 static GDBSERVER_TEST_LOCK: Mutex<()> = Mutex::const_new(());
-
-fn request(
-    id: &str,
-    session_id: Option<&str>,
-    method: &str,
-    revision: Option<u64>,
-    parameters: Value,
-) -> ApiRequest {
-    ApiRequest {
-        api_version: API_VERSION.into(),
-        request_id: id.into(),
-        session_id: session_id.map(str::to_owned),
-        method: method.parse().unwrap(),
-        expected_revision: revision,
-        idempotency_key: None,
-        parameters,
-    }
-}
 
 #[tokio::test]
 async fn connects_to_allowlisted_gdbserver() {

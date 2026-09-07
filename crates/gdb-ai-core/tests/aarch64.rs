@@ -8,12 +8,13 @@ use gdb_ai_core::{
     config::{ArtifactConfig, Config, PersistenceConfig},
     gateway::{Caller, Gateway},
     policy::Profile,
-    protocol::{API_VERSION, ApiRequest, ApiResponse},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::tempdir;
 
 mod support;
+
+use support::{call, request};
 
 struct ChildGuard(Child);
 
@@ -22,34 +23,6 @@ impl Drop for ChildGuard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn request(
-    id: &str,
-    session_id: Option<&str>,
-    method: &str,
-    revision: Option<u64>,
-    parameters: Value,
-) -> ApiRequest {
-    ApiRequest {
-        api_version: API_VERSION.into(),
-        request_id: id.into(),
-        session_id: session_id.map(str::to_owned),
-        method: method.parse().unwrap(),
-        expected_revision: revision,
-        idempotency_key: None,
-        parameters,
-    }
-}
-
-async fn call(gateway: &Gateway, caller: &Caller, request: ApiRequest) -> ApiResponse {
-    let response = gateway.dispatch(request, caller).await;
-    assert!(
-        response.error.is_none(),
-        "response error: {:?}",
-        response.error
-    );
-    response
 }
 
 #[tokio::test]

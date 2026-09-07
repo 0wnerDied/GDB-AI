@@ -4,30 +4,13 @@ use gdb_ai_core::{
     ErrorCode,
     config::{ArtifactConfig, Config, PersistenceConfig},
     gateway::{Caller, Gateway, RequestOperationStatus},
-    protocol::{API_VERSION, ApiRequest},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::tempdir;
 
 mod support;
 
-fn request(
-    id: &str,
-    session_id: Option<&str>,
-    method: &str,
-    revision: Option<u64>,
-    parameters: Value,
-) -> ApiRequest {
-    ApiRequest {
-        api_version: API_VERSION.into(),
-        request_id: id.into(),
-        session_id: session_id.map(str::to_owned),
-        method: method.parse().unwrap(),
-        expected_revision: revision,
-        idempotency_key: None,
-        parameters,
-    }
-}
+use support::request;
 
 async fn wait_running(gateway: &Gateway, caller: &Caller, session_id: &str) -> u64 {
     tokio::time::timeout(Duration::from_secs(5), async {
