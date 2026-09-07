@@ -242,8 +242,11 @@ pub(super) struct SessionWorker {
     pub(super) metric_active: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 impl SessionWorker {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Bootstrap wires the worker's owned state and independent channels."
+    )]
     pub(super) async fn bootstrap(
         config: Arc<Config>,
         profile: Profile,
@@ -2279,9 +2282,7 @@ impl SessionWorker {
                 }]
             });
             if let Err(error) = self.store_snapshot_value(snapshot_id, snapshot) {
-                self.apply_event(DomainEvent::SnapshotFailed {
-                    stop_id: stop_id.clone(),
-                })?;
+                self.apply_event(DomainEvent::SnapshotFailed { stop_id })?;
                 return Err(error);
             }
             self.apply_event(DomainEvent::SnapshotReady {

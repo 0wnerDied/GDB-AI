@@ -243,47 +243,32 @@ impl Gateway {
             let memory = self.idempotency.lock().await.get(key).cloned();
             let cached = match memory {
                 Some((stored_hash, response)) if Some(&stored_hash) == retry_hash.as_ref() => {
-                    Some(response)
+                    Ok(Some(response))
                 }
-                Some(_) => {
-                    let error = Error::new(
-                        ErrorCode::Conflict,
-                        "idempotency key was already used with different parameters",
-                    );
+                Some(_) => Err(Error::new(
+                    ErrorCode::Conflict,
+                    "idempotency key was already used with different parameters",
+                )),
+                None => self
+                    .store
+                    .get_idempotent_response(key, retry_hash.as_deref().unwrap_or_default()),
+            };
+            let response = match cached {
+                Ok(response) => response,
+                Err(error) => {
                     let state = self
                         .entry_for_request(&request)
                         .await
                         .map(|entry| entry.handle.state());
-                    drop(retry_guard);
-                    if let Some(lock) = &retry_lock {
-                        self.release_idempotency_lock(key, lock).await;
-                    }
-                    return ApiResponse::failure(&request, error, state);
+                    Some(ApiResponse::failure(&request, error, state))
                 }
-                None => match self
-                    .store
-                    .get_idempotent_response(key, retry_hash.as_deref().unwrap_or_default())
-                {
-                    Ok(response) => response,
-                    Err(error) => {
-                        let state = self
-                            .entry_for_request(&request)
-                            .await
-                            .map(|entry| entry.handle.state());
-                        drop(retry_guard);
-                        if let Some(lock) = &retry_lock {
-                            self.release_idempotency_lock(key, lock).await;
-                        }
-                        return ApiResponse::failure(&request, error, state);
-                    }
-                },
             };
-            if let Some(cached) = cached {
+            if let Some(response) = response {
                 drop(retry_guard);
                 if let Some(lock) = &retry_lock {
                     self.release_idempotency_lock(key, lock).await;
                 }
-                return cached;
+                return response;
             }
         }
         // 2026-08-30: Successful requests already return their post-operation
@@ -422,9 +407,9 @@ impl Gateway {
         if let Some(entry) = &entry
             && matches!(
                 request.method,
-                crate::protocol::CanonicalMethod::MemoryRead
-                    | crate::protocol::CanonicalMethod::MemorySearch
-                    | crate::protocol::CanonicalMethod::MemoryCompare
+                CanonicalMethod::MemoryRead
+                    | CanonicalMethod::MemorySearch
+                    | CanonicalMethod::MemoryCompare
             )
             && !matches!(profile, Profile::LabMutation | Profile::RawAdmin)
         {
@@ -456,25 +441,15 @@ impl Gateway {
             && self.config.journal.durability == crate::config::JournalDurability::Durable;
         // 2026-08-28: Selecting a profile must not grant raw authority; the
         // transport has to authenticate and explicitly mark an admin caller.
-        if profile == Profile::RawAdmin && !caller.admin {
-            self.audit(
-                &caller.identity,
-                entry.as_ref().map(|entry| entry.handle.id()),
-                &request.method,
-                effect,
-                false,
-                entry
-                    .as_ref()
-                    .map(|entry| entry.handle.with_state(|state| state.revision)),
-                &serde_json::to_value(request)?,
-                "denied",
-            )?;
-            return Err(Error::new(
+        let authorization = if profile == Profile::RawAdmin && !caller.admin {
+            Err(Error::new(
                 ErrorCode::PolicyDenied,
                 "raw_admin requires an authenticated administrative caller",
-            ));
-        }
-        if let Err(error) = profile.authorize_method(request.method, effect) {
+            ))
+        } else {
+            profile.authorize_method(request.method, effect)
+        };
+        if let Err(error) = authorization {
             // 2026-08-28: Policy denials previously returned before audit.
             // Persist the denied decision so rejected mutations remain traceable.
             self.audit(
@@ -497,12 +472,18 @@ impl Gateway {
         // outside it while the target runs. Their short-operation lock preserves
         // ordering without waiting behind run control. A lease can expire
         // during a long wait.
-        let out_of_band = request.method.starts_with("inferior_io.")
-            || request.method == "session.close"
-            || request.method == "session.force_abort"
-            || request.method == "session.acquire_write_lease"
-            || (request.method == "execution.control"
-                && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"));
+        let out_of_band = matches!(
+            request.method,
+            CanonicalMethod::InferiorIoRead
+                | CanonicalMethod::InferiorIoWrite
+                | CanonicalMethod::InferiorIoCloseStdin
+                | CanonicalMethod::InferiorIoSendEof
+                | CanonicalMethod::InferiorIoResize
+                | CanonicalMethod::SessionClose
+                | CanonicalMethod::SessionForceAbort
+                | CanonicalMethod::SessionAcquireWriteLease
+        ) || (request.method == CanonicalMethod::ExecutionControl
+            && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"));
         // 2026-08-28: Composite reads previously released the actor between MI
         // commands, allowing continue to mix multiple stops in one response.
         // The write guard serializes normal mutations and excludes stable
@@ -620,15 +601,15 @@ impl Gateway {
             // removing the evidence needed to diagnose and recover the session.
             if matches!(consistency, crate::domain::Consistency::Lost)
                 && !matches!(
-                    request.method.as_str(),
-                    "session.get"
-                        | "session.transcript"
-                        | "session.event"
-                        | "session.close"
-                        | "session.force_abort"
-                        | "session.acquire_write_lease"
-                        | "session.attempt_recovery"
-                        | "artifact.get"
+                    request.method,
+                    CanonicalMethod::SessionGet
+                        | CanonicalMethod::SessionTranscript
+                        | CanonicalMethod::SessionEvent
+                        | CanonicalMethod::SessionClose
+                        | CanonicalMethod::SessionForceAbort
+                        | CanonicalMethod::SessionAcquireWriteLease
+                        | CanonicalMethod::SessionAttemptRecovery
+                        | CanonicalMethod::ArtifactGet
                 )
             {
                 return Err(Error::new(
@@ -685,7 +666,7 @@ impl Gateway {
         }
         let completed_entry = match (&entry, result.as_ref()) {
             (Some(entry), _) => Some(entry.clone()),
-            (None, Ok(result)) if request.method == "session.create" => {
+            (None, Ok(result)) if request.method == CanonicalMethod::SessionCreate => {
                 match result.get("session_id").and_then(Value::as_str) {
                     Some(id) => self.sessions.read().await.get(id).cloned(),
                     None => None,
@@ -751,7 +732,10 @@ impl Gateway {
         Ok((state, result, warnings))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the audit fields explicit at the authorization boundary."
+    )]
     fn audit(
         &self,
         caller: &str,
@@ -872,8 +856,7 @@ impl Gateway {
         // is already enforced at the shared Gateway boundary.
         if matches!(
             request.method,
-            crate::protocol::CanonicalMethod::SessionForceAbort
-                | crate::protocol::CanonicalMethod::SessionAttemptRecovery
+            CanonicalMethod::SessionForceAbort | CanonicalMethod::SessionAttemptRecovery
         ) {
             return Ok(());
         }
@@ -892,7 +875,7 @@ impl Gateway {
                 ));
             }
         }
-        if request.method == "session.acquire_write_lease" {
+        if request.method == CanonicalMethod::SessionAcquireWriteLease {
             return Ok(());
         }
         let mut controller = entry.controller.lock().await;
@@ -1212,16 +1195,16 @@ fn remove_repeated_state(response: &mut ApiResponse) {
 
 fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
     matches!(
-        request.method.as_str(),
-        "session.get"
-            | "session.transcript"
-            | "session.event"
-            | "session.close"
-            | "session.force_abort"
-            | "session.acquire_write_lease"
-            | "session.attempt_recovery"
-            | "artifact.get"
-    ) || (request.method == "execution.control"
+        request.method,
+        CanonicalMethod::SessionGet
+            | CanonicalMethod::SessionTranscript
+            | CanonicalMethod::SessionEvent
+            | CanonicalMethod::SessionClose
+            | CanonicalMethod::SessionForceAbort
+            | CanonicalMethod::SessionAcquireWriteLease
+            | CanonicalMethod::SessionAttemptRecovery
+            | CanonicalMethod::ArtifactGet
+    ) || (request.method == CanonicalMethod::ExecutionControl
         && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"))
 }
 
@@ -1229,22 +1212,23 @@ fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
 // second resume invalidate the newly reached stop between the two operations.
 fn requires_stable_target(request: &ApiRequest) -> bool {
     matches!(
-        request.method.as_str(),
-        "inspection.get"
-            | "inspection.snapshot"
-            | "inspection.batch"
-            | "value.evaluate"
-            | "value.create"
-            | "value.children"
-            | "value.update"
-            | "memory.read"
-            | "memory.search"
-            | "memory.compare"
-            | "register.read"
-            | "disassembly.read"
-            | "agent.hypothesis_check"
-            | "kernel.inspect"
-    ) || (request.method == "execution.wait" && request.parameters.get("inspect").is_some())
+        request.method,
+        CanonicalMethod::InspectionGet
+            | CanonicalMethod::InspectionSnapshot
+            | CanonicalMethod::InspectionBatch
+            | CanonicalMethod::ValueEvaluate
+            | CanonicalMethod::ValueCreate
+            | CanonicalMethod::ValueChildren
+            | CanonicalMethod::ValueUpdate
+            | CanonicalMethod::MemoryRead
+            | CanonicalMethod::MemorySearch
+            | CanonicalMethod::MemoryCompare
+            | CanonicalMethod::RegisterRead
+            | CanonicalMethod::DisassemblyRead
+            | CanonicalMethod::AgentHypothesisCheck
+            | CanonicalMethod::KernelInspect
+    ) || (request.method == CanonicalMethod::ExecutionWait
+        && request.parameters.get("inspect").is_some())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1259,7 +1243,7 @@ fn classify_memory_range(
     target_pid: Option<u64>,
     request: &ApiRequest,
 ) -> Result<MemoryRangeEffect> {
-    let address_field = if request.method == crate::protocol::CanonicalMethod::MemorySearch {
+    let address_field = if request.method == CanonicalMethod::MemorySearch {
         "start"
     } else {
         "address"

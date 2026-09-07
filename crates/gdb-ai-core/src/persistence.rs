@@ -984,7 +984,10 @@ impl Store {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The public audit API records these fields as one row."
+    )]
     pub fn audit(
         &self,
         caller: &str,

@@ -17,7 +17,7 @@ pub fn normalize(record: &MiRecord) -> Option<DomainEvent> {
                 backend_inferiors: groups,
             })
         }
-        MiRecord::ExecAsync { class, results, .. } if class == "stopped" => stopped(results),
+        MiRecord::ExecAsync { class, results, .. } if class == "stopped" => Some(stopped(results)),
         MiRecord::ExecAsync { class, .. } => Some(DomainEvent::UnknownBackendEvent {
             class: format!("exec:{class}"),
         }),
@@ -95,25 +95,25 @@ pub(crate) fn breakpoint_number(record: &MiRecord) -> Result<String> {
         .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB returned no breakpoint number"))
 }
 
-fn stopped(results: &[MiResult]) -> Option<DomainEvent> {
+fn stopped(results: &[MiResult]) -> DomainEvent {
     let raw_reason = MiResult::find_str(results, "reason")
         .unwrap_or("unknown")
         .to_owned();
     let backend_inferior = MiResult::find_str(results, "thread-group").map(str::to_owned);
     if raw_reason.starts_with("exited") {
-        return Some(DomainEvent::InferiorExited {
+        return DomainEvent::InferiorExited {
             backend_id: backend_inferior,
             exit_code: MiResult::find_str(results, "exit-code").map(str::to_owned),
             from_stop_record: true,
-        });
+        };
     }
-    Some(DomainEvent::TargetStopped {
+    DomainEvent::TargetStopped {
         backend_inferior,
         backend_thread: MiResult::find_str(results, "thread-id").map(str::to_owned),
         reason: raw_reason.clone(),
         reason_detail: Some(stop_reason(results, raw_reason)),
         frame: MiResult::find(results, "frame").and_then(frame),
-    })
+    }
 }
 
 // 2026-08-28: Keeping only GDB's reason string discarded bkptno and signal
