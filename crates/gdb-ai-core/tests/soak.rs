@@ -2,6 +2,7 @@ use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
 
 use gdb_ai_core::{
     config::{ArtifactConfig, Config, PersistenceConfig},
+    domain::SessionLifecycle,
     gateway::{Caller, Gateway},
     protocol::{API_VERSION, ApiRequest},
 };
@@ -154,9 +155,11 @@ async fn ten_thousand_session_lifecycles() {
                         )
                         .await;
                     assert!(closed.error.is_none(), "cycle {cycle}: {:?}", closed.error);
+                    // 2026-09-07: State deduplication removed result.state;
+                    // verify every close through the canonical envelope.
                     assert_eq!(
-                        closed.result.as_ref().unwrap()["state"]["lifecycle"],
-                        "CLOSED"
+                        closed.state.as_ref().unwrap().lifecycle,
+                        SessionLifecycle::Closed
                     );
                 })
                 .await
