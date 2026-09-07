@@ -63,7 +63,7 @@ pub fn parse_record(input: &[u8], limits: MiLimits) -> Result<MiRecord, MiError>
         });
     }
 
-    let prompt = trim_ascii_whitespace(input);
+    let prompt = input.trim_ascii();
     if prompt == b"(gdb)" {
         return Ok(MiRecord::Prompt);
     }
@@ -74,16 +74,6 @@ pub fn parse_record(input: &[u8], limits: MiLimits) -> Result<MiRecord, MiError>
         limits,
     }
     .record()
-}
-
-fn trim_ascii_whitespace(mut input: &[u8]) -> &[u8] {
-    while input.first().is_some_and(u8::is_ascii_whitespace) {
-        input = &input[1..];
-    }
-    while input.last().is_some_and(u8::is_ascii_whitespace) {
-        input = &input[..input.len() - 1];
-    }
-    input
 }
 
 struct Parser<'a> {
