@@ -504,38 +504,14 @@ impl Gateway {
         // outside it while the target runs. Their short-operation lock preserves
         // ordering without waiting behind run control. A lease can expire
         // during a long wait.
-        let out_of_band = matches!(
-            request.method,
-            CanonicalMethod::InferiorIoRead
-                | CanonicalMethod::InferiorIoWrite
-                | CanonicalMethod::InferiorIoCloseStdin
-                | CanonicalMethod::InferiorIoSendEof
-                | CanonicalMethod::InferiorIoResize
-                | CanonicalMethod::SessionClose
-                | CanonicalMethod::SessionForceAbort
-                | CanonicalMethod::SessionAcquireWriteLease
-        ) || (request.method == CanonicalMethod::ExecutionControl
-            && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"));
+        let out_of_band = is_out_of_band(request);
         // 2026-08-28: Composite reads previously released the actor between MI
         // commands, allowing continue to mix multiple stops in one response.
         // The write guard serializes normal mutations and excludes stable
         // observations; only preemptive control needs a separate mutex.
         let stable_observation =
             effect == Effect::Read && requires_stable_target(request) && !out_of_band;
-        let needs_structured_state = !out_of_band
-            && (requires_stable_target(request)
-                || matches!(
-                    request.method,
-                    CanonicalMethod::BreakpointList | CanonicalMethod::SessionCapabilities
-                )
-                || (effect != Effect::Read
-                    && !matches!(
-                        request.method,
-                        CanonicalMethod::RawMi
-                            | CanonicalMethod::RawConsole
-                            | CanonicalMethod::SessionAttemptRecovery
-                            | CanonicalMethod::SessionReleaseWriteLease
-                    )));
+        let needs_structured_state = requires_structured_state(request, effect);
         let mut _target_observation_guard = match &entry {
             Some(entry) if effect == Effect::Read && needs_structured_state => {
                 Some(entry.target_state.read().await)
@@ -634,18 +610,7 @@ impl Gateway {
             // 2026-09-08: Immutable observations are historical evidence, so
             // target consistency cannot make an already committed value unsafe.
             if matches!(consistency, crate::domain::Consistency::Lost)
-                && !matches!(
-                    request.method,
-                    CanonicalMethod::SessionGet
-                        | CanonicalMethod::SessionTranscript
-                        | CanonicalMethod::SessionEvent
-                        | CanonicalMethod::SessionClose
-                        | CanonicalMethod::SessionForceAbort
-                        | CanonicalMethod::SessionAcquireWriteLease
-                        | CanonicalMethod::SessionAttemptRecovery
-                        | CanonicalMethod::InspectionSnapshotGet
-                        | CanonicalMethod::ArtifactGet
-                )
+                && !request_allowed_with_lost_consistency(request.method)
             {
                 return Err(Error::new(
                     ErrorCode::ConsistencyLost,
@@ -1371,11 +1336,43 @@ fn remove_repeated_state(response: &mut ApiResponse) {
     }
 }
 
-fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
-    // 2026-09-08: Snapshot lookup previously inherited the live target fence
-    // even though it reads immutable SQLite evidence without issuing MI.
+// These predicates classify immutable inputs; dispatch retains ownership and
+// ordering of every target, control, and controller guard.
+fn is_out_of_band(request: &ApiRequest) -> bool {
     matches!(
         request.method,
+        CanonicalMethod::InferiorIoRead
+            | CanonicalMethod::InferiorIoWrite
+            | CanonicalMethod::InferiorIoCloseStdin
+            | CanonicalMethod::InferiorIoSendEof
+            | CanonicalMethod::InferiorIoResize
+            | CanonicalMethod::SessionClose
+            | CanonicalMethod::SessionForceAbort
+            | CanonicalMethod::SessionAcquireWriteLease
+    ) || (request.method == CanonicalMethod::ExecutionControl
+        && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"))
+}
+
+fn requires_structured_state(request: &ApiRequest, effect: Effect) -> bool {
+    !is_out_of_band(request)
+        && (requires_stable_target(request)
+            || matches!(
+                request.method,
+                CanonicalMethod::BreakpointList | CanonicalMethod::SessionCapabilities
+            )
+            || (effect != Effect::Read
+                && !matches!(
+                    request.method,
+                    CanonicalMethod::RawMi
+                        | CanonicalMethod::RawConsole
+                        | CanonicalMethod::SessionAttemptRecovery
+                        | CanonicalMethod::SessionReleaseWriteLease
+                )))
+}
+
+fn request_allowed_with_lost_consistency(method: CanonicalMethod) -> bool {
+    matches!(
+        method,
         CanonicalMethod::SessionGet
             | CanonicalMethod::SessionTranscript
             | CanonicalMethod::SessionEvent
@@ -1385,8 +1382,15 @@ fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
             | CanonicalMethod::SessionAttemptRecovery
             | CanonicalMethod::InspectionSnapshotGet
             | CanonicalMethod::ArtifactGet
-    ) || (request.method == CanonicalMethod::ExecutionControl
-        && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"))
+    )
+}
+
+fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
+    // 2026-09-08: Snapshot lookup previously inherited the live target fence
+    // even though it reads immutable SQLite evidence without issuing MI.
+    request_allowed_with_lost_consistency(request.method)
+        || (request.method == CanonicalMethod::ExecutionControl
+            && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"))
 }
 
 fn self_attributed_observation(request: &ApiRequest, result: &Value) -> bool {

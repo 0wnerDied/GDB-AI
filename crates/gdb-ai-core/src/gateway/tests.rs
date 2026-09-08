@@ -7,6 +7,98 @@ use crate::{
     domain::SessionState,
 };
 
+#[test]
+fn request_classification_preserves_control_and_evidence_paths() {
+    use CanonicalMethod::*;
+
+    for (method, parameters, out_of_band, structured, recoverable) in [
+        (
+            ExecutionControl,
+            json!({"action": "continue"}),
+            false,
+            true,
+            false,
+        ),
+        (
+            ExecutionControl,
+            json!({"action": "interrupt"}),
+            true,
+            false,
+            true,
+        ),
+        (
+            ExecutionWait,
+            json!({"wait": {"until": "stopped"}}),
+            false,
+            false,
+            false,
+        ),
+        (
+            ExecutionWait,
+            json!({"inspect": [{"view": "stack"}]}),
+            false,
+            true,
+            false,
+        ),
+        (
+            ExecutionWait,
+            json!({"input": {"text": "x"}}),
+            false,
+            true,
+            false,
+        ),
+        (InspectionGet, json!({"view": "stack"}), false, true, false),
+        (
+            InspectionSnapshotGet,
+            json!({"snapshot_id": "snapshot"}),
+            false,
+            false,
+            true,
+        ),
+        (BreakpointList, json!({}), false, true, false),
+        (SessionCapabilities, json!({}), false, true, false),
+        (SessionGet, json!({}), false, false, true),
+        (SessionTranscript, json!({}), false, false, true),
+        (ArtifactGet, json!({}), false, false, true),
+        (SessionClose, json!({}), true, false, true),
+        (SessionForceAbort, json!({}), true, false, true),
+        (SessionAcquireWriteLease, json!({}), true, false, true),
+        (SessionReleaseWriteLease, json!({}), false, false, false),
+        (SessionAttemptRecovery, json!({}), false, false, true),
+        (InferiorIoRead, json!({}), true, false, false),
+        (InferiorIoWrite, json!({}), true, false, false),
+        (InferiorIoSendEof, json!({}), true, false, false),
+        (RawConsole, json!({}), false, false, false),
+        (RawMi, json!({}), false, false, false),
+    ] {
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "classification".into(),
+            session_id: None,
+            method,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters,
+        };
+        assert_eq!(is_out_of_band(&request), out_of_band, "{method}");
+        assert_eq!(
+            requires_structured_state(&request, effect_for_request(&request)),
+            structured,
+            "{method}"
+        );
+        assert_eq!(
+            request_allowed_during_unknown_outcome(&request),
+            recoverable,
+            "{method}"
+        );
+        assert_eq!(
+            request_allowed_with_lost_consistency(method),
+            recoverable && method != ExecutionControl,
+            "{method}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn shared_read_admission_preserves_waiter_cancellation_and_deadlines() {
     if !crate::test_support::require_commands(&["gdb"]) {
