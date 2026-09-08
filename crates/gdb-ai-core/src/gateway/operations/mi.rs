@@ -3,7 +3,11 @@ use std::collections::BTreeMap;
 use gdb_ai_mi::{MiRecord, MiResult, MiValue};
 use serde_json::{Value, json};
 
-use super::{context::observation_context, encoding::parse_address};
+use super::{
+    context::observation_context,
+    encoding::parse_address,
+    values::{result_value, value_status},
+};
 use crate::{
     Error, ErrorCode, Result,
     domain::{FrameId, FrameSummary},
@@ -99,21 +103,26 @@ pub(super) fn normalized_frames(
         .collect())
 }
 
+fn normalized_variable(fields: &[MiResult]) -> Value {
+    // 2026-09-08: Locals silently truncated long strings and dropped binary
+    // values. Share value-object availability and lossless byte semantics;
+    // the ordinary response budget owns paging/artifact fallback.
+    json!({
+        "name": result_value(fields, "name"),
+        "type": result_value(fields, "type"),
+        "value": result_value(fields, "value"),
+        "status": value_status(fields),
+        "dynamic": MiResult::find_str(fields, "dynamic") == Some("1")
+    })
+}
+
 pub(super) fn normalized_variables(record: &MiRecord, name: &str) -> Vec<Value> {
     let Some(variables) = MiResult::find(record.results(), name) else {
         return Vec::new();
     };
     aggregate_items(variables, "variable")
         .into_iter()
-        .map(|fields| {
-            json!({
-                "name": MiResult::find_str(fields, "name"),
-                "type": MiResult::find_str(fields, "type"),
-                "value": MiResult::find_str(fields, "value")
-                    .map(|value| value.chars().take(16 * 1024).collect::<String>()),
-                "dynamic": MiResult::find_str(fields, "dynamic") == Some("1")
-            })
-        })
+        .map(normalized_variable)
         .collect()
 }
 
@@ -128,13 +137,7 @@ pub(super) fn normalized_arguments(record: &MiRecord) -> Vec<Value> {
                 .map(|args| {
                     aggregate_items(args, "arg")
                         .into_iter()
-                        .map(|fields| {
-                            json!({
-                                "name": MiResult::find_str(fields, "name"),
-                                "type": MiResult::find_str(fields, "type"),
-                                "value": MiResult::find_str(fields, "value")
-                            })
-                        })
+                        .map(normalized_variable)
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
@@ -446,6 +449,31 @@ pub(super) fn valid_integer_literal(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn locals_and_arguments_share_lossless_value_semantics() {
+        let record = gdb_ai_mi::parse_record(
+            br#"1^done,variables=[{name="wide",type="unsigned long",value="18446744073709551615"},{name="bytes",value="\377"},{name="aggregate",type="struct pair"}],stack-args=[frame={level="0",args=[{name="bytes",value="\377"}]}]"#,
+            gdb_ai_mi::MiLimits::default(),
+        ).unwrap();
+        let locals = super::normalized_variables(&record, "variables");
+        assert_eq!(locals[0]["value"], "18446744073709551615");
+        assert_eq!(locals[1]["value"]["data_base64"], "/w==");
+        assert_eq!(locals[1]["status"], "available");
+        assert_eq!(locals[2]["status"], "not_collected");
+        assert_eq!(
+            super::normalized_arguments(&record)[0]["arguments"][0],
+            locals[1]
+        );
+        let value = "x".repeat(16 * 1024 + 1);
+        let encoded = format!("1^done,variables=[{{name=\"long\",value=\"{value}\"}}]");
+        let record =
+            gdb_ai_mi::parse_record(encoded.as_bytes(), gdb_ai_mi::MiLimits::default()).unwrap();
+        assert_eq!(
+            super::normalized_variables(&record, "variables")[0]["value"],
+            value
+        );
+    }
+
     use super::*;
 
     #[test]

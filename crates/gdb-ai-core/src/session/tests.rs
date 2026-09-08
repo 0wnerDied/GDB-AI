@@ -1008,6 +1008,9 @@ async fn stale_value_cleanup_does_not_consume_the_business_deadline() {
                 backend_name: format!("missing_{index}"),
                 stop_id: stop_id.clone(),
                 expression: "0".into(),
+                inferior_id: None,
+                thread_id: None,
+                frame_id: None,
             })
             .await
             .unwrap();

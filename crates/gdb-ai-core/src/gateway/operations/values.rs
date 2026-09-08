@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use ulid::Ulid;
 
 use super::{
-    context::{context_options, require_stopped_context},
+    context::{context_options, observation_context, require_stopped_context},
     encoding::byte_content,
     evaluation::{safe_evaluate_command, validate_expression, validate_expression_text},
     mi::{aggregate_items, result_text},
@@ -19,7 +19,9 @@ use crate::{
     session::CommandReply,
 };
 
-fn result_value(results: &[MiResult], name: &str) -> Option<Value> {
+pub(super) fn result_value(results: &[MiResult], name: &str) -> Option<Value> {
+    // 2026-09-08: Root evaluate/create used lossy UTF-8 while children kept
+    // exact MI bytes. Every value entrance now shares this representation.
     let bytes = MiResult::find(results, name)?.as_bytes()?.to_vec();
     match String::from_utf8(bytes) {
         Ok(text) => Some(Value::String(text)),
@@ -39,7 +41,7 @@ fn result_count(results: &[MiResult], name: &str) -> Option<u64> {
     MiResult::find_str(results, name)?.parse().ok()
 }
 
-fn value_status(fields: &[MiResult]) -> ValueStatus {
+pub(super) fn value_status(fields: &[MiResult]) -> ValueStatus {
     // 2026-09-08: `--simple-values` omits aggregate values, while GDB prints
     // unavailable leaves as sentinels. Being in scope alone does not prove
     // that a value was captured; only claim availability from value evidence.
@@ -50,7 +52,7 @@ fn value_status(fields: &[MiResult]) -> ValueStatus {
             match MiResult::find(fields, "value").and_then(|value| value.as_bytes()) {
                 Some(b"<optimized out>" | b"<unavailable>") => ValueStatus::Unavailable,
                 Some(_) => ValueStatus::Available,
-                None => ValueStatus::Unknown,
+                None => ValueStatus::NotCollected,
             }
         }
         Some(_) => ValueStatus::Unknown,
@@ -167,6 +169,48 @@ async fn current_value_binding(
         .value_binding(string(&request.parameters, "value_id")?)
         .await?;
     state.require_stop(&binding.stop_id)?;
+    // 2026-09-08: Handles omitted their creation selection, so child/update
+    // reads accepted contradictory selectors. Keep GDB's bound selection and
+    // semantic attribution together; an existing handle cannot be retargeted.
+    for (field, bound) in [
+        (
+            "inferior_id",
+            binding.inferior_id.as_ref().map(|id| id.0.as_str()),
+        ),
+        (
+            "thread_id",
+            binding.thread_id.as_ref().map(|id| id.0.as_str()),
+        ),
+        (
+            "frame_id",
+            binding.frame_id.as_ref().map(|id| id.0.as_str()),
+        ),
+    ] {
+        if let Some(requested) = request.parameters.get(field).and_then(Value::as_str)
+            && Some(requested) != bound
+        {
+            return Err(Error::new(
+                ErrorCode::StaleContext,
+                "value handle belongs to another selection",
+            ));
+        }
+    }
+    if let Some(level) = request
+        .parameters
+        .get("frame_level")
+        .and_then(Value::as_u64)
+        && binding
+            .frame_id
+            .as_ref()
+            .and_then(|frame| frame.0.rsplit_once('_'))
+            .and_then(|(_, level)| level.parse::<u64>().ok())
+            != Some(level)
+    {
+        return Err(Error::new(
+            ErrorCode::StaleContext,
+            "value handle belongs to another frame",
+        ));
+    }
     Ok(binding)
 }
 
@@ -239,7 +283,7 @@ impl Gateway {
                 .map(|(expression, reply)| {
                     json!({
                         "expression": expression,
-                        "value": result_text(&reply.record, "value")
+                        "value": result_value(reply.record.results(), "value")
                     })
                 })
                 .collect::<Vec<_>>();
@@ -253,7 +297,7 @@ impl Gateway {
             let reply = replies.into_iter().next().unwrap();
             Ok(json!({
                 "stop_id": state.stop_id,
-                "value": result_text(&reply.record, "value"),
+                "value": result_value(reply.record.results(), "value"),
                 "command": reply,
                 "side_effects": effect
             }))
@@ -266,6 +310,7 @@ impl Gateway {
         require_stopped_context(&request.parameters, &state)?;
         let expression = string(&request.parameters, "expression")?;
         validate_expression(&expression)?;
+        let context = observation_context(&request.parameters, &state)?;
         let stop_id = state.stop_id.clone().unwrap();
         let value_id = ValueId::for_stop(&stop_id);
         let backend_name = format!("gdbai_{}", Ulid::new());
@@ -279,6 +324,15 @@ impl Gateway {
             backend_name: backend_name.clone(),
             stop_id: stop_id.clone(),
             expression: expression.clone(),
+            inferior_id: context
+                .as_ref()
+                .and_then(|context| context.inferior_id.clone()),
+            thread_id: context
+                .as_ref()
+                .and_then(|context| context.thread_id.clone()),
+            frame_id: context
+                .as_ref()
+                .and_then(|context| context.frame_id.clone()),
         };
         if let Err(error) = entry.handle.register_value(binding).await {
             let _ = entry
@@ -297,8 +351,8 @@ impl Gateway {
             "value_id": value_id,
             "stop_id": stop_id,
             "expression": expression,
-            "value": result_text(&reply.record, "value"),
-            "type": result_text(&reply.record, "type"),
+            "value": result_value(reply.record.results(), "value"),
+            "type": result_value(reply.record.results(), "type"),
             "children_count": result_text(&reply.record, "numchild")
                 .and_then(|value| value.parse::<u64>().ok()),
             "has_children": result_text(&reply.record, "numchild")
@@ -419,7 +473,7 @@ mod tests {
             children[1].value,
             Some(json!({"encoding": "binary", "data_base64": "/w=="}))
         );
-        assert_eq!(children[2].status, ValueStatus::Unknown);
+        assert_eq!(children[2].status, ValueStatus::NotCollected);
         assert_eq!(children[2].value, None);
 
         let binding = ValueBinding {
@@ -427,6 +481,9 @@ mod tests {
             backend_name: "var1".into(),
             stop_id: StopId("stop_test".into()),
             expression: "value".into(),
+            inferior_id: None,
+            thread_id: None,
+            frame_id: None,
         };
         let update_record = parse_record(
             br#"2^done,changelist=[{name="var1",value="8",in_scope="true",type_changed="true",new_type="long",new_num_children="1",dynamic="1",displayhint="array",has_more="1",new_children=[{name="var1.new",exp="new",numchild="0",type="int",value="<optimized out>",in_scope="true"}]},{name="var1.a",in_scope="false",type_changed="false"}]"#,

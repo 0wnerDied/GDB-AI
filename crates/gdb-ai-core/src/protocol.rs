@@ -296,6 +296,8 @@ pub struct ObservationResult {
 pub enum ValueStatus {
     Available,
     Unavailable,
+    NotCollected,
+    Failed,
     Invalid,
     Unknown,
 }

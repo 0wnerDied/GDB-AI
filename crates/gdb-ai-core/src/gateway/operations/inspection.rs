@@ -1,13 +1,13 @@
 use std::{collections::BTreeMap, future::Future, pin::Pin, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use gdb_ai_mi::MiRecord;
+use gdb_ai_mi::{MiRecord, MiResult};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{
     context::{context_options, observation_context, require_stopped_context},
-    encoding::{hex_encode, parse_address},
+    encoding::{byte_content, hex_encode, parse_address},
     evaluation::safe_evaluate_command,
     memory::read_memory_bytes,
     mi::{
@@ -1071,17 +1071,25 @@ impl Gateway {
                     )?;
                     match safe_evaluate_command(&entry.handle, command).await {
                         Ok(reply) => {
-                            let value = result_text(&reply.record, "value").unwrap_or_default();
-                            if value.len() > max_value_bytes {
+                            // 2026-09-08: Lossy UTF-8 changed tracked values
+                            // and hashes. Share ordinary value semantics and
+                            // hash/artifact the original MI bytes.
+                            let fields = reply.record.results();
+                            let bytes = MiResult::find(fields, "value")
+                                .and_then(|value| value.as_bytes())
+                                .unwrap_or_default();
+                            let status = super::values::value_status(fields);
+                            if bytes.len() > max_value_bytes {
                                 let uri = self.put_artifact(
                                     Some(entry.handle.id()),
-                                    value.as_bytes(),
+                                    bytes,
                                     "target-value",
                                 )?;
                                 json!({
                                     "expression": expression,
-                                    "sha256": format!("{:x}", Sha256::digest(value.as_bytes())),
-                                    "preview": value.chars().take(max_value_bytes.min(256)).collect::<String>(),
+                                    "status": status,
+                                    "sha256": format!("{:x}", Sha256::digest(bytes)),
+                                    "preview": byte_content(bytes[..max_value_bytes.min(256)].to_vec()),
                                     "artifact": uri,
                                     "truncated": true,
                                     "evidence_seq": reply.evidence_seq
@@ -1089,7 +1097,8 @@ impl Gateway {
                             } else {
                                 json!({
                                     "expression": expression,
-                                    "value": value,
+                                    "status": status,
+                                    "value": super::values::result_value(fields, "value"),
                                     "evidence_seq": reply.evidence_seq
                                 })
                             }

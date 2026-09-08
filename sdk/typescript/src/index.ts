@@ -34,7 +34,7 @@ export interface ApiResponse<T = unknown> {
   error?: { code: string; message: string; retryable: boolean; details?: unknown };
 }
 
-export type ValueStatus = "available" | "unavailable" | "invalid" | "unknown";
+export type ValueStatus = "available" | "unavailable" | "not_collected" | "failed" | "invalid" | "unknown";
 
 export interface ValueChild {
   path: string;

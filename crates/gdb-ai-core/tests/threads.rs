@@ -171,6 +171,39 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
                 .starts_with(&frame_prefix)
         );
     }
+    let value = successful(
+        call(
+            "bound-value",
+            "value.create",
+            json!({
+                "stop_id": stop, "frame_id": worker_frame["frame_id"], "expression": "first"
+            }),
+        )
+        .await,
+    );
+    let value_id = &value.result.as_ref().unwrap()["value_id"];
+    successful(
+        call(
+            "bound-children",
+            "value.children",
+            json!({
+                "stop_id": stop, "value_id": value_id, "limit": 1
+            }),
+        )
+        .await,
+    );
+    let mismatch = call(
+        "bound-mismatch",
+        "value.children",
+        json!({
+            "stop_id": stop, "value_id": value_id, "frame_level": 0
+        }),
+    )
+    .await;
+    assert_eq!(
+        mismatch.error.unwrap().code,
+        gdb_ai_core::ErrorCode::StaleContext
+    );
     let invalid = call(
         "invalid",
         "inspection.get",

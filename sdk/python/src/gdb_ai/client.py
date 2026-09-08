@@ -13,7 +13,7 @@ ProtocolVersion = Literal["2025-11-25", "2026-07-28"]
 MCP_VERSION: ProtocolVersion = "2025-11-25"
 STATELESS_MCP_VERSION: ProtocolVersion = "2026-07-28"
 
-ValueStatus = Literal["available", "unavailable", "invalid", "unknown"]
+ValueStatus = Literal["available", "unavailable", "not_collected", "failed", "invalid", "unknown"]
 
 
 class _ValueChildRequired(TypedDict):

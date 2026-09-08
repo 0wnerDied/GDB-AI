@@ -108,6 +108,12 @@ pub struct ValueBinding {
     pub backend_name: String,
     pub stop_id: StopId,
     pub expression: String,
+    #[serde(default)]
+    pub inferior_id: Option<InferiorId>,
+    #[serde(default)]
+    pub thread_id: Option<ThreadId>,
+    #[serde(default)]
+    pub frame_id: Option<FrameId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
