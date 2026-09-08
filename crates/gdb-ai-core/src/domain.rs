@@ -368,6 +368,8 @@ pub struct FrameSummary {
     pub level: u32,
     pub address: Option<String>,
     pub function: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
     pub source: Option<String>,
     pub line: Option<u32>,
 }

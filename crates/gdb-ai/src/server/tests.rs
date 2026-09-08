@@ -856,6 +856,7 @@ fn tool_results_compact_status_and_preserve_explicit_target_state() {
                         level: 0,
                         address: Some("0x1234".into()),
                         function: Some("main".into()),
+                        module: None,
                         source: Some("main.c".into()),
                         line: Some(7),
                     }),

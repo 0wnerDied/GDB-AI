@@ -7,6 +7,8 @@ use crate::{
     domain::{DomainEvent, FrameSummary, OutputSource, StopReason},
 };
 
+pub(crate) const NORMALIZATION_VERSION: u64 = 2;
+
 pub fn normalize(record: &MiRecord) -> Option<DomainEvent> {
     match record {
         MiRecord::ExecAsync { class, results, .. } if class == "running" => {
@@ -112,7 +114,9 @@ fn stopped(results: &[MiResult]) -> DomainEvent {
         backend_thread: MiResult::find_str(results, "thread-id").map(str::to_owned),
         reason: raw_reason.clone(),
         reason_detail: Some(stop_reason(results, raw_reason)),
-        frame: MiResult::find(results, "frame").and_then(frame),
+        frame: MiResult::find(results, "frame")
+            .and_then(MiValue::results)
+            .map(frame_summary_fields),
     }
 }
 
@@ -215,17 +219,20 @@ fn breakpoint(results: &[MiResult], modified: bool) -> Option<DomainEvent> {
     })
 }
 
-fn frame(value: &MiValue) -> Option<FrameSummary> {
-    let fields = value.results()?;
-    Some(FrameSummary {
+// 2026-09-09: Stop and inspection decoders dropped the library identity of
+// frames without source symbols. Share their decoder and retain only
+// debugger-reported origins.
+pub(crate) fn frame_summary_fields(fields: &[MiResult]) -> FrameSummary {
+    FrameSummary {
         level: MiResult::find_str(fields, "level")
             .and_then(|level| level.parse().ok())
             .unwrap_or(0),
         address: text(fields, "addr"),
         function: text(fields, "func"),
+        module: text(fields, "from"),
         source: text(fields, "fullname").or_else(|| text(fields, "file")),
         line: MiResult::find_str(fields, "line").and_then(|line| line.parse().ok()),
-    })
+    }
 }
 
 fn text(results: &[MiResult], name: &str) -> Option<String> {

@@ -12,7 +12,7 @@ use crate::{
     Error, ErrorCode, Result,
     domain::{DomainEvent, SessionId, SessionLifecycle, SessionState},
     journal::{JournalEntry, JournalGap, require_next_sequence},
-    normalize::normalize,
+    normalize::{NORMALIZATION_VERSION, normalize},
     reducer::StateReducer,
 };
 
@@ -34,6 +34,7 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
     let mut parsed_mi_records = 0;
     let mut applied_events = 0;
     let mut saw_normalized = false;
+    let mut normalization_version = 1;
     // 2026-09-06: Replay retained every decoded MI event, even after its
     // normalized pair was verified. Adjacency needs only the pending event
     // and the earliest missing pair, not a second copy of the whole journal.
@@ -85,6 +86,17 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
                 // 2026-08-28: Replay previously trusted a caller-supplied ID,
                 // producing different public handles from the same journal.
                 reducer = StateReducer::new(SessionState::creating(SessionId::parse(recorded)?));
+                normalization_version = entry
+                    .data
+                    .get("normalization_version")
+                    .map_or(Some(1), Value::as_u64)
+                    .filter(|version| matches!(*version, 1 | NORMALIZATION_VERSION))
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::InvalidArgument,
+                            "unsupported normalization version",
+                        )
+                    })?;
             }
             "session.created" => {
                 return Err(Error::new(
@@ -107,7 +119,17 @@ pub fn replay(path: impl AsRef<Path>, session_id: SessionId) -> Result<ReplayRep
                 })?;
                 let record = gdb_ai_mi::parse_record(&raw, gdb_ai_mi::MiLimits::default())?;
                 parsed_mi_records += 1;
-                if let Some(event) = normalize(&record) {
+                if let Some(mut event) = normalize(&record) {
+                    // 2026-09-09: Adding frame modules made old normalized
+                    // stops disagree with their MI. Match the recorded format
+                    // before strict event and checkpoint validation.
+                    if normalization_version == 1
+                        && let DomainEvent::TargetStopped {
+                            frame: Some(frame), ..
+                        } = &mut event
+                    {
+                        frame.module = None;
+                    }
                     if !saw_normalized {
                         reducer.apply_event(entry.seq, &event)?;
                         applied_events += 1;
@@ -336,6 +358,83 @@ mod tests {
 
         let report = replay(transcript.path(), SessionId("ignored".into())).unwrap();
         assert_eq!(report.state, *reducer.state());
+    }
+
+    #[test]
+    fn frame_origin_versions_preserve_strict_replay() {
+        let raw = br#"*stopped,reason="signal-received",thread-group="i1",thread-id="1",frame={addr="0x1200",func="library_value",from="/lib/liborigin.so"}"#;
+        for (version, module, valid) in [
+            (None, None, true),
+            (Some(serde_json::json!(1)), None, true),
+            (Some(serde_json::json!(2)), Some("/lib/liborigin.so"), true),
+            (Some(serde_json::json!(2)), None, false),
+            (Some(serde_json::json!(2)), Some("/lib/other.so"), false),
+            (Some(serde_json::json!(1)), Some("/lib/liborigin.so"), false),
+            (Some(serde_json::json!(3)), Some("/lib/liborigin.so"), false),
+            (
+                Some(serde_json::json!("2")),
+                Some("/lib/liborigin.so"),
+                false,
+            ),
+            (
+                Some(serde_json::Value::Null),
+                Some("/lib/liborigin.so"),
+                false,
+            ),
+        ] {
+            let mut transcript = NamedTempFile::new().unwrap();
+            let session_id = SessionId("sess_origin".into());
+            let mut created = serde_json::json!({"session_id": session_id});
+            if let Some(version) = version {
+                created["normalization_version"] = version;
+            }
+            let record = gdb_ai_mi::parse_record(raw, gdb_ai_mi::MiLimits::default()).unwrap();
+            let mut event = serde_json::to_value(normalize(&record).unwrap()).unwrap();
+            event["frame"].as_object_mut().unwrap().remove("module");
+            if let Some(module) = module {
+                event["frame"]["module"] = module.into();
+            }
+            let mut reducer = StateReducer::new(SessionState::creating(session_id.clone()));
+            reducer
+                .apply_event(3, &serde_json::from_value(event.clone()).unwrap())
+                .unwrap();
+            for entry in [
+                JournalEntry {
+                    seq: 1,
+                    kind: "session.created".into(),
+                    data: created.clone(),
+                },
+                JournalEntry {
+                    seq: 2,
+                    kind: "mi.output".into(),
+                    data: serde_json::json!({"raw_base64": BASE64.encode(raw)}),
+                },
+                JournalEntry {
+                    seq: 3,
+                    kind: "normalized.event".into(),
+                    data: event,
+                },
+                JournalEntry {
+                    seq: 4,
+                    kind: "state.revision".into(),
+                    data: serde_json::json!({
+                        "revision": reducer.state().revision, "state": reducer.state()
+                    }),
+                },
+            ] {
+                writeln!(transcript, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+            }
+            let result = replay(transcript.path(), session_id);
+            if valid {
+                assert_eq!(result.unwrap().state, *reducer.state(), "{created}");
+            } else {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    ErrorCode::InvalidArgument,
+                    "{created}"
+                );
+            }
+        }
     }
 
     #[test]

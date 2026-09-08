@@ -140,6 +140,145 @@ async fn launch_locations_remain_effective_after_restart() {
 }
 
 #[tokio::test]
+async fn shared_library_frames_keep_their_origin_without_source_symbols() {
+    if !support::require_commands(&["gdb", "cc"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("library.c");
+    let library = directory.path().join("liborigin.so");
+    std::fs::write(
+        &source,
+        "int library_value(int input) { __builtin_trap(); return input; }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-shared", "-fPIC", "-g0", "-O0", "-s"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&library)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let source = directory.path().join("main.c");
+    let executable = directory.path().join("main");
+    std::fs::write(
+        &source,
+        "int library_value(int);\nint main(void) { return library_value(41); }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0"])
+            .arg(&source)
+            .arg(&library)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("frame-origin/mcp:writer");
+    let stopped = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "launch",
+                    None,
+                    "target.launch",
+                    None,
+                    json!({
+                        "program": executable, "stop": "none",
+                        "inspect": [
+                            {"view": "stack", "limit": 4}, {"view": "frame"},
+                            {"view": "threads"}, {"view": "stop_context"}
+                        ]
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let session = stopped.session_id.as_deref().unwrap();
+    successful(
+        gateway
+            .dispatch_agent(
+                request("close", Some(session), "session.close", None, json!({})),
+                &caller,
+            )
+            .await,
+    );
+    let semantics = stopped.semantics.as_ref().unwrap();
+    let commands = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let retained = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "shared",
+                    Some(session),
+                    "inspection.snapshot_get",
+                    None,
+                    json!({"snapshot_id": semantics.context.as_ref().unwrap().observation_id}),
+                ),
+                &Caller::local("frame-origin/mcp:reader"),
+            )
+            .await,
+    );
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total"),
+        commands
+    );
+    let observations = &stopped.result.as_ref().unwrap()["observations"];
+    assert!(semantics.complete);
+    assert!(retained.semantics.as_ref().unwrap().historical);
+    assert_eq!(retained.result.unwrap()["results"], *observations);
+    for frame in [
+        &observations["stack"]["frames"][0],
+        &observations["frame"]["frame"],
+        &observations["threads"]["threads"][0]["frame"],
+        &observations["stop_context"]["frame"],
+        &semantics.state.as_ref().unwrap()["frame"],
+    ] {
+        assert_eq!(frame["function"], "library_value");
+        assert!(frame.get("source").is_none_or(serde_json::Value::is_null));
+        assert_eq!(frame["module"], json!(library), "{frame}");
+    }
+    let main = &observations["stack"]["frames"][1];
+    assert_eq!(main["function"], "main");
+    assert_eq!(main["source"]["path"], json!(source));
+    assert!(main.get("module").is_none());
+    assert!(
+        gdb_ai_core::replay::replay(
+            directory
+                .path()
+                .join("sessions")
+                .join(session)
+                .join("journal.jsonl"),
+            gdb_ai_core::domain::SessionId::parse(session).unwrap(),
+        )
+        .unwrap()
+        .complete
+    );
+}
+
+#[tokio::test]
 async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     if !support::require_commands(&["gdb", "cc"]) {
         return;

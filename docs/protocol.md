@@ -49,6 +49,11 @@ the canonical API.
 Mapping records retain start and end addresses, file offset, permissions,
 and path. Provider-specific provenance may accompany those facts.
 
+Stack items and frame summaries retain the debugger-reported binary path as
+optional `module`, including frames without source symbols. This is not a
+validated server file path. If GDB supplies no origin, the field is omitted;
+no additional mapping query or guessed module is substituted.
+
 Ordinary reads, values, snapshots, batches, launch/restart, and execution turns
 use a core semantic result. Canonical responses add `semantics` with capture
 `context`, `complete`, `historical`, and `projection: "detailed"`; execution may

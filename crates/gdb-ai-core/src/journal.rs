@@ -13,6 +13,7 @@ use crate::{
     Error, ErrorCode, Result,
     config::JournalDurability,
     domain::{DomainEvent, JournaledEvent},
+    normalize::NORMALIZATION_VERSION,
 };
 
 // 2026-08-28: Replay and inspection once accepted missing journal entries and
@@ -131,7 +132,10 @@ impl Journal {
     pub fn append_session_created(&mut self, session_id: &str) -> Result<u64> {
         self.append(
             "session.created",
-            serde_json::json!({"session_id": session_id}),
+            serde_json::json!({
+                "session_id": session_id,
+                "normalization_version": NORMALIZATION_VERSION
+            }),
         )
     }
 

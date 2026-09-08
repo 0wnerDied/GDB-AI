@@ -78,6 +78,11 @@ checkpoint integrity guarantee and reconstruct only MI-derived controller
 state. Select `journal.durability = "durable"` when every evidence boundary must
 be synchronized to disk and an evidence-storage failure must end the session.
 
+New journals declare `normalization_version: 2` in `session.created` to retain
+frame module paths. A missing version or version 1 uses the legacy frame
+representation, without backfilling that metadata during replay. Replay
+keeps event and checkpoint comparisons strict and rejects unknown versions.
+
 Artifact storage has per-session, per-owner, and daemon-wide byte limits. Use
 `gdb-ai storage status` for metadata and filesystem inventory, `storage verify`
 for SQLite and full content-digest verification, and `storage gc` for a safe

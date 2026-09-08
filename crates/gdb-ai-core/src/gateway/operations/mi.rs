@@ -11,6 +11,7 @@ use super::{
 use crate::{
     Error, ErrorCode, Result,
     domain::{FrameId, FrameSummary},
+    normalize::frame_summary_fields,
 };
 
 pub(super) fn result_text(record: &MiRecord, name: &str) -> Option<String> {
@@ -20,20 +21,6 @@ pub(super) fn result_text(record: &MiRecord, name: &str) -> Option<String> {
 pub(super) fn frame_summary(record: &MiRecord) -> Option<FrameSummary> {
     let fields = MiResult::find(record.results(), "frame")?.results()?;
     Some(frame_summary_fields(fields))
-}
-
-pub(super) fn frame_summary_fields(fields: &[MiResult]) -> FrameSummary {
-    FrameSummary {
-        level: MiResult::find_str(fields, "level")
-            .and_then(|level| level.parse().ok())
-            .unwrap_or(0),
-        address: MiResult::find_str(fields, "addr").map(str::to_owned),
-        function: MiResult::find_str(fields, "func").map(str::to_owned),
-        source: MiResult::find_str(fields, "fullname")
-            .or_else(|| MiResult::find_str(fields, "file"))
-            .map(str::to_owned),
-        line: MiResult::find_str(fields, "line").and_then(|line| line.parse().ok()),
-    }
 }
 
 pub(super) fn normalized_threads(
@@ -101,13 +88,17 @@ pub(super) fn normalized_frames(
                     .as_ref()
                     .map(|thread| FrameId::new(thread, &context.stop_id, frame.level))
             });
-            json!({
+            let mut facts = json!({
                 "frame_id": frame_id,
                 "level": frame.level,
                 "address": frame.address,
                 "function": frame.function,
                 "source": frame.source.map(|path| json!({"path": path, "line": frame.line}))
-            })
+            });
+            if let Some(module) = frame.module {
+                facts["module"] = Value::String(module);
+            }
+            facts
         })
         .collect())
 }
