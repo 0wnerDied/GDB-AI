@@ -142,8 +142,10 @@ Clients that accept the common `mcpServers` JSON shape can use:
 }
 ```
 
+<!-- 2026-09-08: The README heading changed; keep the setup link on its
+     transport instructions rather than the obsolete anchor. -->
 If a client accepts only Streamable HTTP, start the loopback server described
-in the [README](../README.md#serve-mcp-and-json-rpc) and connect it to
+in the [README](../README.md#mcp-transports) and connect it to
 `http://127.0.0.1:8080/mcp`. Do not expose plaintext HTTP outside the host.
 
 ## Verify tool discovery
@@ -163,49 +165,60 @@ create a session, retain its `session_id`, launch a target, use the current
 stop for inspection, reuse the session across attempts, and close it when
 finished. Supply `stop_id` only when a later read must reject a newer stop.
 
-## Fast exploit loop
+## Native crash and thread diagnosis
 
-For the shortest reliable local crash-or-exit loop:
+Create a session with `gdb_session` action `create` and retain its `session_id`.
+Then launch a native program and collect its initial crash evidence in one
+`tools/call` request:
 
-1. Create a session and retain its `session_id`.
-2. Launch at the first useful stop or set a breakpoint. Use
-   `first_instruction` when the executable is stripped and has no `main`
-   symbol.
-3. Call `gdb_run` action `continue` with byte-exact `input` and its trailing LF
-   when required. The default wait runs through the next stop or exit. Add
-   `inspect: [{"view": "crash", "profile": "brief"}]` when stopped crash
-   context is needed in the same call.
-4. Use `gdb_session` action `restart` for the next attempt instead of creating
-   another session. Batch deterministic input into one PTY write; when target
-   reads can swallow later answers, use ordered write `steps` and gate each
-   later step with its `wait_for` prompt.
+```json
+{
+  "name": "gdb_session",
+  "arguments": {
+    "action": "launch",
+    "session_id": "<session-id>",
+    "program": "/workspace/app",
+    "stop": "none",
+    "inspect": [{"view": "crash", "profile": "brief"}]
+  }
+}
+```
 
-For a counted one-shot breakpoint, use `gdb_probe` with `input`,
-`ignore_count`, and bounded expression, stack, or memory captures. A memory
-capture supplies `address_expression` and `length`. The call queues the whole
-input, skips intermediate hits, returns output and observations, and cleans up
-its temporary breakpoint. Optional `inspect` views read the same final hit.
-Set `restart: true` on the next trial to rerun, arm, and resume in that same
-call. With `stop_policy: "continue_to_stop"`, it instead waits for the next stop
-or exit and returns the requested crash or stack views there. A module offset
-may be supplied before a stripped PIE maps; GDB/AI rebinds it when the mapping
-appears.
-For a loaded stripped kernel module, use
-`kernel_module_offset: {"module": "name", "offset": "0x..."}`. The offset is
-relative to the module text segment; GDB/AI resolves its current runtime base,
-probes it, captures the stop, and removes the breakpoint in the same call.
-For an already-running target, the call arms and waits without a separate
-interrupt or resume.
-The `input` field writes the inferior PTY. For socket or other external events,
-set `trigger.command` to a no-shell command array and optionally set its
-workspace `cwd`. GDB/AI starts it after the breakpoint is armed and the target
-runs, then reports its process status and bounded nonempty stdout/stderr with
-the probe result. A resumed probe lets the command finish within its remaining
-wall-time budget; a stopped probe cleans it up immediately. Each stream includes
-its total byte count and truncation state.
-The result reports bounded `output` produced during the call, plus
-`settled_by: "stopped"`, one `stop_id`, and requested observations, or
-`settled_by: "exited"` after normal termination. Use
+With this inspection plan, launch waits for a stop or exit and returns bounded
+target output with the collected observations. A normal exit has no stopped
+observations. Inspection failure preserves the execution outcome; do not repeat
+execution merely to recover a failed read. Use `gdb_run` action `restart` with
+the same `inspect` plan for another run in the existing session.
+
+For a running process that appears blocked, interrupt and collect its thread
+stacks in one call:
+
+```json
+{
+  "name": "gdb_run",
+  "arguments": {
+    "action": "interrupt",
+    "session_id": "<session-id>",
+    "inspect": [{"view": "threads", "stack_depth": 8}]
+  }
+}
+```
+
+All returned stacks belong to the same stop; per-thread unwind failures remain
+explicit. A captured stop supports diagnosis, not proof of a reproducible race.
+Use `first_instruction` or `main` at launch only when setup must precede
+execution, then include the needed views in `gdb_run` action `continue`.
+
+Share a returned `observation_id` with authorized observers through
+`gdb_inspect` view `observation` and `snapshot_id: "<observation-id>"`.
+This reads immutable historical evidence without another GDB command. Only
+the session controller may mutate the target; see [control handoff and
+cancellation](operations.md) for coordinating multiple clients.
+
+## Input and output
+
+Run-control requests may supply byte-exact `input` and include the resulting
+bounded `output`. For larger retained results, use
 `gdb_memory` action `artifact` with the returned URI and `next_offset` to page
 large results without repeating the debugger read. Use
 `gdb_run` action `wait` with `input` when execution is already asynchronous,
@@ -225,6 +238,8 @@ single `timeout_ms` bounds the complete transaction.
 Advanced targets, mutations, variable objects, tracking, and kernel operations
 appear only when the server is started with `--advanced-tools`. Raw GDB access
 appears only with `--raw-admin`; do not enable either flag by default.
+See the [canonical protocol](protocol.md) for bounded breakpoint captures and
+other specialized operations.
 
 ## Security
 
