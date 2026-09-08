@@ -809,7 +809,7 @@ impl Gateway {
                 }
             }
         }
-        let result = result?;
+        let mut result = result?;
         let state = match completed_entry {
             Some(entry)
                 if mode == RequestMode::Agent
@@ -819,8 +819,11 @@ impl Gateway {
                 // 2026-09-08: Agent observations already carry their captured
                 // stop/epoch context, but success still cloned every growing
                 // session registry for projection to discard it. Borrow only
-                // evidence-gap metadata and leave canonical envelopes unchanged.
+                // coordination and evidence-gap metadata; canonical stays unchanged.
                 entry.handle.with_state(|state| {
+                    if let OperationResult::Semantic(result) = &mut result {
+                        result.refresh_state_progress(state);
+                    }
                     warnings.extend(
                         state
                             .limitations

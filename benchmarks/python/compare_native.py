@@ -241,6 +241,7 @@ def projected(server, gdb, program, state, mi, case):
                 if session is None:
                     session = response["result"]["session"]["session_id"]
                 assert response["complete"] and response["context"]["stop_id"], response
+                assert response["state"].get("snapshot", {}).get("status") != "BUILDING", response
                 observations = response["result"]["observations"]
                 if case == "threads":
                     threads = observations["threads"]["threads"]

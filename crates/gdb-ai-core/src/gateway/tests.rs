@@ -1017,7 +1017,7 @@ async fn failed_lease_release_keeps_the_live_lease() {
     gateway.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launch_creates_one_owned_session_and_preserves_failure_handles() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
@@ -1071,6 +1071,20 @@ async fn launch_creates_one_owned_session_and_preserves_failure_handles() {
                 .len(),
             1
         );
+        if mode == RequestMode::Agent {
+            let entry = gateway
+                .entry(launched.session_id.as_deref().unwrap())
+                .await
+                .unwrap();
+            let current = entry
+                .handle
+                .with_state(crate::protocol::session_coordination_state);
+            assert_eq!(
+                launched.semantics.as_ref().unwrap().state.as_ref(),
+                Some(&current)
+            );
+            assert_eq!(retry.semantics, launched.semantics);
+        }
         let mut close = ApiRequest {
             api_version: API_VERSION.into(),
             request_id: "close".into(),

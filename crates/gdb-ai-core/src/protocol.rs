@@ -429,6 +429,41 @@ impl SemanticResult {
         self
     }
 
+    pub(crate) fn refresh_state_progress(&mut self, current: &SessionState) {
+        let Some(matched) = self
+            .diagnostics
+            .values()
+            .find_map(|diagnostic| match diagnostic {
+                Diagnostic::State(state) => Some(state),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        if matched.stop_id != current.stop_id
+            || matched.execution_epoch != current.execution_epoch
+            || matched.snapshot == current.snapshot
+        {
+            return;
+        }
+        let Some(Value::Object(summary)) = self.metadata.semantics.state.as_mut() else {
+            return;
+        };
+        // 2026-09-09: Native turns retained BUILDING after the stop snapshot
+        // committed. Refresh only same-stop/epoch snapshot progress; preserve
+        // distinct matched target state and the original detailed diagnostics.
+        let Value::Object(latest) = session_coordination_state(current) else {
+            unreachable!("coordination state is an object");
+        };
+        if summary
+            .iter()
+            .filter(|(key, _)| key.as_str() != "snapshot")
+            .eq(latest.iter().filter(|(key, _)| key.as_str() != "snapshot"))
+        {
+            *summary = latest;
+        }
+    }
+
     pub(crate) fn detail(mut self, key: &'static str, value: Value) -> Self {
         self.diagnostics.insert(key, Diagnostic::Value(value));
         self
@@ -1204,6 +1239,59 @@ mod tests {
         assert_eq!(projected_exit_code("0170"), json!(120));
         assert_eq!(projected_exit_code("0"), json!(0));
         assert_eq!(projected_exit_code("unknown"), json!("unknown"));
+    }
+
+    #[test]
+    fn native_state_refreshes_only_same_target_snapshot_progress() {
+        let mut matched = SessionState::creating(crate::domain::SessionId("sess_native".into()));
+        matched.lifecycle = SessionLifecycle::Active;
+        matched.backend = BackendHealth::Healthy;
+        matched.stop_id = Some(StopId("stop_matched".into()));
+        matched.execution_epoch = 2;
+        matched.snapshot = Some(crate::domain::SnapshotRef {
+            snapshot_id: "snap_stop_matched".into(),
+            stop_id: matched.stop_id.clone().unwrap(),
+            status: SnapshotStatus::Building,
+            partial: false,
+        });
+        let original = SemanticResult::new(json!({}), ObservationContext::from_state(&matched))
+            .state("state", matched.clone());
+        for (status, partial) in [
+            (SnapshotStatus::Ready, false),
+            (SnapshotStatus::Ready, true),
+            (SnapshotStatus::Failed, true),
+        ] {
+            let mut current = matched.clone();
+            current.revision += 1;
+            current.snapshot.as_mut().unwrap().status = status;
+            current.snapshot.as_mut().unwrap().partial = partial;
+            current.snapshot.as_mut().unwrap().snapshot_id = "obs_committed".into();
+            let mut result = original.clone();
+            result.refresh_state_progress(&current);
+            assert_eq!(
+                result.metadata.semantics.state,
+                Some(session_coordination_state(&current))
+            );
+            assert_eq!(
+                result.metadata.semantics.context,
+                original.metadata.semantics.context
+            );
+            assert_eq!(result.into_value(true)["state"], json!(matched));
+
+            let mutations: [fn(&mut SessionState); 4] = [
+                |state| state.stop_id = Some(StopId("stop_later".into())),
+                |state| state.execution_epoch += 1,
+                |state| state.backend = BackendHealth::Unresponsive,
+                |state| state.lifecycle = SessionLifecycle::Closed,
+            ];
+            for mutate in mutations {
+                let mut changed = current.clone();
+                mutate(&mut changed);
+                let mut result = original.clone();
+                result.refresh_state_progress(&changed);
+                assert_eq!(result.metadata.semantics, original.metadata.semantics);
+            }
+        }
     }
 
     #[test]
