@@ -456,10 +456,12 @@ python3 benchmarks/python/compare_native.py target/release/gdb-ai --case threads
 This dependency-free script rotates CLI, MI, and projected MCP execution
 order, using the same GDB and MI version in both MI-backed arms. It defaults
 to MI4; use `--mi mi3` or `--mi mi2` with older GDB releases.
-The signal case checks stack and variable values in a generated signal-only
-fixture; the thread case checks three stacks, including both named workers
-in the existing lock-order fixture, at `pthread_join`. It does not infer
-deadlock from that stop alone. The script reports raw samples and minimum,
+The signal case checks stack, argument, and variable values in a generated
+signal-only fixture. The thread case checks three stacks, both worker inputs,
+and lock-pointer arguments in the existing lock-order fixture at `pthread_join`;
+it requires matching pthread debug information and rejects captures missing
+either lock value. These are fixed evidence checks, not proof of deadlock or
+complete diagnostic equivalence. The script reports raw samples and minimum,
 median, and maximum costs for startup, cold capture, and same-session restart.
 Debugger command counts, stdin batches, and wire bytes are separate measures;
 discovery and teardown are excluded. CLI framing bytes are included, but

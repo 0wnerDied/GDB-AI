@@ -130,27 +130,42 @@ def native(gdb, program, interface, mi, case):
                     threads = re.findall(rb'\{id="(\d+)"', output)
                     assert len(set(threads)) == len(threads) == 3, output
                     stacks, frames = commands([
-                        f"-stack-list-frames --thread {thread.decode()} 0 7" for thread in threads
+                        command for thread in threads for command in (
+                            f"-stack-list-frames --thread {thread.decode()} 0 7",
+                            f"-stack-list-arguments --thread {thread.decode()} --simple-values 0 7",
+                        )
                     ])
                     assert frames.count(b"^done,stack=[frame=") == 3, frames
+                    assert frames.count(b"^done,stack-args=[frame=") == 3, frames
                     cost = combined(run, info, stacks)
                     output = stopped + output + frames
                 for worker in (b"worker_left", b"worker_right", b"main"):
                     assert worker + (b" (" if interface == "cli" else b'"') in frames, frames
+                # 2026-09-09: Stack-name checks accepted captures without the
+                # lock values present in native bt. Require diagnostic inputs
+                # too; this case needs matching pthread debug information.
+                for lock in (b"first", b"second"):
+                    assert b"<" + lock + b">" in frames, frames
+                if interface == "cli":
+                    assert len(re.findall(rb"worker_(?:left|right) \(argument=0x0\)", frames)) == 2, frames
+                else:
+                    assert len(re.findall(rb'name="argument"[^}]*value="0x0"', frames)) == 2, frames
                 assert b"pthread_join" in output, output
             elif interface == "cli":
                 cost, output = commands(["run", "bt 8", "info locals", "info args"])
                 for name, value in (("observed", 42), ("input", 41)):
                     assert re.search(rb"(?m)^(?:\(gdb\) )*" + name.encode()
                                      + f" = {value}$".encode(), output), output
-                assert re.search(rb"(?m)^(?:\(gdb\) )*#0\s+.*\bcapture_value\s*\(", output), output
+                assert re.search(rb"(?m)^(?:\(gdb\) )*#0\s+.*\bcapture_value\s*\(input=41\)", output), output
                 assert re.search(rb"(?m)^(?:\(gdb\) )*#1\s+.*\bmain\s*\(", output), output
             else:
                 run, stopped = commands(["-exec-run"], stopped=True)
                 inspect, output = commands(["-stack-list-frames 0 7",
+                                            "-stack-list-arguments --simple-values 0 7",
                                             "-stack-list-variables --simple-values"])
                 cost = combined(run, inspect)
                 output = stopped + output
+                assert re.search(rb'stack-args=\[frame=\{level="0",args=\[\{name="input"[^}]*value="41"', output), output
                 for name, value in (("observed", 42), ("input", 41)):
                     assert re.search(f'name="{name}"[^}}]*value="{value}"'.encode(), output), output
                 for level, function in ((0, "capture_value"), (1, "main")):
@@ -229,10 +244,21 @@ def projected(server, gdb, program, state, mi, case):
                     stacks = [{frame["function"] for frame in thread["frames"]} for thread in threads]
                     for worker in ("worker_left", "worker_right", "main"):
                         assert sum(worker in stack for stack in stacks) == 1, response
+                    for worker, lock in (("worker_left", "second"), ("worker_right", "first")):
+                        thread = next(thread for thread in threads
+                                      if any(frame["function"] == worker for frame in thread["frames"]))
+                        frame = next(frame for frame in thread["frames"] if frame["function"] == worker)
+                        assert any(argument["name"] == "argument" and argument["value"] == "0x0"
+                                   for argument in frame.get("arguments", [])), response
+                        values = [argument["value"] for frame in thread["frames"]
+                                  for argument in frame.get("arguments", [])]
+                        assert any(isinstance(value, str) and f"<{lock}>" in value for value in values), response
                 else:
                     assert "SIGILL" in json.dumps(response["state"]), response
                     assert [frame["function"] for frame in observations["stack"]["frames"]] == [
                         "capture_value", "main"], response
+                    assert any(argument["name"] == "input" and argument["value"] == "41"
+                               for argument in observations["stack"]["frames"][0].get("arguments", [])), response
                     values = {item["name"]: item["value"] for item in observations["locals"]["variables"]}
                     assert values == {"observed": "42", "input": "41"}, response
                 cost["seconds"] = time.perf_counter() - capture_started
@@ -311,6 +337,7 @@ def main():
         summary.append(group)
     print(json.dumps({
         "conditions": "Fixed stop evidence; Linux x86-64; performance journal; "
+                      "thread case requires pthread debug information and both lock argument values; "
                       "cold includes process/session startup; reused restarts the same target; "
                       "discovery and teardown excluded; response bytes include CLI framing marker; "
                       "command counts cover stdin commands, excluding CLI framing and argv settings; "
