@@ -714,6 +714,17 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         }) {
             result.remove("state");
         }
+        let has_semantic_values = match method {
+            CanonicalMethod::ValueChildren => result.get("children").is_some_and(Value::is_array),
+            CanonicalMethod::ValueUpdate => result.get("changes").is_some_and(Value::is_array),
+            _ => false,
+        };
+        if has_semantic_values && result.get("result").is_some_and(is_command_reply) {
+            // 2026-09-08: Projected value-object reads exposed a nested MI
+            // reply even after the core supplied children and change facts.
+            // Detailed canonical responses retain the transport record.
+            result.remove("result");
+        }
         // 2026-08-31: Removing these fields by name also stripped explicit
         // capability discovery. Only serialized CommandReply values duplicate
         // promoted evidence; capability maps and string inventories are data.

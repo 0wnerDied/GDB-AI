@@ -33,6 +33,55 @@ export interface ApiResponse<T = unknown> {
   error?: { code: string; message: string; retryable: boolean; details?: unknown };
 }
 
+export type ValueStatus = "available" | "unavailable" | "invalid" | "unknown";
+
+export interface ValueChild {
+  path: string;
+  name?: string;
+  status: ValueStatus;
+  type?: unknown;
+  value?: unknown;
+  children_count?: number;
+  has_children?: boolean;
+  dynamic?: boolean;
+  display_hint?: string;
+  has_more?: boolean;
+}
+
+export interface ValueChange {
+  path: string;
+  value_id?: string;
+  status: ValueStatus;
+  type?: unknown;
+  value?: unknown;
+  type_changed?: boolean;
+  children_count?: number;
+  has_children?: boolean;
+  dynamic?: boolean;
+  display_hint?: string;
+  has_more?: boolean;
+  new_children?: ValueChild[];
+}
+
+export interface ValueChildrenResult {
+  value_id: string;
+  stop_id: string;
+  offset: number;
+  limit: number;
+  children: ValueChild[];
+  children_count: number | null;
+  has_more: boolean;
+  result?: unknown;
+  continuation: string | null;
+}
+
+export interface ValueUpdateResult {
+  value_id: string;
+  stop_id: string;
+  changes: ValueChange[];
+  result?: unknown;
+}
+
 // Projected tools omit healthy defaults and canonical coordination fields.
 // Keep their optional metadata distinct from the canonical response envelope.
 export type ToolResponse<T = unknown> = Partial<Pick<ApiResponse<T>,

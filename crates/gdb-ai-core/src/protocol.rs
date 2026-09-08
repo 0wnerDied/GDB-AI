@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, fmt, ops::Deref, str::FromStr};
 
-use crate::{Error, domain::SessionState};
+use crate::{
+    Error,
+    domain::{SessionState, ValueId},
+};
 
 pub const API_VERSION: &str = "gdb.ai/v1";
 
@@ -232,6 +235,63 @@ pub struct ApiResponse {
     pub evidence: Vec<Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueStatus {
+    Available,
+    Unavailable,
+    Invalid,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ValueChild {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub status: ValueStatus,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub children_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_children: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ValueChange {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_id: Option<ValueId>,
+    pub status: ValueStatus,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_changed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub children_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_children: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub new_children: Vec<ValueChild>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

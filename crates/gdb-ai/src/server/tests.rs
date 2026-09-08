@@ -323,6 +323,64 @@ fn current_stop_binding_matches_canonical_context() {
     }
 }
 
+#[test]
+fn projected_value_collections_keep_semantics_without_mi_records() {
+    for (method, field) in [
+        (CanonicalMethod::ValueChildren, "children"),
+        (CanonicalMethod::ValueUpdate, "changes"),
+    ] {
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "value-projection".into(),
+            session_id: Some("sess_test".into()),
+            method,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({}),
+        };
+        let facts = json!([
+            {"path": "value.count", "status": "available", "type": "uint64_t",
+             "value": "18446744073709551615"},
+            {"path": "value.bytes", "status": "available",
+             "value": {"encoding": "binary", "data_base64": "AP8="}},
+            {"path": "value.missing", "status": "unavailable"}
+        ]);
+        let mut payload = json!({
+            "stop_id": "stop_test", "value_id": "val_test",
+            "result": {"record": {}, "stream_records": [], "evidence_seq": 7},
+            "has_more": true, "continuation": "val_test:3"
+        });
+        payload[field] = facts.clone();
+        let result = tool_result(ApiResponse::success(&request, None, payload), method);
+        let projected = &result["structuredContent"]["result"];
+        assert_eq!(projected[field], facts);
+        assert!(projected.get("result").is_none());
+        assert_eq!(projected["has_more"], true);
+        assert_eq!(projected["continuation"], "val_test:3");
+    }
+
+    let request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "value-fallback".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::ValueUpdate,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let result = tool_result(
+        ApiResponse::success(
+            &request,
+            None,
+            json!({
+                "result": {"record": {}, "stream_records": [], "evidence_seq": 7}
+            }),
+        ),
+        CanonicalMethod::ValueUpdate,
+    );
+    assert!(result["structuredContent"]["result"]["result"].is_object());
+}
+
 #[tokio::test]
 async fn projected_tools_keep_control_without_lease_renewal() {
     if std::process::Command::new("gdb")

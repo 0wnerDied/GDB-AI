@@ -65,6 +65,10 @@ TypeScript therefore exports separate `ApiResponse<T>` and `ToolResponse<T>`
 types. Neither SDK reconstructs omitted fields or duplicates structured data
 as rendered MCP text.
 
+Both SDKs export `ValueChild`, `ValueChange`, and `ValueStatus` for semantic
+variable-object results. Values retain their debugger string or lossless
+binary representation; availability is separate from the value text.
+
 ## Canonical Python example
 
 This example assumes a noninteractive program with debug information at

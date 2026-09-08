@@ -59,6 +59,12 @@ observations. Turn items expose `view` plus the high-frequency `limit`,
 `roles`, and `profile` selectors; `inspection.batch` retains the complete
 selector set.
 
+Variable-object `value.children` returns semantic `children` and paging
+metadata; `value.update` returns semantic `changes`, including availability
+and type changes. Debugger values remain strings, or lossless binary objects,
+not floating-point JSON conversions. Canonical v1 results retain the legacy
+MI reply for compatibility; projected tools expose the semantic collections.
+
 Streamable HTTP supports two version-specific request paths over the same
 endpoint and canonical dispatcher. MCP `2025-11-25` stores the negotiated
 version in a transport session and requires it in

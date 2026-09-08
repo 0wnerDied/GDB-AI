@@ -5,13 +5,49 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 ProtocolVersion = Literal["2025-11-25", "2026-07-28"]
 MCP_VERSION: ProtocolVersion = "2025-11-25"
 STATELESS_MCP_VERSION: ProtocolVersion = "2026-07-28"
+
+ValueStatus = Literal["available", "unavailable", "invalid", "unknown"]
+
+
+class _ValueChildRequired(TypedDict):
+    path: str
+    status: ValueStatus
+
+
+class ValueChild(_ValueChildRequired, total=False):
+    name: str
+    type: Any
+    value: Any
+    children_count: int
+    has_children: bool
+    dynamic: bool
+    display_hint: str
+    has_more: bool
+
+
+class _ValueChangeRequired(TypedDict):
+    path: str
+    status: ValueStatus
+
+
+class ValueChange(_ValueChangeRequired, total=False):
+    value_id: str
+    type: Any
+    value: Any
+    type_changed: bool
+    children_count: int
+    has_children: bool
+    dynamic: bool
+    display_hint: str
+    has_more: bool
+    new_children: list[ValueChild]
 
 
 class ApiError(RuntimeError):
