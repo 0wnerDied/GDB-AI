@@ -467,6 +467,9 @@ it requires matching pthread debug information and rejects captures missing
 either lock value. These are fixed evidence checks, not proof of deadlock or
 complete diagnostic equivalence. The script reports raw samples and minimum,
 median, and maximum costs for startup, cold capture, and same-session restart.
+The projected signal case creates, launches, and inspects in one request;
+its bootstrap costs are included in cold capture, with no independently
+measured startup row. The thread case retains separate pending-breakpoint setup.
 Debugger command counts, stdin batches, and wire bytes are separate measures;
 discovery and teardown are excluded. CLI framing bytes are included, but
 framing commands and command-line startup settings are not counted as debugger

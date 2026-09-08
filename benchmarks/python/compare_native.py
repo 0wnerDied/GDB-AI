@@ -220,22 +220,26 @@ def projected(server, gdb, program, state, mi, case):
             return cost, response["result"]["structuredContent"]
 
         try:
-            startup, created = call("create")
-            session = created["result"]["session_id"]
+            startup = None
+            session = None
             if case == "threads":
+                startup, created = call("create")
+                session = created["result"]["session_id"]
                 breakpoint, _ = call("create", tool="gdb_breakpoints", session_id=session,
                                      function="pthread_join", pending=True)
                 startup = combined(startup, breakpoint)
-            startup["seconds"] = time.perf_counter() - started
+                startup["seconds"] = time.perf_counter() - started
             captures = []
             for action in ("launch", "restart"):
                 capture_started = time.perf_counter()
                 cost, response = call(
-                    action, session_id=session, stop="none",
+                    action, stop="none", **({"session_id": session} if session else {}),
                     inspect=([{"view": "threads", "stack_depth": 8}] if case == "threads" else
                              [{"view": "stack", "limit": 8}, {"view": "locals"}]),
                     **({"program": str(program)} if action == "launch" else {}),
                 )
+                if session is None:
+                    session = response["result"]["session"]["session_id"]
                 assert response["complete"] and response["context"]["stop_id"], response
                 observations = response["result"]["observations"]
                 if case == "threads":
@@ -283,13 +287,20 @@ def projected(server, gdb, program, state, mi, case):
             phase = "startup" if method in ("session.create", "breakpoint.create") else method
         elif entry["type"] == "mi.input":
             counts[phase] += 1
-    startup["debugger_commands"] = counts["startup"]
+    if startup is not None:
+        startup["debugger_commands"] = counts["startup"]
     for cost, phase in zip(captures, ("target.launch", "target.restart")):
         cost["debugger_commands"] = counts[phase]
         assert counts[phase] >= 3, counts
-    cold = combined(startup, captures[0])
+    # 2026-09-09: The signal workflow no longer needs a separate create.
+    # Charge its bootstrap commands to the fused cold call, never drop them
+    # or invent a separately measured zero-cost startup row.
+    if startup is None:
+        captures[0]["debugger_commands"] += counts["startup"]
+    cold = combined(startup, captures[0]) if startup is not None else captures[0].copy()
     cold["seconds"] = cold_seconds
-    return {"startup": startup, "cold": cold, "reused": captures[1]}
+    return {**({"startup": startup} if startup is not None else {}),
+            "cold": cold, "reused": captures[1]}
 
 
 def main():
@@ -341,7 +352,8 @@ def main():
                       "cold includes process/session startup; reused restarts the same target; "
                       "discovery and teardown excluded; response bytes include CLI framing marker; "
                       "command counts cover stdin commands, excluding CLI framing and argv settings; "
-                      "startup includes native file setup or projected session.create, plus thread-case breakpoints; "
+                      "startup rows measure separate native setup or projected thread-case setup; "
+                      "projected signal creation is fused into cold launch and has no separate startup row; "
                       "script batches are not Agent calls; bytes are not tokens",
         "mi": args.mi,
         "case": args.case,
