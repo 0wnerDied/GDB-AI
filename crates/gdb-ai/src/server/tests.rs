@@ -12,6 +12,50 @@ use gdb_ai_core::{
 use tempfile::tempdir;
 
 #[test]
+fn response_wrappers_transfer_owned_json_payloads() {
+    for failed in [false, true] {
+        let mut structured = json!({
+            "result": {"rows": [{"data": "payload".repeat(1024), "value": 42}]}
+        });
+        if failed {
+            structured["error"] = json!({"code": "TEST", "message": "capture failed"});
+        }
+        let original = structured.clone();
+        let data = structured["result"]["rows"][0]["data"]
+            .as_str()
+            .unwrap()
+            .as_ptr();
+        let tool = projected_tool_result(structured);
+        assert_eq!(tool["structuredContent"], original);
+        assert_eq!(tool["isError"], failed);
+        assert_eq!(
+            tool["content"].as_array().unwrap().len(),
+            usize::from(failed)
+        );
+        assert_eq!(
+            tool["structuredContent"]["result"]["rows"][0]["data"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            data,
+            "MCP wrapping must move the owned payload"
+        );
+        let rpc = rpc_result(json!(7), tool);
+        assert_eq!(rpc["id"], 7);
+        assert_eq!(rpc["jsonrpc"], "2.0");
+        assert_eq!(rpc["result"]["structuredContent"], original);
+        assert_eq!(
+            rpc["result"]["structuredContent"]["result"]["rows"][0]["data"]
+                .as_str()
+                .unwrap()
+                .as_ptr(),
+            data,
+            "JSON-RPC wrapping must move the owned payload"
+        );
+    }
+}
+
+#[test]
 fn native_projection_preserves_business_fields_and_typed_metadata() {
     let response: ApiResponse = serde_json::from_value(json!({
         "api_version": API_VERSION, "request_id": "native",

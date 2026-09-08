@@ -726,11 +726,12 @@ fn projected_tool_result(structured: Value) -> Value {
         .map(|text| json!({"type": "text", "text": text}))
         .into_iter()
         .collect::<Vec<_>>();
-    json!({
-        "content": content,
-        "structuredContent": structured,
-        "isError": is_error
-    })
+    // 2026-09-09: Serializing an owned Value into its envelope deep-copied
+    // every captured fact per reader. Transfer the payload without changing
+    // the wire format or the subsequent response-budget check.
+    let mut result = json!({"content": content, "isError": is_error});
+    result["structuredContent"] = structured;
+    result
 }
 
 // 2026-08-30: Repeating complete thread, breakpoint, module, and signal
@@ -1252,7 +1253,11 @@ fn core_fault(code: impl Into<String>, message: impl Into<String>) -> RpcFault {
 }
 
 fn rpc_result(id: Value, result: Value) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "result": result})
+    // 2026-09-09: JSON-RPC wrapping cloned the owned result again. Move it
+    // into the shared transport envelope without changing any facts.
+    let mut response = json!({"jsonrpc": "2.0", "id": id});
+    response["result"] = result;
+    response
 }
 
 fn rpc_fault(id: Value, fault: RpcFault) -> Value {
