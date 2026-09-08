@@ -76,6 +76,7 @@ where
     let mut input_open = true;
     let (responses, mut response_rx) = mpsc::channel::<RpcOutput>(128);
     let mut input = BufReader::new(input);
+    let mut line_buffer = Vec::new();
 
     loop {
         // 2026-08-28: EOF ends input, not pending work. Drain completed RPC
@@ -84,7 +85,7 @@ where
             break;
         }
         tokio::select! {
-            line = read_line_bounded(&mut input, MAX_MESSAGE_BYTES), if input_open => {
+            line = read_line_bounded(&mut input, &mut line_buffer, MAX_MESSAGE_BYTES), if input_open => {
                 let Some(line) = line? else {
                     input_open = false;
                     continue;
@@ -454,16 +455,52 @@ mod tests {
     #[tokio::test]
     async fn bounds_stdio_messages() {
         let mut input = BufReader::new(&b"{\"ok\":true}\r\nnext\n"[..]);
+        let mut line_buffer = Vec::new();
         assert_eq!(
-            read_line_bounded(&mut input, 32).await.unwrap().unwrap(),
+            read_line_bounded(&mut input, &mut line_buffer, 32)
+                .await
+                .unwrap()
+                .unwrap(),
             b"{\"ok\":true}"
         );
         assert_eq!(
-            read_line_bounded(&mut input, 32).await.unwrap().unwrap(),
+            read_line_bounded(&mut input, &mut line_buffer, 32)
+                .await
+                .unwrap()
+                .unwrap(),
             b"next"
         );
         let mut oversized = BufReader::new(&b"12345\n"[..]);
-        assert!(read_line_bounded(&mut oversized, 4).await.is_err());
+        assert!(
+            read_line_bounded(&mut oversized, &mut line_buffer, 4)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn fragmented_messages_survive_response_interleaving() {
+        let message = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+        for maximum in [message.len(), message.len() - 1] {
+            let (mut writer, reader) = tokio::io::duplex(message.len());
+            let mut input = BufReader::new(reader);
+            let mut line_buffer = Vec::new();
+            writer.write_all(&message[..20]).await.unwrap();
+            tokio::select! {
+                biased;
+                result = read_line_bounded(&mut input, &mut line_buffer, maximum) => {
+                    panic!("incomplete request finished: {result:?}");
+                }
+                _ = std::future::ready(()) => {}
+            }
+            writer.write_all(&message[20..]).await.unwrap();
+            let result = read_line_bounded(&mut input, &mut line_buffer, maximum).await;
+            if maximum == message.len() {
+                assert_eq!(result.unwrap().unwrap(), &message[..message.len() - 1]);
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            }
+        }
     }
 
     #[tokio::test]

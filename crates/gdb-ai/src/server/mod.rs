@@ -1287,15 +1287,17 @@ fn request_key(id: &Value) -> String {
     serde_json::to_string(id).unwrap_or_default()
 }
 
+// 2026-09-08: A response can cancel a partial read in select!. Keep consumed
+// bytes with the caller so the next read preserves framing and the size limit.
 pub(super) async fn read_line_bounded<R: AsyncBufRead + Unpin>(
     reader: &mut R,
+    line: &mut Vec<u8>,
     maximum: usize,
 ) -> io::Result<Option<Vec<u8>>> {
-    let mut line = Vec::new();
     loop {
         let buffer = reader.fill_buf().await?;
         if buffer.is_empty() {
-            return Ok((!line.is_empty()).then_some(line));
+            return Ok((!line.is_empty()).then_some(std::mem::take(line)));
         }
         let newline = buffer.iter().position(|byte| *byte == b'\n');
         let consumed = newline.map_or(buffer.len(), |index| index + 1);
@@ -1312,7 +1314,7 @@ pub(super) async fn read_line_bounded<R: AsyncBufRead + Unpin>(
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            return Ok(Some(line));
+            return Ok(Some(std::mem::take(line)));
         }
     }
 }

@@ -433,7 +433,7 @@ async fn read_json_line<R>(input: &mut R) -> Result<Value, AnyError>
 where
     R: AsyncBufRead + Unpin,
 {
-    let line = read_line_bounded(input, MAX_MESSAGE_BYTES)
+    let line = read_line_bounded(input, &mut Vec::new(), MAX_MESSAGE_BYTES)
         .await?
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "server closed connection"))?;
     Ok(serde_json::from_slice(&line)?)
