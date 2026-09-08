@@ -438,8 +438,29 @@ sessions from multiple clients sharing one session.
 | Race localization | Repeated trials, scheduling conditions, and evidence linking the observation to the root cause |
 
 Record exact versions and trial conditions, vary execution order, and report
-variation or uncertainty alongside aggregate results. The
-[evaluation utility](benchmarks/python/evaluate.py) summarizes supplied JSONL
+variation or uncertainty alongside aggregate results. For fixed native stop
+cost checks on Linux x86-64, run:
+
+```sh
+cargo build --locked --release -p gdb-ai
+python3 benchmarks/python/compare_native.py target/release/gdb-ai
+python3 benchmarks/python/compare_native.py target/release/gdb-ai --case threads
+```
+
+This dependency-free script rotates CLI, MI, and projected MCP execution
+order, using the same GDB and MI version in both MI-backed arms. It defaults
+to MI4; use `--mi mi3` or `--mi mi2` with older GDB releases.
+The signal case checks stack and variable values in a generated signal-only
+fixture; the thread case checks three stacks, including both named workers
+in the existing lock-order fixture, at `pthread_join`. It does not infer
+deadlock from that stop alone. The script reports raw samples and minimum,
+median, and maximum costs for startup, cold capture, and same-session restart.
+Debugger command counts, stdin batches, and wire bytes are separate measures;
+discovery and teardown are excluded. CLI framing bytes are included, but
+framing commands and command-line startup settings are not counted as debugger
+commands. This is not an Agent trial or a diagnosis-success benchmark.
+
+The [evaluation utility](benchmarks/python/evaluate.py) summarizes supplied JSONL
 metrics by variant. Its [example input](benchmarks/python/example.jsonl)
 illustrates the format; it is not an empirical result or a speedup claim.
 
