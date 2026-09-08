@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::{
     context::observation_context,
     encoding::parse_address,
-    values::{result_value, value_status},
+    values::{result_bool, result_value, value_status},
 };
 use crate::{
     Error, ErrorCode, Result,
@@ -107,13 +107,18 @@ fn normalized_variable(fields: &[MiResult]) -> Value {
     // 2026-09-08: Locals silently truncated long strings and dropped binary
     // values. Share value-object availability and lossless byte semantics;
     // the ordinary response budget owns paging/artifact fallback.
-    json!({
+    let mut variable = json!({
         "name": result_value(fields, "name"),
         "type": result_value(fields, "type"),
         "value": result_value(fields, "value"),
-        "status": value_status(fields),
-        "dynamic": MiResult::find_str(fields, "dynamic") == Some("1")
-    })
+        "status": value_status(fields)
+    });
+    // 2026-09-09: Missing MI flags became invented false facts on every
+    // local and frame argument. Preserve only debugger-reported booleans.
+    if let Some(dynamic) = result_bool(fields, "dynamic") {
+        variable["dynamic"] = Value::Bool(dynamic);
+    }
+    variable
 }
 
 pub(super) fn normalized_variables(record: &MiRecord, name: &str) -> Vec<Value> {
@@ -452,7 +457,7 @@ mod tests {
     #[test]
     fn locals_and_arguments_share_lossless_value_semantics() {
         let record = gdb_ai_mi::parse_record(
-            br#"1^done,variables=[{name="wide",type="unsigned long",value="18446744073709551615"},{name="bytes",value="\377"},{name="aggregate",type="struct pair"}],stack-args=[frame={level="0",args=[{name="bytes",value="\377"}]}]"#,
+            br#"1^done,variables=[{name="wide",type="unsigned long",value="18446744073709551615"},{name="bytes",value="\377",dynamic="1"},{name="aggregate",type="struct pair",dynamic="0"}],stack-args=[frame={level="0",args=[{name="bytes",value="\377",dynamic="1"}]}]"#,
             gdb_ai_mi::MiLimits::default(),
         ).unwrap();
         let locals = super::normalized_variables(&record, "variables");
@@ -460,6 +465,9 @@ mod tests {
         assert_eq!(locals[1]["value"]["data_base64"], "/w==");
         assert_eq!(locals[1]["status"], "available");
         assert_eq!(locals[2]["status"], "not_collected");
+        assert!(locals[0].get("dynamic").is_none());
+        assert_eq!(locals[1]["dynamic"], true);
+        assert_eq!(locals[2]["dynamic"], false);
         assert_eq!(
             super::normalized_arguments(&record)[0]["arguments"][0],
             locals[1]

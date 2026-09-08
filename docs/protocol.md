@@ -174,6 +174,8 @@ conflicting selectors. Locals, arguments, and tracked expressions use the same
 value representation. Debugger values remain strings or lossless binary
 objects, not floating-point JSON conversions. Canonical v1 results retain the
 legacy MI reply for compatibility; projected tools expose the semantic collections.
+Locals and frame arguments omit `dynamic` when GDB supplies no flag; explicit
+true and false values are retained.
 
 Streamable HTTP supports two version-specific request paths over the same
 endpoint and canonical dispatcher. MCP `2025-11-25` stores the negotiated

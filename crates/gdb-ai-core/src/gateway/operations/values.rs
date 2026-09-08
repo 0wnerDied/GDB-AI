@@ -31,7 +31,7 @@ pub(super) fn result_value(results: &[MiResult], name: &str) -> Option<Value> {
     }
 }
 
-fn result_bool(results: &[MiResult], name: &str) -> Option<bool> {
+pub(super) fn result_bool(results: &[MiResult], name: &str) -> Option<bool> {
     match MiResult::find_str(results, name)? {
         "1" | "true" => Some(true),
         "0" | "false" => Some(false),
