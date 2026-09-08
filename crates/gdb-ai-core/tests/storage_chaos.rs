@@ -119,10 +119,13 @@ async fn persistence_failures_preserve_debugging_unless_durability_is_required()
             )
             .await;
             assert!(fresh.error.is_none(), "{:?}", fresh.error);
-            let fresh_snapshot_id = fresh.result.unwrap()["snapshot_id"]
-                .as_str()
+            let fresh_snapshot_id = fresh
+                .semantics
                 .unwrap()
-                .to_owned();
+                .context
+                .unwrap()
+                .observation_id
+                .unwrap();
             let fresh_lookup = call(
                 session,
                 "inspection.snapshot_get",
@@ -130,7 +133,7 @@ async fn persistence_failures_preserve_debugging_unless_durability_is_required()
             )
             .await;
             assert!(fresh_lookup.error.is_none(), "{:?}", fresh_lookup.error);
-            assert_eq!(fresh_lookup.result.unwrap()["historical"], true);
+            assert!(fresh_lookup.semantics.unwrap().historical);
         }
         let snapshot_id = current.snapshot.as_ref().unwrap().snapshot_id.clone();
         let snapshot = call(

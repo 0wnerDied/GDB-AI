@@ -838,6 +838,47 @@ impl ApiResponse {
         };
         if detailed {
             project_diagnostics(&mut facts, &diagnostics);
+        } else if let (Some(context), Some(facts)) =
+            (&metadata.semantics.context, facts.as_object_mut())
+        {
+            // 2026-09-09: Agent replies repeated promoted capture identity
+            // and completeness. Remove only equal root aliases at delivery;
+            // composed facts and retained observations keep their own IDs.
+            for (field, value) in [
+                ("stop_id", json!(context.stop_id)),
+                ("observation_id", json!(context.observation_id)),
+                ("snapshot_id", json!(context.observation_id)),
+                ("revision", json!(context.captured_revision)),
+                ("execution_epoch", json!(context.execution_epoch)),
+                ("complete", json!(metadata.semantics.complete)),
+                ("observation_complete", json!(metadata.semantics.complete)),
+                ("partial", json!(!metadata.semantics.complete)),
+                ("historical", json!(metadata.semantics.historical)),
+            ] {
+                if facts.get(field) == Some(&value) {
+                    facts.remove(field);
+                }
+            }
+            if metadata.semantics.complete {
+                for (availability, captured) in [
+                    ("availability", "results"),
+                    ("observation_availability", "observations"),
+                ] {
+                    let repeated = facts
+                        .get(availability)
+                        .and_then(Value::as_object)
+                        .zip(facts.get(captured).and_then(Value::as_object))
+                        .is_some_and(|(availability, captured)| {
+                            availability.len() == captured.len()
+                                && availability.iter().all(|(name, status)| {
+                                    status == "captured" && captured.contains_key(name)
+                                })
+                        });
+                    if repeated {
+                        facts.remove(availability);
+                    }
+                }
+            }
         }
         Self {
             api_version: API_VERSION.into(),
@@ -1304,12 +1345,13 @@ mod tests {
             results: BTreeMap::from([(
                 "context".into(),
                 json!({
-                    "frames": [], "evidence": "target evidence", "observation_context": "target context"
+                    "frames": [], "evidence": "target evidence", "observation_context": "target context",
+                    "stop_id": "stop_test", "observation_id": "obs_nested", "partial": false
                 }),
             )]),
             failures: BTreeMap::new(),
             complete: true,
-            availability: BTreeMap::new(),
+            availability: BTreeMap::from([("context".into(), FactAvailability::Captured)]),
             warnings: Vec::new(),
             evidence: vec![Evidence {
                 kind: "journal-entry".into(),
@@ -1328,11 +1370,50 @@ mod tests {
         );
         let result = observation.clone().into_batch_result();
         let detailed = result.clone().into_value(true);
-        let compact = result.into_value(false);
+        let compact = result.clone().into_value(false);
         assert_eq!(detailed["observation_context"], json!(observation.context));
         assert_eq!(detailed["evidence"], json!(observation.evidence));
         assert!(compact.get("observation_context").is_none());
         assert!(compact.get("evidence").is_none());
         assert_eq!(compact["results"], json!(observation.results));
+
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "compact-observation".into(),
+            session_id: Some("sess_test".into()),
+            method: CanonicalMethod::InspectionBatch,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({}),
+        };
+        let detailed_response = ApiResponse::semantic_success(&request, None, result.clone(), true);
+        let response = ApiResponse::semantic_success(&request, None, result.clone(), false);
+        assert_eq!(detailed_response.result, Some(detailed));
+        let facts = response.result.unwrap();
+        for field in [
+            "observation_id",
+            "stop_id",
+            "revision",
+            "execution_epoch",
+            "complete",
+            "partial",
+            "availability",
+        ] {
+            assert!(facts.get(field).is_none(), "duplicate field: {field}");
+        }
+        assert_eq!(facts["results"], json!(observation.results));
+        assert_eq!(
+            response.semantics.unwrap().context,
+            Some(observation.context)
+        );
+
+        let mut partial = result;
+        partial.metadata.semantics.complete = false;
+        partial.facts["observation_complete"] = json!(true);
+        let response = ApiResponse::semantic_success(&request, None, partial, false);
+        assert!(!response.semantics.unwrap().complete);
+        let facts = response.result.unwrap();
+        assert_eq!(facts["observation_complete"], true);
+        assert_eq!(facts["availability"]["context"], "captured");
     }
 }

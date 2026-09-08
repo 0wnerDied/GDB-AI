@@ -102,6 +102,11 @@ available inferior/thread/frame identity through `semantics.context` in the
 canonical envelope or top-level `context` in MCP. Canonical detailed results
 also retain inline context and evidence copies; compact results expose those
 once in the envelope, without changing nested target values or stored captures.
+At final delivery, compact results also omit root identity, revision, epoch,
+and completeness aliases equal to their envelope values. Read the observation
+ID from `context.observation_id` and completeness from top-level `complete`.
+Nested observations retain their separate identities; differing values are
+not removed.
 Crash views preserve their committed snapshot context and observation ID in
 the envelope; later session revisions do not replace that capture identity.
 This reflects the requested parent selection, or the default stopped focus.
@@ -110,14 +115,19 @@ retain explicit per-item context overrides in `selection`, and
 single-expression results include `expression`.
 An item's explicit selection replaces the parent selection as a unit, so a
 new thread never inherits a frame belonging to the parent's thread.
-Batch results contain `results`, keyed `failures`, and `complete`; run results
-use `observations`, `observation_failures`, and `observation_complete`.
+Canonical batch results contain `results`, keyed `failures`, and `complete`;
+run results use `observations`, `observation_failures`, and `observation_complete`.
+Compact results retain `observation_complete` when it differs from the whole
+turn's completeness, such as successful inspection after missing output.
 If the target exits before inspection, execution still succeeds but returns
 `observation_status: "not_collected"` and incomplete observation semantics.
 Missing output bytes also keep the turn incomplete even if inspection succeeds.
 Availability maps distinguish `captured`, `not_collected`, `unavailable`,
 and `failed`. `captured` means the read returned facts; value-level status and
 pagination still describe individual fields and omitted pages.
+For complete projected captures, an all-`captured` map is omitted when its
+keys exactly match the returned observation collection. Other availability
+maps remain explicit.
 Independent read failures keep successful siblings. A changed stop/epoch,
 cancellation, or deadline invalidates the composite observation instead of
 returning mixed evidence. Register names and context resolution are reused

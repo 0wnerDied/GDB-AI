@@ -121,21 +121,23 @@ async function projected(client, program) {
     assert.equal(status.stop_id, restarted.state.stop_id);
     await assert.rejects(call("gdb_inspect", { view: "stack", stop_id: "stale" }),
       (error) => error instanceof ApiError && error.code === "STALE_CONTEXT" && error.response.revision === undefined);
-    const captured = (await call("gdb_batch", { requests: [
+    const captureResponse = await call("gdb_batch", { requests: [
       { view: "registers", roles: ["pc", "sp"] },
       { view: "evaluate", expression: "$pc" },
       { name: "missing", view: "evaluate", expression: "gdb_ai_missing_sdk_symbol" },
-    ] })).result;
-    assert.equal(captured.complete, false);
+    ] });
+    assert.equal(captureResponse.complete, false);
+    const captured = captureResponse.result;
     assert.equal(captured.failures.missing.code, "GDB_ERROR");
     assert.equal(captured.availability.missing, "failed");
     assert.equal(captured.results.evaluate.status, "available");
     assert.equal(captured.results.evaluate.command, undefined);
     assert.equal(captured.failures.missing.details?.record, undefined);
-    lookup = { session_id: sessionId, view: "observation", snapshot_id: captured.observation_id };
-    shared = (await observer.callTool("gdb_inspect", lookup)).result;
-    assert.equal(shared.historical, true);
-    assert.equal(shared.observation_id, captured.observation_id);
+    lookup = { session_id: sessionId, view: "observation", snapshot_id: captureResponse.context.observation_id };
+    const sharedResponse = await observer.callTool("gdb_inspect", lookup);
+    assert.equal(sharedResponse.historical, true);
+    assert.equal(sharedResponse.context.observation_id, captureResponse.context.observation_id);
+    shared = sharedResponse.result;
     assert.deepEqual(shared.results.evaluate, captured.results.evaluate);
     assert.deepEqual(shared.failures, captured.failures);
     const peerStatus = await observer.callTool("gdb_session", { action: "status", session_id: sessionId });

@@ -121,21 +121,24 @@ def projected(client, program):
             assert "revision" not in error.response, error.response
         else:
             raise AssertionError("stale projected stop was accepted")
-        captured = call("gdb_batch", requests=[
+        capture_response = call("gdb_batch", requests=[
             {"view": "registers", "roles": ["pc", "sp"]},
             {"view": "evaluate", "expression": "$pc"},
             {"name": "missing", "view": "evaluate", "expression": "gdb_ai_missing_sdk_symbol"},
-        ])["result"]
-        assert not captured["complete"], captured
+        ])
+        assert not capture_response["complete"], capture_response
+        captured = capture_response["result"]
         assert captured["failures"]["missing"]["code"] == "GDB_ERROR", captured
         assert captured["availability"]["missing"] == "failed", captured
         assert captured["results"]["evaluate"]["status"] == "available", captured
         assert "command" not in captured["results"]["evaluate"], captured
         assert "record" not in captured["failures"]["missing"].get("details", {}), captured
-        observation_id = captured["observation_id"]
+        observation_id = capture_response["context"]["observation_id"]
         lookup = {"session_id": session_id, "view": "observation", "snapshot_id": observation_id}
-        shared = observer.call_tool("gdb_inspect", lookup)["result"]
-        assert shared["historical"] and shared["observation_id"] == observation_id, shared
+        shared_response = observer.call_tool("gdb_inspect", lookup)
+        assert shared_response["historical"], shared_response
+        assert shared_response["context"]["observation_id"] == observation_id, shared_response
+        shared = shared_response["result"]
         assert shared["results"]["evaluate"] == captured["results"]["evaluate"], shared
         assert shared["failures"] == captured["failures"], shared
         peer_status = observer.call_tool("gdb_session", {"action": "status", "session_id": session_id})

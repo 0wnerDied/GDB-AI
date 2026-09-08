@@ -372,7 +372,7 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
                         Some(&session_id),
                         "inspection.snapshot_get",
                         None,
-                        json!({"snapshot_id": capture["observation_id"]}),
+                        json!({"snapshot_id": semantics.context.as_ref().unwrap().observation_id}),
                     ),
                     &Caller::local("observation-test/mcp:crash-observer"),
                 )
@@ -706,11 +706,14 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     let custom = successful(gateway.dispatch_agent(request(
         "custom-snapshot", Some(&session_id), "inspection.snapshot", None,
         json!({"stop_id": second_stop, "inspect": [{"view": "registers", "roles": ["pc"]}]})
-    ), &caller).await).result.unwrap();
+    ), &caller).await);
+    assert!(custom.semantics.as_ref().unwrap().complete);
+    let custom = custom.result.unwrap();
     assert_eq!(custom["profile"], "custom");
     assert_eq!(custom["availability"]["stack"], "not_collected");
     assert_eq!(custom["availability"]["tracked"], "not_collected");
-    assert_eq!(custom["observation_availability"]["registers"], "captured");
+    assert!(custom.get("observation_availability").is_none());
+    assert!(custom["observations"]["registers"]["roles"]["pc"].is_string());
     assert_eq!(
         metric_value(&gateway.metrics(), "gdbai_commands_total") - custom_before,
         2
@@ -1013,7 +1016,7 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     assert_ne!(restart_context.stop_id.0, second_stop);
     let restart_result = restarted.result.as_ref().unwrap();
     assert!(restart_result.get("observation_context").is_none());
-    assert_eq!(restart_result["stop_id"], restart_context.stop_id.0);
+    assert!(restart_result.get("stop_id").is_none());
     assert_eq!(
         restart_result["observations"]["stack"]["frames"][0]["function"],
         "main"

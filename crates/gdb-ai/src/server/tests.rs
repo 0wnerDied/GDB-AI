@@ -594,7 +594,7 @@ async fn projected_tools_keep_control_without_lease_renewal() {
     .unwrap();
     assert_eq!(observed["isError"], false);
     assert!(
-        observed["structuredContent"]["result"]["stop_id"]
+        observed["structuredContent"]["context"]["stop_id"]
             .as_str()
             .is_some()
     );
@@ -617,7 +617,7 @@ async fn projected_tools_keep_control_without_lease_renewal() {
         &sequence,
         json!({"name": "gdb_inspect", "arguments": {
             "session_id": session_id, "view": "observation",
-            "snapshot_id": snapshot["structuredContent"]["result"]["observation_id"]
+            "snapshot_id": snapshot["structuredContent"]["context"]["observation_id"]
         }}),
     )
     .await
@@ -692,7 +692,11 @@ async fn projected_tools_keep_control_without_lease_renewal() {
     .unwrap();
     assert_eq!(turned["isError"], false);
     let result = &turned["structuredContent"]["result"];
-    assert!(result["stop_id"].as_str().is_some());
+    assert!(
+        turned["structuredContent"]["context"]["stop_id"]
+            .as_str()
+            .is_some()
+    );
     assert!(result["observations"]["registers"].is_object());
     assert!(result["observations"]["registers"].get("stop_id").is_none());
     assert!(result.get("operation_id").is_none());
@@ -735,15 +739,17 @@ async fn projected_tools_keep_control_without_lease_renewal() {
     for (name, response) in samples {
         let response = &response["structuredContent"];
         assert!(response["context"].is_object());
-        assert_eq!(
-            response["context"]["observation_id"],
-            response["result"]["observation_id"]
-        );
+        assert!(response["context"]["observation_id"].as_str().is_some());
         for field in [
             "context",
             "observation_context",
             "evidence",
             "observation_evidence",
+            "stop_id",
+            "observation_id",
+            "complete",
+            "observation_complete",
+            "partial",
         ] {
             assert!(
                 response["result"].get(field).is_none(),

@@ -184,7 +184,9 @@ and `controller`. The current controller can call `gdb_session` action
 `handoff` with `to` equal to the recipient's exact `caller_identity`.
 Keep projected sessions on `call_tool` / `callTool` after handoff.
 
-Run inspections, batches, and snapshots return `observation_id`. An authorized
+Projected run inspections, batches, and snapshots return the capture ID in
+`context.observation_id` and completeness in top-level `complete`; matching
+copies are omitted from `result`. An authorized
 worker can retrieve the same capture using `gdb_inspect` with
 `view: "observation"` and `snapshot_id` set to that ID. The response is
 historical, including at the same stop, and remains unchanged after resume
