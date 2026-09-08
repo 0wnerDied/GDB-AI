@@ -31,15 +31,6 @@ impl Gateway {
         caller: &Caller,
         mode: RequestMode,
     ) -> Result<OperationResult> {
-        if request.method == CanonicalMethod::InspectionGet
-            && request
-                .parameters
-                .get("view")
-                .and_then(serde_json::Value::as_str)
-                == Some("evaluate")
-        {
-            return self.value_evaluate(request).await.map(Into::into);
-        }
         let result = match request.method {
             CanonicalMethod::SessionCreate => self.session_create(request, caller, mode).await,
             CanonicalMethod::SessionGet => self.session_get(request, caller).await,
@@ -86,7 +77,9 @@ impl Gateway {
             CanonicalMethod::BreakpointUpdate => self.breakpoint_update(request).await,
             CanonicalMethod::BreakpointDelete => self.breakpoint_delete(request).await,
             CanonicalMethod::BreakpointList => self.breakpoint_list(request).await,
-            CanonicalMethod::InspectionGet => self.inspection_get(request).await,
+            CanonicalMethod::InspectionGet => {
+                return self.inspection_result(request).await.map(Into::into);
+            }
             CanonicalMethod::InspectionSnapshot => {
                 return self.inspection_snapshot(request).await.map(Into::into);
             }
@@ -140,8 +133,7 @@ impl Gateway {
         }?;
         if !matches!(
             request.method,
-            CanonicalMethod::InspectionGet
-                | CanonicalMethod::InspectionDiff
+            CanonicalMethod::InspectionDiff
                 | CanonicalMethod::InspectionSnapshotGet
                 | CanonicalMethod::MemoryRead
                 | CanonicalMethod::MemorySearch
@@ -163,15 +155,6 @@ impl Gateway {
                 .with_state(|state| context::observation_context(&request.parameters, state))?
         };
         let mut result = SemanticResult::read(result, context, session_id);
-        if request.method == CanonicalMethod::InspectionGet
-            && request
-                .parameters
-                .get("view")
-                .and_then(serde_json::Value::as_str)
-                == Some("source")
-        {
-            result.metadata.semantics.complete = true;
-        }
         if request.method == CanonicalMethod::InspectionSnapshotGet {
             for field in ["failures", "observation_failures"] {
                 if let Some(failures) = result.facts.get(field) {

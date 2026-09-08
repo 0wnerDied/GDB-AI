@@ -99,6 +99,8 @@ its result is explicitly historical and preserves both observation IDs.
 
 Composite results include `observation_context` with the captured stop,
 execution epoch, revision, and available inferior/thread/frame identity.
+Crash views preserve their committed snapshot context and observation ID in
+the envelope; later session revisions do not replace that capture identity.
 This reflects the requested parent selection, or the default stopped focus.
 Contradictory inferior, thread, and frame selectors are rejected. Results
 retain explicit per-item context overrides in `selection`, and

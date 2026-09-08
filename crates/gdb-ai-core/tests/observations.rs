@@ -339,6 +339,46 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     );
     assert_eq!(unchanged.result.unwrap()["changes"], json!({}));
 
+    for agent in [false, true] {
+        let crash_request = request(
+            "crash-context",
+            Some(&session_id),
+            "inspection.get",
+            None,
+            json!({"view": "crash", "stop_id": second_stop, "profile": "minimal"}),
+        );
+        let crash = successful(if agent {
+            gateway.dispatch_agent(crash_request, &caller).await
+        } else {
+            gateway.dispatch(crash_request, &caller).await
+        });
+        let semantics = crash.semantics.as_ref().unwrap();
+        let capture = crash.result.as_ref().unwrap();
+        assert_eq!(json!(semantics.context), capture["observation_context"]);
+        assert!(!semantics.complete);
+        assert!(!crash.warnings.is_empty());
+        assert_eq!(json!(crash.evidence), capture["evidence"]);
+        let retained = successful(
+            gateway
+                .dispatch_agent(
+                    request(
+                        "shared-crash",
+                        Some(&session_id),
+                        "inspection.snapshot_get",
+                        None,
+                        json!({"snapshot_id": capture["observation_id"]}),
+                    ),
+                    &Caller::local("observation-test/mcp:crash-observer"),
+                )
+                .await,
+        );
+        assert_eq!(
+            retained.semantics.as_ref().unwrap().context,
+            semantics.context
+        );
+        assert_eq!(retained.result.as_ref().unwrap()["stack"], capture["stack"]);
+    }
+
     let tracked_capture = successful(
         gateway
             .dispatch(

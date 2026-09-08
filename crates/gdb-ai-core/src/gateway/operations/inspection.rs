@@ -34,7 +34,8 @@ use crate::{
     domain::{DomainEvent, SessionId, StopId, TrackingDefinition},
     gateway::{Gateway, SessionEntry},
     protocol::{
-        ApiError, ApiRequest, FactAvailability, ObservationResult, SemanticResult, result_evidence,
+        ApiError, ApiRequest, FactAvailability, ObservationContext, ObservationResult,
+        SemanticResult, result_evidence,
     },
     providers::mappings,
     session::CommandReply,
@@ -72,6 +73,43 @@ fn thread_facts(stop_id: Option<&StopId>, threads: Vec<Value>, evidence_seq: u64
 }
 
 impl Gateway {
+    pub(super) async fn inspection_result(&self, request: &ApiRequest) -> Result<SemanticResult> {
+        let view = string(&request.parameters, "view")?;
+        if view == "evaluate" {
+            return self.value_evaluate(request).await;
+        }
+        if view == "crash" {
+            // 2026-09-08: Rewrapping snapshot JSON replaced its capture ID and
+            // revision with current state. Keep the original typed metadata
+            // and diagnostics through standalone and composed crash views.
+            let mut result = self.inspection_snapshot(request).await?;
+            let entry = self.entry(required_session(request)?).await?;
+            result.facts["crash_signature"] =
+                Value::String(crate::providers::crash_signature(&entry.handle.state()));
+            result.facts["source"] = json!({
+                "provider": "userland-security",
+                "version": "1.0.0",
+                "mechanism": "bounded-stop-snapshot"
+            });
+            return Ok(result);
+        }
+        let facts = self.inspection_get(request).await?;
+        let session_id = required_session(request)?;
+        let context = if facts.get("historical") == Some(&Value::Bool(true)) {
+            ObservationContext::from_observation(&facts)?
+        } else {
+            self.entry(session_id)
+                .await?
+                .handle
+                .with_state(|state| observation_context(&request.parameters, state))?
+        };
+        let mut result = SemanticResult::read(facts, context, session_id);
+        if view == "source" {
+            result.metadata.semantics.complete = true;
+        }
+        Ok(result)
+    }
+
     pub(super) async fn inspection_get(&self, request: &ApiRequest) -> Result<Value> {
         let view = string(&request.parameters, "view")?;
         let entry = self.entry(required_session(request)?).await?;
@@ -103,17 +141,6 @@ impl Gateway {
             "target" => Ok(serde_json::to_value(entry.handle.state())?),
             "capabilities" => Ok(serde_json::to_value(entry.handle.capabilities())?),
             "providers" => self.session_providers(request).await,
-            "crash" => {
-                let mut snapshot = self.inspection_snapshot(request).await?.into_value(true);
-                snapshot["crash_signature"] =
-                    Value::String(crate::providers::crash_signature(&entry.handle.state()));
-                snapshot["source"] = json!({
-                    "provider": "userland-security",
-                    "version": "1.0.0",
-                    "mechanism": "bounded-stop-snapshot"
-                });
-                Ok(snapshot)
-            }
             "threads" => self.inspection_threads(&entry, request).await,
             "stack" => {
                 let state = entry.handle.state();
@@ -288,10 +315,6 @@ impl Gateway {
                     .handle
                     .with_state(|state| state.signal_policies.clone()),
             )?),
-            "evaluate" => self
-                .value_evaluate(request)
-                .await
-                .map(|result| result.into_value(true)),
             "memory" => self.observation_memory_read(request).await,
             "disassembly" => self.disassembly_read(request).await,
             "tracked" => self.inspection_tracking(&entry, request).await,
@@ -908,15 +931,16 @@ impl Gateway {
     ) -> Pin<Box<dyn Future<Output = Result<SemanticResult>> + Send + 'a>> {
         Box::pin(async move {
             let subrequest = request.subrequest(parent);
-            if request.kind() == ObservationKind::Evaluate {
-                return self.value_evaluate(&subrequest).await;
+            match request.kind() {
+                ObservationKind::Inspection => return self.inspection_result(&subrequest).await,
+                ObservationKind::Evaluate => return self.value_evaluate(&subrequest).await,
+                _ => {}
             }
             let context = entry
                 .handle
                 .with_state(|state| observation_context(&subrequest.parameters, state))?;
             let result = match request.kind() {
-                ObservationKind::Inspection => self.inspection_get(&subrequest).await,
-                ObservationKind::Evaluate => unreachable!(),
+                ObservationKind::Inspection | ObservationKind::Evaluate => unreachable!(),
                 ObservationKind::Memory => {
                     self.observation_memory_read_with_entry(entry, &subrequest)
                         .await
