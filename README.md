@@ -397,6 +397,22 @@ variation or uncertainty alongside aggregate results. The
 metrics by variant. Its [example input](benchmarks/python/example.jsonl)
 illustrates the format; it is not an empirical result or a speedup claim.
 
+```sh
+python3 benchmarks/python/evaluate.py benchmarks/python/example.jsonl
+python3 -m unittest discover -s benchmarks/python
+```
+
+`resolved` and `root_cause_localized` accept booleans or numeric `0`/`1` and
+report `successes`, observed `total`, `missing`, and `rate` (0–1). For example,
+`1,1,0` yields two successes in three trials and a rate of `0.666…`.
+Costs and per-trial rate metrics report `count`, `missing`, `median`, and
+`p90`, using linear interpolation between observed samples (inclusive
+quantiles); a single sample supplies both statistics. Missing or null values
+are excluded and counted explicitly; an entirely missing metric has null
+statistics. Record known failures and timeouts as `0`, not missing outcomes,
+and report incomplete trials before interpreting a success rate. Numeric
+metrics must be finite and nonnegative; rate metrics must lie in 0–1.
+
 ## Documentation and license
 
 - [Agent connections and interaction recipes](docs/mcp-clients.md)

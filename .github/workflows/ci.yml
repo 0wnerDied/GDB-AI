@@ -54,6 +54,7 @@ jobs:
         run: |
           python3 -m compileall -q gdb-extension sdk/python sdk/verify.py benchmarks/python
           PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests
+          python3 -m unittest discover -s benchmarks/python
       - name: Build TypeScript SDK
         run: |
           npm --prefix sdk/typescript ci
