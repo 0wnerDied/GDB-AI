@@ -631,11 +631,7 @@ impl Gateway {
         // 2026-08-30: Ordinary reads only need one journal representation.
         // Move it into the worker instead of cloning the complete request;
         // mutations retain one copy for durable audit.
-        // 2026-09-08: Immutable snapshot lookup still journaled through the
-        // live actor, coupling historical sharing to target-worker progress.
-        // Its stored value remains authoritative without a live GDB request.
-        let journal_through_actor =
-            entry.is_some() && request.method != CanonicalMethod::InspectionSnapshotGet;
+        let journal_through_actor = entry.is_some() && !reads_retained_observations(request.method);
         let mut request_value = (journal_through_actor || durable_audit)
             .then(|| serde_json::to_value(request))
             .transpose()?;
@@ -1370,19 +1366,29 @@ fn requires_structured_state(request: &ApiRequest, effect: Effect) -> bool {
                 )))
 }
 
-fn request_allowed_with_lost_consistency(method: CanonicalMethod) -> bool {
+fn reads_retained_observations(method: CanonicalMethod) -> bool {
+    // 2026-09-08: Only snapshot lookup bypassed the actor and outcome fences,
+    // so comparing immutable captures failed during live-target trouble.
+    // Both historical operations depend on retained evidence, not GDB progress.
     matches!(
         method,
-        CanonicalMethod::SessionGet
-            | CanonicalMethod::SessionTranscript
-            | CanonicalMethod::SessionEvent
-            | CanonicalMethod::SessionClose
-            | CanonicalMethod::SessionForceAbort
-            | CanonicalMethod::SessionAcquireWriteLease
-            | CanonicalMethod::SessionAttemptRecovery
-            | CanonicalMethod::InspectionSnapshotGet
-            | CanonicalMethod::ArtifactGet
+        CanonicalMethod::InspectionSnapshotGet | CanonicalMethod::InspectionDiff
     )
+}
+
+fn request_allowed_with_lost_consistency(method: CanonicalMethod) -> bool {
+    reads_retained_observations(method)
+        || matches!(
+            method,
+            CanonicalMethod::SessionGet
+                | CanonicalMethod::SessionTranscript
+                | CanonicalMethod::SessionEvent
+                | CanonicalMethod::SessionClose
+                | CanonicalMethod::SessionForceAbort
+                | CanonicalMethod::SessionAcquireWriteLease
+                | CanonicalMethod::SessionAttemptRecovery
+                | CanonicalMethod::ArtifactGet
+        )
 }
 
 fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {

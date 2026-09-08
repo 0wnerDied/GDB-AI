@@ -125,7 +125,10 @@ commands or waiting behind target execution. Stop IDs do not establish
 freshness: memory may change without a resume. Lookup rechecks ownership and
 remains available for retained evidence after resume or close, subject to
 `storage.max_snapshots_per_session` and session retention. It never refreshes
-the original capture or revalidates historical frame/value handles.
+the original capture or revalidates historical frame/value handles. Standalone
+`inspection.diff` has the same independence from the live actor, including
+unknown command outcomes and lost consistency; ownership and retention still
+govern both reads. A mixed live batch containing a diff retains its stop fence.
 
 `session.create` and `session.get` expose the exact `caller_identity` and
 current `controller` (null for a closed session). `session.handoff` accepts

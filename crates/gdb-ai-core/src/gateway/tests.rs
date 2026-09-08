@@ -7,6 +7,98 @@ use crate::{
     domain::SessionState,
 };
 
+#[tokio::test]
+async fn historical_diffs_survive_unknown_outcomes_and_a_stopped_actor() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("history/mcp:controller");
+    let mut request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "history".into(),
+        session_id: None,
+        method: CanonicalMethod::SessionCreate,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let created = gateway.dispatch_agent(request.clone(), &caller).await;
+    assert!(created.error.is_none(), "{:?}", created.error);
+    request.session_id = created.session_id;
+    let entry = gateway
+        .entry(request.session_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    for (id, value) in [("before", 1), ("after", 2)] {
+        gateway
+            .store
+            .insert_snapshot(entry.handle.id(), id, &json!({"results": {"value": value}}))
+            .unwrap();
+    }
+    request.method = CanonicalMethod::InspectionDiff;
+    request.parameters = json!({"before_snapshot_id": "before", "after_snapshot_id": "after"});
+    let observer = Caller::local("history/mcp:observer");
+    let mut expected = None;
+    for stage in 0..3 {
+        match stage {
+            0 => entry
+                .handle
+                .record_event(crate::domain::DomainEvent::CommandOutcomeUnknown { token: 99 })
+                .await
+                .unwrap(),
+            1 => entry
+                .handle
+                .record_event(crate::domain::DomainEvent::ConsistencyLost {
+                    reason: "test".into(),
+                })
+                .await
+                .unwrap(),
+            _ => entry.handle.close().await.unwrap(),
+        }
+        for mode in [RequestMode::Canonical, RequestMode::Agent] {
+            let result = gateway
+                .dispatch_inner(request.clone(), &observer, false, mode)
+                .await;
+            assert!(result.error.is_none(), "stage {stage}: {:?}", result.error);
+            assert!(result.semantics.as_ref().unwrap().historical);
+            let result = result.result.unwrap();
+            assert_eq!(result["changes"]["results"]["before"]["value"], 1);
+            assert_eq!(result["changes"]["results"]["after"]["value"], 2);
+            if let Some(expected) = &expected {
+                assert_eq!(&result, expected);
+            }
+            expected = Some(result);
+        }
+    }
+    let denied = gateway
+        .dispatch(request.clone(), &Caller::local("foreign/mcp:observer"))
+        .await;
+    assert_eq!(denied.error.unwrap().code, ErrorCode::PolicyDenied);
+    request.parameters["after_snapshot_id"] = json!("missing");
+    assert_eq!(
+        gateway
+            .dispatch(request, &observer)
+            .await
+            .error
+            .unwrap()
+            .code,
+        ErrorCode::NotFound
+    );
+    gateway.shutdown().await;
+}
+
 #[test]
 fn request_classification_preserves_control_and_evidence_paths() {
     use CanonicalMethod::*;
@@ -55,6 +147,7 @@ fn request_classification_preserves_control_and_evidence_paths() {
             false,
             true,
         ),
+        (InspectionDiff, json!({}), false, false, true),
         (BreakpointList, json!({}), false, true, false),
         (SessionCapabilities, json!({}), false, true, false),
         (SessionGet, json!({}), false, false, true),
