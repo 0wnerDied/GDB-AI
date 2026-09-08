@@ -444,13 +444,8 @@ impl Gateway {
                     let reply = self
                         .inspection_command(entry, request, "-thread-info", vec![])
                         .await?;
-                    let threads = normalized_threads(&reply.record, &state);
-                    let total = threads.len();
-                    let mut threads: Vec<_> = threads
-                        .into_iter()
-                        .skip(offset.min(total as u64) as usize)
-                        .take(limit)
-                        .collect();
+                    let (mut threads, total) =
+                        normalized_threads(&reply.record, &state, offset, limit);
                     let mut evidence_seq = reply.evidence_seq;
                     if let Some(depth) = depth {
                         for thread in &mut threads {

@@ -138,6 +138,7 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
     assert_eq!(page["threads"][0]["thread_id"], threads[1]["thread_id"]);
     assert_eq!(page["threads"][0]["next_frame_offset"], 1);
     assert_eq!(page["threads"][0]["frames"].as_array().unwrap().len(), 1);
+    assert_eq!(page["threads"][0]["frames"][0], threads[1]["frames"][0]);
     let other = successful(other).result.unwrap();
     assert_eq!(
         other["frames"][0]["frame_id"],

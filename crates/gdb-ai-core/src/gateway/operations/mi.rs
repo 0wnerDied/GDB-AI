@@ -39,36 +39,45 @@ pub(super) fn frame_summary_fields(fields: &[MiResult]) -> FrameSummary {
 pub(super) fn normalized_threads(
     record: &MiRecord,
     state: &crate::domain::SessionState,
-) -> Vec<Value> {
+    offset: u64,
+    limit: usize,
+) -> (Vec<Value>, usize) {
     let Some(threads) = MiResult::find(record.results(), "threads") else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    aggregate_items(threads, "thread")
+    // 2026-09-09: Thread pages built JSON and scanned registries for every
+    // omitted thread. Page valid MI entries before resolving their keyed IDs.
+    let mut threads = aggregate_items(threads, "thread");
+    threads.retain(|fields| MiResult::find_str(fields, "id").is_some());
+    let total = threads.len();
+    let threads = threads
         .into_iter()
-        .filter_map(|fields| {
-            let backend_id = MiResult::find_str(fields, "id")?;
-            let thread = state
-                .inferiors
-                .values()
-                .flat_map(|inferior| inferior.threads.values())
-                .find(|thread| thread.backend_id == backend_id);
-            Some(json!({
-                "thread_id": thread.map(|thread| &thread.id),
+        .skip(offset.min(total as u64) as usize)
+        .take(limit)
+        .map(|fields| {
+            let backend_id = MiResult::find_str(fields, "id").unwrap();
+            let selected = state.inferiors.values().find_map(|inferior| {
+                inferior
+                    .threads
+                    .get(backend_id)
+                    .map(|thread| (inferior, thread))
+            });
+            json!({
+                "thread_id": selected.map(|(_, thread)| &thread.id),
                 "backend_id": backend_id,
                 // 2026-09-05: Dropping GDB's target identity hid the OS TID
                 // needed to match a blocked thread to a native lock owner.
                 "target_id": MiResult::find_str(fields, "target-id"),
-                "inferior_id": state.inferiors.values()
-                    .find(|inferior| inferior.threads.contains_key(backend_id))
-                    .map(|inferior| &inferior.id),
+                "inferior_id": selected.map(|(inferior, _)| &inferior.id),
                 "state": MiResult::find_str(fields, "state"),
                 "name": MiResult::find_str(fields, "name"),
                 "frame": MiResult::find(fields, "frame")
                     .and_then(MiValue::results)
                     .map(frame_summary_fields)
-            }))
+            })
         })
-        .collect()
+        .collect();
+    (threads, total)
 }
 
 pub(super) fn normalized_frames(
@@ -483,6 +492,65 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn thread_pages_preserve_metadata_order_and_total() {
+        use crate::{
+            domain::{DomainEvent, JournaledEvent, SessionId, SessionState},
+            reducer::StateReducer,
+        };
+
+        let mut reducer =
+            StateReducer::new(SessionState::creating(SessionId("sess_threads".into())));
+        for (index, (inferior, thread)) in [("i1", "10"), ("i2", "2")].into_iter().enumerate() {
+            reducer
+                .apply(&JournaledEvent::for_replay(
+                    index as u64 + 1,
+                    DomainEvent::ThreadCreated {
+                        backend_inferior: inferior.into(),
+                        backend_thread: thread.into(),
+                    },
+                ))
+                .unwrap();
+        }
+        let state = reducer.state();
+        let record = gdb_ai_mi::parse_record(
+            br#"1^done,threads=[{id="2",target-id="worker 2",name="two",state="stopped",frame={level="2",addr="0x20",func="worker",file="worker.c",fullname="/work/worker.c",line="9"}},{name="missing id"},{id="10",target-id="worker 10",state="running"},{id="99",state="stopped"}]"#,
+            gdb_ai_mi::MiLimits::default(),
+        ).unwrap();
+        let expected = [
+            json!({
+                "thread_id": state.inferiors["i2"].threads["2"].id,
+                "backend_id": "2", "target_id": "worker 2",
+                "inferior_id": state.inferiors["i2"].id,
+                "state": "stopped", "name": "two",
+                "frame": {
+                    "level": 2, "address": "0x20", "function": "worker",
+                    "source": "/work/worker.c", "line": 9
+                }
+            }),
+            json!({
+                "thread_id": state.inferiors["i1"].threads["10"].id,
+                "backend_id": "10", "target_id": "worker 10",
+                "inferior_id": state.inferiors["i1"].id,
+                "state": "running", "name": null, "frame": null
+            }),
+            json!({
+                "thread_id": null, "backend_id": "99", "target_id": null,
+                "inferior_id": null, "state": "stopped", "name": null, "frame": null
+            }),
+        ];
+        for (offset, limit) in [(0, 4), (1, 1), (2, 8), (3, 1), (u64::MAX, 1)] {
+            let (page, total) = normalized_threads(&record, state, offset, limit);
+            assert_eq!(total, expected.len());
+            let start = offset.min(total as u64) as usize;
+            assert_eq!(page, expected[start..(start + limit).min(total)]);
+        }
+        for input in [b"1^done".as_slice(), b"1^done,threads=[]"] {
+            let record = gdb_ai_mi::parse_record(input, gdb_ai_mi::MiLimits::default()).unwrap();
+            assert_eq!(normalized_threads(&record, state, 0, 1), (vec![], 0));
+        }
+    }
 
     #[test]
     fn bounds_overread_disassembly_around_the_current_instruction() {
