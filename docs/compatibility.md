@@ -92,6 +92,11 @@ lines:
 - MI3 changes multi-location breakpoint output from a tuple-like legacy form
   to a list. MI4 changes the breakpoint `script` field to a valid list. These
   are output-format versions over the same native command dispatcher.
+- MI3 sessions enable GDB's breakpoint-script format correction when that
+  command is available. On older GDBs, the parser accepts the legacy `script`
+  string tuple as a command list without relaxing other tuple syntax. Live
+  results and journal replay use the same normalization; the journal retains
+  the original MI bytes.
 - The built-in command inventory is unchanged across point releases. GDB 13.1
   adds only `-fix-breakpoint-script-output` to the 123 commands present in
   GDB 9.1 through 12.1.

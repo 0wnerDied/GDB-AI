@@ -407,6 +407,27 @@ impl SessionWorker {
     }
 
     async fn handshake(&mut self) -> Result<()> {
+        // 2026-09-08: MI3 emits invalid breakpoint script tuples. Prefer GDB's
+        // native correction when present; older GDBs use the parser's narrow
+        // legacy support, including when their journals are replayed later.
+        if self.backend.descriptor().mi_version == "mi3" {
+            let command = "-fix-breakpoint-script-output";
+            let reply = self
+                .execute(
+                    MiCommand::new("-info-gdb-mi-command")?.string(command),
+                    self.command_timeout,
+                )
+                .await?;
+            if mi_command_exists(&reply.record) {
+                self.execute(MiCommand::new(command)?, self.command_timeout)
+                    .await?;
+                self.capabilities
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .commands
+                    .insert(command.into());
+            }
+        }
         for command in [
             MiCommand::new("-gdb-set")?.bare("mi-async")?.bare("on")?,
             MiCommand::new("-gdb-set")?.bare("non-stop")?.bare("off")?,

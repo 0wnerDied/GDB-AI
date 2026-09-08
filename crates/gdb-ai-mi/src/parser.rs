@@ -52,6 +52,9 @@ impl fmt::Display for DisplayByte {
     }
 }
 
+/// Parses one record without its line ending. MI3's legacy breakpoint
+/// `script={"command",...}` is normalized to the same value list as MI4;
+/// callers retaining wire-format evidence must also retain the input bytes.
 pub fn parse_record(input: &[u8], limits: MiLimits) -> Result<MiRecord, MiError> {
     if input.is_empty() {
         return Err(MiError::Empty);
@@ -188,8 +191,30 @@ impl Parser<'_> {
         }
         let name = String::from_utf8_lossy(&self.input[start..self.offset]).into_owned();
         self.offset += 1;
-        let value = self.value(depth)?;
+        // 2026-09-08: MI3 breakpoint commands use a nonstandard string tuple.
+        // Normalize only that legacy script spelling; ordinary tuples still
+        // require named results, and both spellings retain the command bytes.
+        let value = if name == "script" && self.input[self.offset..].starts_with(b"{\"") {
+            self.legacy_script(depth)?
+        } else {
+            self.value(depth)?
+        };
         Ok(MiResult { name, value })
+    }
+
+    fn legacy_script(&mut self, depth: usize) -> Result<MiValue, MiError> {
+        self.check_depth(depth)?;
+        self.expect(b'{', "{")?;
+        let mut commands = Vec::new();
+        loop {
+            commands.push(MiValue::Const(self.c_string()?));
+            if self.peek() != Some(b',') {
+                break;
+            }
+            self.offset += 1;
+        }
+        self.expect(b'}', "}")?;
+        Ok(MiValue::ValueList(commands))
     }
 
     fn value(&mut self, depth: usize) -> Result<MiValue, MiError> {
@@ -463,6 +488,48 @@ mod tests {
             MiResult::find(&results, "results"),
             Some(MiValue::ResultList(_))
         ));
+    }
+
+    #[test]
+    fn normalizes_only_legacy_breakpoint_script_strings() {
+        let legacy =
+            parse(b"1^done,bkpt={number=\"1\",script={\"silent\",\"echo \\\"ready\\\"\\n\"}}");
+        let standard =
+            parse(b"1^done,bkpt={number=\"1\",script=[\"silent\",\"echo \\\"ready\\\"\\n\"]}");
+        assert_eq!(legacy, standard);
+        let fields = MiResult::find(legacy.results(), "bkpt")
+            .unwrap()
+            .results()
+            .unwrap();
+        assert_eq!(
+            MiResult::find(fields, "script"),
+            Some(&MiValue::ValueList(vec![
+                MiValue::Const(b"silent".to_vec()),
+                MiValue::Const(b"echo \"ready\"\n".to_vec()),
+            ]))
+        );
+        for record in [
+            b"^done,other={\"silent\"}".as_slice(),
+            b"^done,script={\"silent\",nested={}}",
+            b"^done,script={\"silent\",[\"echo ready\"]}",
+        ] {
+            assert!(parse_record(record, MiLimits::default()).is_err());
+        }
+        for limits in [
+            MiLimits {
+                max_depth: 1,
+                ..MiLimits::default()
+            },
+            MiLimits {
+                max_decoded_string_bytes: 2,
+                ..MiLimits::default()
+            },
+        ] {
+            assert!(matches!(
+                parse_record(b"^done,bkpt={script={\"silent\"}}", limits),
+                Err(MiError::Limit { .. })
+            ));
+        }
     }
 
     #[test]

@@ -1531,6 +1531,8 @@ async fn loads_hash_pinned_python_extension() {
 
 #[tokio::test]
 async fn starts_compatible_mi3_backend() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
@@ -1547,6 +1549,9 @@ async fn starts_compatible_mi3_backend() {
     };
     config.gdb.preferred_mi = "mi99".into();
     config.gdb.fallback_mi = "mi3".into();
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
     let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
     let session = SessionHandle::start(
         Arc::new(config),
@@ -1557,7 +1562,73 @@ async fn starts_compatible_mi3_backend() {
     .await
     .unwrap();
     assert_eq!(session.capabilities().backend.mi_version, "mi3");
+    let probe = session
+        .command(
+            MiCommand::new("-info-gdb-mi-command")
+                .unwrap()
+                .string("-fix-breakpoint-script-output"),
+        )
+        .await
+        .unwrap();
+    let native_correction = MiResult::find(probe.record.results(), "command")
+        .and_then(gdb_ai_mi::MiValue::results)
+        .and_then(|fields| MiResult::find_str(fields, "exists"))
+        == Some("true");
+    session
+        .command(
+            MiCommand::new("-break-insert")
+                .unwrap()
+                .bare("-f")
+                .unwrap()
+                .string("mi_compatibility_pending"),
+        )
+        .await
+        .unwrap();
+    session
+        .command(
+            MiCommand::new("-break-commands")
+                .unwrap()
+                .bare("1")
+                .unwrap()
+                .string("echo ready"),
+        )
+        .await
+        .unwrap();
+    let reply = session
+        .command(MiCommand::new("-break-list").unwrap())
+        .await
+        .unwrap();
+    let table = MiResult::find(reply.record.results(), "BreakpointTable")
+        .unwrap()
+        .results()
+        .unwrap();
+    let body = MiResult::find(table, "body").unwrap().results().unwrap();
+    let breakpoint = MiResult::find(body, "bkpt").unwrap().results().unwrap();
+    assert_eq!(
+        MiResult::find(breakpoint, "script"),
+        Some(&gdb_ai_mi::MiValue::ValueList(vec![
+            gdb_ai_mi::MiValue::Const(b"echo ready".to_vec())
+        ]))
+    );
     session.close().await.unwrap();
+    let journal = std::fs::read_to_string(session.journal_path()).unwrap();
+    let entry = journal
+        .lines()
+        .map(|line| serde_json::from_str::<crate::journal::JournalEntry>(line).unwrap())
+        .find(|entry| entry.seq == reply.evidence_seq)
+        .unwrap();
+    let raw = BASE64
+        .decode(entry.data["raw_base64"].as_str().unwrap())
+        .unwrap();
+    let script = if native_correction {
+        "script=[\"echo ready\"]"
+    } else {
+        "script={\"echo ready\"}"
+    };
+    assert!(std::str::from_utf8(&raw).unwrap().contains(script));
+    let report = crate::replay::replay(session.journal_path(), session.id().clone()).unwrap();
+    assert!(report.complete);
+    assert!(report.evidence_gap.is_none());
 }
 
 #[test]
