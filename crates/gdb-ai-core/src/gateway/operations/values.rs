@@ -15,7 +15,9 @@ use crate::{
     backend::MiCommand,
     domain::{DomainEvent, ValueBinding, ValueId},
     gateway::{Gateway, SessionEntry},
-    protocol::{ApiRequest, ValueChange, ValueChild, ValueStatus},
+    protocol::{
+        ApiRequest, ObservationContext, SemanticResult, ValueChange, ValueChild, ValueStatus,
+    },
     session::CommandReply,
 };
 
@@ -214,8 +216,23 @@ async fn current_value_binding(
     Ok(binding)
 }
 
+fn value_context(
+    binding: &ValueBinding,
+    state: &crate::domain::SessionState,
+) -> ObservationContext {
+    ObservationContext {
+        observation_id: None,
+        stop_id: binding.stop_id.clone(),
+        captured_revision: state.revision,
+        execution_epoch: state.execution_epoch,
+        inferior_id: binding.inferior_id.clone(),
+        thread_id: binding.thread_id.clone(),
+        frame_id: binding.frame_id.clone(),
+    }
+}
+
 impl Gateway {
-    pub(super) async fn value_evaluate(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn value_evaluate(&self, request: &ApiRequest) -> Result<SemanticResult> {
         #[derive(Deserialize)]
         struct Parameters {
             expression: Option<String>,
@@ -239,72 +256,106 @@ impl Gateway {
                 "evaluation accepts 1 to 16 expressions",
             ));
         }
-        let side_effects = parameters.side_effects.as_deref().unwrap_or("deny");
-        let replies = if side_effects == "allow" {
-            let mut replies = Vec::with_capacity(expressions.len());
-            for expression in &expressions {
+        let side_effects = parameters.side_effects.as_deref().unwrap_or("deny") == "allow";
+        for expression in &expressions {
+            if side_effects {
                 validate_expression_text(expression)?;
-                replies.push(evaluate_expression(&entry, request, &state, expression, true).await?);
-            }
-            replies
-        } else {
-            for expression in &expressions {
+            } else {
                 validate_expression(expression)?;
             }
-            // 2026-09-05: Exploit traces evaluated related runtime addresses
-            // in separate Agent turns even though they belonged to one stop.
-            // Keep the complete ordered batch behind one stop/command fence.
+        }
+        let capture = async {
+            let mut replies = Vec::with_capacity(expressions.len());
+            for expression in &expressions {
+                let reply =
+                    evaluate_expression(&entry, request, &state, expression, side_effects).await;
+                // 2026-09-08: One bad expression discarded valid siblings.
+                // Only independent side-effect-denied failures are partial;
+                // cancellation, deadlines, and uncertain effects still abort.
+                match reply {
+                    Ok(reply) => replies.push(Ok(reply)),
+                    Err(error)
+                        if batch
+                            && !side_effects
+                            && super::observation::independent_failure(error.code) =>
+                    {
+                        replies.push(Err(error))
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(replies)
+        };
+        let replies = if side_effects {
+            capture.await?
+        } else {
             entry
                 .handle
-                .stable_observation(
-                    &state,
-                    Box::pin(async {
-                        let mut replies = Vec::with_capacity(expressions.len());
-                        for expression in &expressions {
-                            replies.push(
-                                evaluate_expression(&entry, request, &state, expression, false)
-                                    .await?,
-                            );
-                        }
-                        Ok(replies)
-                    }),
-                )
+                .stable_observation(&state, Box::pin(capture))
                 .await?
         };
-        let effect = if side_effects == "allow" {
-            "allowed"
-        } else {
-            "denied"
-        };
-        if batch {
-            let results = expressions
-                .iter()
-                .zip(&replies)
-                .map(|(expression, reply)| {
-                    json!({
-                        "expression": expression,
-                        "value": result_value(reply.record.results(), "value")
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok(json!({
-                "stop_id": state.stop_id,
-                "results": results,
-                "commands": replies,
-                "side_effects": effect
-            }))
-        } else {
-            let reply = replies.into_iter().next().unwrap();
-            Ok(json!({
-                "stop_id": state.stop_id,
-                "value": result_value(reply.record.results(), "value"),
-                "command": reply,
-                "side_effects": effect
-            }))
+        let effect = if side_effects { "allowed" } else { "denied" };
+        let context = observation_context(&request.parameters, &state)?;
+        if !batch {
+            let reply = replies.into_iter().next().unwrap()?;
+            return Ok(SemanticResult::new(
+                json!({
+                    "stop_id": state.stop_id,
+                    "expression": expressions[0],
+                    "value": result_value(reply.record.results(), "value"),
+                    "type": result_value(reply.record.results(), "type"),
+                    "status": value_status(reply.record.results()),
+                    "side_effects": effect
+                }),
+                context,
+            )
+            .command(&entry.handle.id().0, "command", reply));
         }
+        let mut results = Vec::with_capacity(replies.len());
+        let mut commands = Vec::new();
+        let mut failures = std::collections::BTreeMap::new();
+        let mut evidence = Vec::new();
+        for (index, (expression, reply)) in expressions.iter().zip(replies).enumerate() {
+            match reply {
+                Ok(reply) => {
+                    results.push(json!({
+                        "expression": expression,
+                        "value": result_value(reply.record.results(), "value"),
+                        "type": result_value(reply.record.results(), "type"),
+                        "status": value_status(reply.record.results())
+                    }));
+                    commands.push(reply);
+                }
+                Err(error) => {
+                    let error = crate::protocol::ApiError::from(error);
+                    evidence.extend(crate::protocol::result_evidence(
+                        &entry.handle.id().0,
+                        &json!(error),
+                    ));
+                    let name = index.to_string();
+                    results.push(json!({"expression": expression, "status": ValueStatus::Failed, "failure": name}));
+                    failures.insert(name, error);
+                }
+            }
+        }
+        let complete = failures.is_empty();
+        let mut result = SemanticResult::new(
+            json!({
+                "stop_id": state.stop_id, "results": results, "side_effects": effect,
+                "complete": complete, "partial": !complete
+            }),
+            context,
+        )
+        .commands(&entry.handle.id().0, commands);
+        result.metadata.semantics.complete = complete;
+        result.metadata.evidence.extend(evidence);
+        if !complete {
+            result.failures("failures", failures);
+        }
+        Ok(result)
     }
 
-    pub(super) async fn value_create(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn value_create(&self, request: &ApiRequest) -> Result<SemanticResult> {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
@@ -347,22 +398,27 @@ impl Gateway {
                 kind: "value_created".into(),
             })
             .await?;
-        Ok(json!({
-            "value_id": value_id,
-            "stop_id": stop_id,
-            "expression": expression,
-            "value": result_value(reply.record.results(), "value"),
-            "type": result_value(reply.record.results(), "type"),
-            "children_count": result_text(&reply.record, "numchild")
-                .and_then(|value| value.parse::<u64>().ok()),
-            "has_children": result_text(&reply.record, "numchild")
-                .and_then(|value| value.parse::<u64>().ok())
-                .is_some_and(|count| count > 0),
-            "command": reply
-        }))
+        let children_count = result_count(reply.record.results(), "numchild");
+        Ok(SemanticResult::new(
+            json!({
+                "value_id": value_id,
+                "stop_id": stop_id,
+                "expression": expression,
+                "status": value_status(reply.record.results()),
+                "value": result_value(reply.record.results(), "value"),
+                "type": result_value(reply.record.results(), "type"),
+                "children_count": children_count,
+                "has_children": children_count.map(|count| count > 0),
+                "dynamic": result_bool(reply.record.results(), "dynamic"),
+                "display_hint": result_text(&reply.record, "displayhint"),
+                "has_more": result_bool(reply.record.results(), "has_more")
+            }),
+            context,
+        )
+        .command(&entry.handle.id().0, "command", reply))
     }
 
-    pub(super) async fn value_children(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn value_children(&self, request: &ApiRequest) -> Result<SemanticResult> {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         let binding = current_value_binding(&entry, request, &state).await?;
@@ -389,20 +445,26 @@ impl Gateway {
         // while exposing the same bytes as first-class value semantics.
         let children = value_children(&reply.record);
         let children_count = result_count(reply.record.results(), "numchild");
-        Ok(json!({
-            "value_id": binding.value_id,
-            "stop_id": binding.stop_id,
-            "offset": offset,
-            "limit": limit,
-            "children": children,
-            "children_count": children_count,
-            "has_more": has_more,
-            "result": reply,
-            "continuation": has_more.then(|| format!("{}:{}", binding.value_id, end))
-        }))
+        let continuation = has_more.then(|| json!(format!("{}:{}", binding.value_id, end)));
+        let mut result = SemanticResult::new(
+            json!({
+                "value_id": binding.value_id,
+                "stop_id": binding.stop_id,
+                "offset": offset,
+                "limit": limit,
+                "children": children,
+                "children_count": children_count,
+                "has_more": has_more,
+                "continuation": continuation
+            }),
+            Some(value_context(&binding, &state)),
+        )
+        .command(&entry.handle.id().0, "result", reply);
+        result.metadata.continuation = continuation;
+        Ok(result)
     }
 
-    pub(super) async fn value_update(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn value_update(&self, request: &ApiRequest) -> Result<SemanticResult> {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         let binding = current_value_binding(&entry, request, &state).await?;
@@ -418,12 +480,15 @@ impl Gateway {
         // unavailable or type-changing value was indistinguishable without
         // MI knowledge. Preserve those states in the semantic change list.
         let changes = value_changes(&reply.record, &binding);
-        Ok(json!({
-            "value_id": binding.value_id,
-            "stop_id": binding.stop_id,
-            "changes": changes,
-            "result": reply
-        }))
+        Ok(SemanticResult::new(
+            json!({
+                "value_id": binding.value_id,
+                "stop_id": binding.stop_id,
+                "changes": changes
+            }),
+            Some(value_context(&binding, &state)),
+        )
+        .command(&entry.handle.id().0, "result", reply))
     }
 
     pub(super) async fn value_release(&self, request: &ApiRequest) -> Result<Value> {

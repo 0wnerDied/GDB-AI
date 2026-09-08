@@ -16,6 +16,30 @@ STATELESS_MCP_VERSION: ProtocolVersion = "2026-07-28"
 ValueStatus = Literal["available", "unavailable", "not_collected", "failed", "invalid", "unknown"]
 
 
+class _ObservationContextRequired(TypedDict):
+    stop_id: str
+    captured_revision: int
+    execution_epoch: int
+
+
+class ObservationContext(_ObservationContextRequired, total=False):
+    observation_id: str
+    inferior_id: str
+    thread_id: str
+    frame_id: str
+
+
+class _ResultSemanticsRequired(TypedDict):
+    complete: bool
+    historical: bool
+    projection: Literal["detailed", "compact"]
+
+
+class ResultSemantics(_ResultSemanticsRequired, total=False):
+    context: ObservationContext
+    state: Any
+
+
 class _ValueChildRequired(TypedDict):
     path: str
     status: ValueStatus

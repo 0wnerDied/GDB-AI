@@ -26,12 +26,31 @@ export interface ApiResponse<T = unknown> {
   revision?: number;
   state?: unknown;
   result?: T;
+  semantics?: ResultSemantics;
   warnings: Array<{ code: string; message: string }>;
   truncated: boolean;
   continuation?: unknown;
   artifacts: string[];
   evidence: Array<{ kind: string; uri: string }>;
   error?: { code: string; message: string; retryable: boolean; details?: unknown };
+}
+
+export interface ObservationContext {
+  observation_id?: string;
+  stop_id: string;
+  captured_revision: number;
+  execution_epoch: number;
+  inferior_id?: string;
+  thread_id?: string;
+  frame_id?: string;
+}
+
+export interface ResultSemantics {
+  context?: ObservationContext;
+  state?: unknown;
+  complete: boolean;
+  historical: boolean;
+  projection: "detailed" | "compact";
 }
 
 export type ValueStatus = "available" | "unavailable" | "not_collected" | "failed" | "invalid" | "unknown";
@@ -88,7 +107,7 @@ export interface ValueUpdateResult {
 export type ToolResponse<T = unknown> = Partial<Pick<ApiResponse<T>,
   "state" | "result" | "warnings" | "truncated" | "continuation"
   | "artifacts" | "evidence" | "error"
->>;
+>> & Partial<Pick<ResultSemantics, "context" | "complete" | "historical">>;
 
 export interface Tool {
   name: string;

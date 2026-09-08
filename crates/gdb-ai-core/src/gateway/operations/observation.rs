@@ -6,7 +6,7 @@ use super::{encoding::parse_address, evaluation::validate_expression};
 use crate::{
     Error, ErrorCode, Result,
     domain::StopId,
-    protocol::{ApiRequest, CanonicalMethod, is_command_reply},
+    protocol::{ApiRequest, CanonicalMethod},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +34,7 @@ impl ObservationRequest {
         memory_budget: &mut usize,
         expression_budget: &mut usize,
         maximum_memory_bytes: usize,
+        defaults: &Value,
     ) -> Result<Self> {
         let mut parameters = item.clone();
         let object = parameters.as_object_mut().ok_or_else(|| {
@@ -42,6 +43,17 @@ impl ObservationRequest {
                 "observation request must be an object",
             )
         })?;
+        const SELECTION: [&str; 4] = ["inferior_id", "thread_id", "frame_id", "frame_level"];
+        // 2026-09-08: Composite reads discarded their parent's explicit
+        // selection. An item inherits that selection unless it supplies its
+        // own; a new thread must not inherit a frame from the old thread.
+        if !SELECTION.iter().any(|field| object.contains_key(*field)) {
+            for field in SELECTION {
+                if let Some(value) = defaults.get(field) {
+                    object.insert(field.into(), value.clone());
+                }
+            }
+        }
         let view = object
             .get("view")
             .and_then(Value::as_str)
@@ -200,21 +212,6 @@ impl ObservationRequest {
             return;
         };
         if self.kind == ObservationKind::Evaluate {
-            // 2026-09-08: Composite Evaluate results leaked complete GDB/MI
-            // replies after their exact evidence had already been promoted.
-            // Standalone value.evaluate remains wire-compatible.
-            if result.get("command").is_some_and(is_command_reply) {
-                result.remove("command");
-            }
-            if result
-                .get("commands")
-                .and_then(Value::as_array)
-                .is_some_and(|commands| {
-                    !commands.is_empty() && commands.iter().all(is_command_reply)
-                })
-            {
-                result.remove("commands");
-            }
             if let Some(expression) = self.parameters.get("expression") {
                 result.insert("expression".into(), expression.clone());
             }
@@ -269,6 +266,7 @@ pub(super) fn parse_observation_requests(
     value: &Value,
     stop_id: &StopId,
     maximum_memory_bytes: usize,
+    defaults: &Value,
 ) -> Result<Vec<ObservationRequest>> {
     let items = value.as_array().ok_or_else(|| {
         Error::new(
@@ -293,6 +291,7 @@ pub(super) fn parse_observation_requests(
             &mut memory_budget,
             &mut expression_budget,
             maximum_memory_bytes,
+            defaults,
         )?;
         if !names.insert(request.name.clone()) {
             return Err(Error::new(
@@ -313,6 +312,7 @@ pub(super) fn validate_observation_requests(
         value,
         &StopId("observation-validation".into()),
         maximum_memory_bytes,
+        &Value::Null,
     )
     .map(|_| ())
 }
@@ -347,6 +347,7 @@ mod tests {
             ]),
             &stop_id,
             8,
+            &Value::Null,
         )
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
@@ -360,7 +361,31 @@ mod tests {
             json!({"view": "memory", "address_expression": "&value", "length": 4}),
             json!({"view": "disassembly", "around": {"expression": "$pc"}}),
         ] {
-            ObservationRequest::parse(&request, &stop_id, &mut 0, &mut 0, 16).unwrap();
+            ObservationRequest::parse(&request, &stop_id, &mut 0, &mut 0, 16, &Value::Null)
+                .unwrap();
         }
+        let defaults = json!({"thread_id": "thread_a", "frame_level": 2});
+        let inherited = ObservationRequest::parse(
+            &json!({"view": "locals"}),
+            &stop_id,
+            &mut 0,
+            &mut 0,
+            16,
+            &defaults,
+        )
+        .unwrap();
+        assert_eq!(inherited.parameters["thread_id"], "thread_a");
+        assert_eq!(inherited.parameters["frame_level"], 2);
+        let replaced = ObservationRequest::parse(
+            &json!({"view": "locals", "thread_id": "thread_b"}),
+            &stop_id,
+            &mut 0,
+            &mut 0,
+            16,
+            &defaults,
+        )
+        .unwrap();
+        assert_eq!(replaced.parameters["thread_id"], "thread_b");
+        assert!(replaced.parameters.get("frame_level").is_none());
     }
 }

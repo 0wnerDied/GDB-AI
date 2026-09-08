@@ -10,7 +10,11 @@ use std::{
 
 use crate::{
     Error,
-    domain::{FrameId, InferiorId, SessionState, StopId, ThreadId, ValueId},
+    domain::{
+        BackendHealth, Consistency, FrameId, InferiorId, SessionLifecycle, SessionState,
+        SnapshotStatus, StopId, TargetOrigin, ThreadId, ValueId,
+    },
+    session::CommandReply,
 };
 
 pub const API_VERSION: &str = "gdb.ai/v1";
@@ -233,6 +237,8 @@ pub struct ApiResponse {
     pub state: Option<SessionState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantics: Option<ResultSemantics>,
     pub warnings: Vec<Warning>,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -241,6 +247,203 @@ pub struct ApiResponse {
     pub evidence: Vec<Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResultSemantics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ObservationContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Value>,
+    pub complete: bool,
+    pub historical: bool,
+    #[serde(default)]
+    pub projection: ResultProjection,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultProjection {
+    #[default]
+    Detailed,
+    Compact,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResultMetadata {
+    pub semantics: ResultSemantics,
+    pub warnings: Vec<Warning>,
+    pub truncated: bool,
+    pub continuation: Option<Value>,
+    pub artifacts: Vec<String>,
+    pub evidence: Vec<Evidence>,
+}
+
+impl ResultMetadata {
+    pub(crate) fn new(context: Option<ObservationContext>) -> Self {
+        Self {
+            semantics: ResultSemantics {
+                context,
+                state: None,
+                complete: true,
+                historical: false,
+                projection: ResultProjection::Detailed,
+            },
+            warnings: Vec::new(),
+            truncated: false,
+            continuation: None,
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SemanticResult {
+    pub facts: Value,
+    pub metadata: ResultMetadata,
+    diagnostics: BTreeMap<&'static str, Diagnostic>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+enum Diagnostic {
+    Command(CommandReply),
+    Commands(Vec<CommandReply>),
+    Failures(BTreeMap<String, ApiError>),
+}
+
+impl SemanticResult {
+    pub(crate) fn new(facts: Value, context: Option<ObservationContext>) -> Self {
+        Self {
+            facts,
+            metadata: ResultMetadata::new(context),
+            diagnostics: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn command(
+        mut self,
+        session_id: &str,
+        key: &'static str,
+        reply: CommandReply,
+    ) -> Self {
+        self.metadata
+            .evidence
+            .push(Evidence::journal(session_id, reply.evidence_seq));
+        self.diagnostics.insert(key, Diagnostic::Command(reply));
+        self
+    }
+
+    pub(crate) fn read(
+        facts: Value,
+        context: Option<ObservationContext>,
+        session_id: &str,
+    ) -> Self {
+        // Dynamic provider facts enter the semantic boundary once, before
+        // composition. Envelopes and transports do not rediscover metadata.
+        let mut metadata = ResultMetadata::new(context);
+        metadata.warnings = result_warnings(&facts);
+        let mut evidence = result_evidence(session_id, &facts)
+            .into_iter()
+            .map(|item| (item.uri.clone(), item))
+            .collect::<BTreeMap<_, _>>();
+        for field in ["evidence", "observation_evidence"] {
+            if let Some(items) = facts.get(field).and_then(Value::as_array) {
+                for item in items.iter().take(64) {
+                    if let Ok(item) = serde_json::from_value::<Evidence>(item.clone()) {
+                        evidence.insert(item.uri.clone(), item);
+                    }
+                }
+            }
+        }
+        metadata.evidence = evidence.into_values().take(64).collect();
+        metadata.continuation = facts
+            .get("continuation")
+            .filter(|value| !value.is_null())
+            .cloned();
+        let mut artifacts = BTreeSet::new();
+        collect_result_metadata(&facts, 0, &mut metadata.truncated, &mut artifacts);
+        metadata.artifacts = artifacts.into_iter().collect();
+        // 2026-09-08: Exact bytes after a ring gap do not constitute a
+        // complete sample of the requested range, even on a successful read.
+        metadata.semantics.complete = facts.get("gap") != Some(&Value::Bool(true))
+            && facts.get("partial") != Some(&Value::Bool(true))
+            && facts.get("complete") != Some(&Value::Bool(false));
+        metadata.semantics.historical = facts.get("historical") == Some(&Value::Bool(true));
+        Self {
+            facts,
+            metadata,
+            diagnostics: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn commands(mut self, session_id: &str, replies: Vec<CommandReply>) -> Self {
+        self.metadata.evidence.extend(
+            replies
+                .iter()
+                .map(|reply| Evidence::journal(session_id, reply.evidence_seq)),
+        );
+        self.diagnostics
+            .insert("commands", Diagnostic::Commands(replies));
+        self
+    }
+
+    pub(crate) fn failures(&mut self, key: &'static str, failures: BTreeMap<String, ApiError>) {
+        self.facts[key] = Value::Object(
+            failures
+                .iter()
+                .map(|(name, error)| (name.clone(), json!(error.compact())))
+                .collect(),
+        );
+        self.diagnostics.insert(key, Diagnostic::Failures(failures));
+    }
+
+    pub(crate) fn into_value(mut self, detailed: bool) -> Value {
+        if detailed {
+            // 2026-09-08: Agent values built and then discarded complete MI
+            // trees. Only the detailed projection serializes diagnostics;
+            // both projections use the facts and evidence captured above.
+            project_diagnostics(&mut self.facts, &self.diagnostics);
+        }
+        self.facts
+    }
+}
+
+fn project_diagnostics(facts: &mut Value, diagnostics: &BTreeMap<&'static str, Diagnostic>) {
+    for (key, diagnostic) in diagnostics {
+        facts[*key] = serde_json::to_value(diagnostic)
+            .expect("diagnostics contain only JSON-serializable fields");
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum OperationResult {
+    Semantic(Box<SemanticResult>),
+    Legacy(Value),
+}
+
+impl OperationResult {
+    pub(crate) fn facts(&self) -> &Value {
+        match self {
+            Self::Semantic(result) => &result.facts,
+            Self::Legacy(result) => result,
+        }
+    }
+
+    pub(crate) fn detailed_value(&self) -> Value {
+        let mut facts = self.facts().clone();
+        if let Self::Semantic(result) = self {
+            project_diagnostics(&mut facts, &result.diagnostics);
+        }
+        facts
+    }
+}
+
+impl From<SemanticResult> for OperationResult {
+    fn from(result: SemanticResult) -> Self {
+        Self::Semantic(Box::new(result))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -259,6 +462,43 @@ pub struct ObservationContext {
 }
 
 impl ObservationContext {
+    pub(crate) fn from_observation(value: &Value) -> crate::Result<Option<Self>> {
+        if let Some(context) = value
+            .get("observation_context")
+            .or_else(|| value.get("context"))
+        {
+            return Ok(Some(serde_json::from_value(context.clone())?));
+        }
+        // Older automatic stop snapshots have the same capture identity at
+        // the root. Historical lookup never substitutes the live context.
+        let Some(stop_id) = value.get("stop_id").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let Some(captured_revision) = value
+            .get("captured_revision")
+            .or_else(|| value.get("revision"))
+            .and_then(Value::as_u64)
+        else {
+            return Ok(None);
+        };
+        let Some(execution_epoch) = value.get("execution_epoch").and_then(Value::as_u64) else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            observation_id: value
+                .get("observation_id")
+                .or_else(|| value.get("snapshot_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            stop_id: StopId(stop_id.into()),
+            captured_revision,
+            execution_epoch,
+            inferior_id: None,
+            thread_id: None,
+            frame_id: None,
+        }))
+    }
+
     pub(crate) fn from_state(state: &SessionState) -> Option<Self> {
         let stop_id = state.stop_id.clone()?;
         let frame_id = state
@@ -285,10 +525,62 @@ pub struct ObservationResult {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub failures: BTreeMap<String, ApiError>,
     pub complete: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub availability: BTreeMap<String, FactAvailability>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Warning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<Evidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactAvailability {
+    Captured,
+    NotCollected,
+    Unavailable,
+    Failed,
+}
+
+impl ObservationResult {
+    pub(crate) fn into_batch_result(self) -> SemanticResult {
+        let mut facts = json!({
+            "observation_context": self.context,
+            "observation_id": self.context.observation_id,
+            "stop_id": self.context.stop_id,
+            "revision": self.context.captured_revision,
+            "execution_epoch": self.context.execution_epoch,
+            "availability": self.availability,
+            "evidence": self.evidence,
+            "complete": self.complete,
+            "partial": !self.complete
+        });
+        facts["results"] = Value::Object(self.results.into_iter().collect());
+        let mut result = SemanticResult {
+            facts,
+            metadata: ResultMetadata {
+                semantics: ResultSemantics {
+                    context: Some(self.context),
+                    state: None,
+                    complete: self.complete,
+                    historical: false,
+                    projection: ResultProjection::Detailed,
+                },
+                warnings: self.warnings,
+                truncated: self.truncated,
+                continuation: None,
+                artifacts: self.artifacts,
+                evidence: self.evidence,
+            },
+            diagnostics: BTreeMap::new(),
+        };
+        result.failures("failures", self.failures);
+        result
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +654,15 @@ pub struct Evidence {
     pub uri: String,
 }
 
+impl Evidence {
+    pub(crate) fn journal(session_id: &str, sequence: u64) -> Self {
+        Self {
+            kind: "journal-entry".into(),
+            uri: format!("gdbai://session/{session_id}/event/{sequence}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApiError {
     pub code: crate::ErrorCode,
@@ -369,6 +670,37 @@ pub struct ApiError {
     pub retryable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
+}
+
+impl From<Error> for ApiError {
+    fn from(error: Error) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            retryable: error.retryable,
+            details: error.details,
+        }
+    }
+}
+
+impl ApiError {
+    pub(crate) fn compact(&self) -> Self {
+        let mut error = self.clone();
+        // The typed GDB error owns these transport diagnostics. Preserve its
+        // message and semantic details; exact MI remains in detailed output
+        // and the evidence journal, never inferred from arbitrary fact keys.
+        if self.code == crate::ErrorCode::GdbError
+            && let Some(details) = error.details.as_mut().and_then(Value::as_object_mut)
+        {
+            for field in ["record", "token", "evidence_seq"] {
+                details.remove(field);
+            }
+            if details.is_empty() {
+                error.details = None;
+            }
+        }
+        error
+    }
 }
 
 impl ApiResponse {
@@ -421,11 +753,49 @@ impl ApiResponse {
             revision: state.as_ref().map(|state| state.revision),
             state,
             result: Some(result),
+            semantics: None,
             warnings,
             truncated,
             continuation,
             artifacts: artifacts.into_iter().collect(),
             evidence,
+            error: None,
+        }
+    }
+
+    pub(crate) fn semantic_success(
+        request: &ApiRequest,
+        state: Option<SessionState>,
+        result: SemanticResult,
+        detailed: bool,
+    ) -> Self {
+        let SemanticResult {
+            facts,
+            mut metadata,
+            diagnostics,
+        } = result;
+        let mut facts = facts;
+        metadata.semantics.projection = if detailed {
+            ResultProjection::Detailed
+        } else {
+            ResultProjection::Compact
+        };
+        if detailed {
+            project_diagnostics(&mut facts, &diagnostics);
+        }
+        Self {
+            api_version: API_VERSION.into(),
+            request_id: request.request_id.clone(),
+            session_id: request.session_id.clone(),
+            revision: state.as_ref().map(|state| state.revision),
+            state,
+            result: Some(facts),
+            semantics: Some(metadata.semantics),
+            warnings: metadata.warnings,
+            truncated: metadata.truncated,
+            continuation: metadata.continuation,
+            artifacts: metadata.artifacts,
+            evidence: metadata.evidence,
             error: None,
         }
     }
@@ -439,6 +809,7 @@ impl ApiResponse {
             revision: state.as_ref().map(|state| state.revision),
             state,
             result: None,
+            semantics: None,
             warnings: Vec::new(),
             truncated: false,
             continuation: None,
@@ -452,6 +823,113 @@ impl ApiResponse {
             }),
         }
     }
+}
+
+pub fn session_coordination_state(state: &SessionState) -> Value {
+    let mut summary = json!({});
+    let summary = summary.as_object_mut().unwrap();
+    // 2026-09-01: Healthy active state repeated on every successful stopped
+    // turn in the blind trace. Absence means the ordinary case; exceptional
+    // lifecycle and backend values remain explicit.
+    if state.lifecycle != SessionLifecycle::Active {
+        summary.insert("lifecycle".into(), json!(state.lifecycle));
+    }
+    if state.backend != BackendHealth::Healthy {
+        summary.insert("backend".into(), json!(state.backend));
+    }
+    if state.consistency != Consistency::Clean {
+        summary.insert("consistency".into(), json!(state.consistency));
+    }
+    if state.reconciliation_required {
+        summary.insert("reconciliation_required".into(), Value::Bool(true));
+    }
+    if state.target_origin != TargetOrigin::Unknown {
+        summary.insert("target_origin".into(), json!(state.target_origin));
+    }
+    let inferior = state
+        .stopped_inferior_id
+        .as_ref()
+        .and_then(|id| state.inferiors.values().find(|inferior| &inferior.id == id))
+        .or_else(|| {
+            (state.inferiors.len() == 1)
+                .then(|| state.inferiors.values().next())
+                .flatten()
+        });
+    if let Some(inferior) = inferior {
+        summary.insert("status".into(), json!(inferior.status));
+        if let Some(pid) = inferior.pid {
+            summary.insert("pid".into(), Value::from(pid));
+        }
+        if let Some(exit_code) = &inferior.exit_code {
+            summary.insert("exit_code".into(), projected_exit_code(exit_code));
+        }
+    }
+    if !state.outcome_unknown_tokens.is_empty() {
+        summary.insert(
+            "outcome_unknown_tokens".into(),
+            json!(state.outcome_unknown_tokens),
+        );
+    }
+    if let Some(stop_id) = &state.stop_id {
+        summary.insert("stop_id".into(), json!(stop_id));
+    }
+    if let Some(reason) = &state.stop_reason_detail {
+        summary.insert("stop_reason".into(), json!(reason));
+    } else if let Some(reason) = &state.stop_reason {
+        summary.insert("stop_reason".into(), Value::String(reason.clone()));
+    }
+    if let Some(inferior_id) = &state.stopped_inferior_id {
+        summary.insert("inferior_id".into(), json!(inferior_id));
+    }
+    if let Some(thread_id) = &state.stopped_thread_id {
+        summary.insert("thread_id".into(), json!(thread_id));
+    }
+    // 2026-08-31: The compact stop state omitted an already captured frame,
+    // forcing Agents to spend another tool call on stop_context.
+    if let Some(frame) = state.stopped_frame() {
+        let mut frame = json!(frame);
+        if let Some(frame) = frame.as_object_mut() {
+            frame.retain(|_, value| !value.is_null());
+            if frame.get("function").and_then(Value::as_str) == Some("??") {
+                frame.remove("function");
+            }
+        }
+        summary.insert("frame".into(), frame);
+    }
+    if let Some(snapshot) = &state.snapshot
+        && (snapshot.partial
+            || snapshot.status != SnapshotStatus::Ready
+            || state.stop_id.as_ref() != Some(&snapshot.stop_id))
+    {
+        // A ready, complete snapshot for this stop repeats stop_id and adds no
+        // next-action semantics. Preserve every incomplete or mismatched case.
+        summary.insert("snapshot".into(), json!(snapshot));
+    }
+    if let Some(reason) = summary
+        .get_mut("stop_reason")
+        .and_then(Value::as_object_mut)
+    {
+        reason.retain(|_, value| !value.is_null());
+        if reason.get("disposition").and_then(Value::as_str) == Some("keep") {
+            reason.remove("disposition");
+        }
+    }
+    Value::Object(std::mem::take(summary))
+}
+
+// 2026-09-04: Projected state exposed GDB/MI's octal exit-code text, making
+// Agents translate values such as 0170 before checking process results.
+// Preserve unknown backend forms, but report recognized process codes as
+// decimal.
+fn projected_exit_code(exit_code: &str) -> Value {
+    let parsed = if exit_code == "0" {
+        Some(0)
+    } else if let Some(octal) = exit_code.strip_prefix('0') {
+        u32::from_str_radix(octal, 8).ok()
+    } else {
+        exit_code.parse().ok()
+    };
+    parsed.map(Value::from).unwrap_or_else(|| exit_code.into())
 }
 
 fn result_warnings(result: &Value) -> Vec<Warning> {
@@ -561,6 +1039,56 @@ fn collect_evidence_sequences(value: &Value, depth: usize, output: &mut BTreeSet
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_projections_share_facts_without_scanning_business_fields() {
+        let gap = SemanticResult::read(json!({"gap": true, "text": "tail"}), None, "sess_native");
+        assert!(!gap.metadata.semantics.complete);
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "native".into(),
+            session_id: Some("sess_native".into()),
+            method: CanonicalMethod::ValueEvaluate,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({}),
+        };
+        let facts = json!({"value": "18446744073709551615", "user": {
+            "evidence_seq": 999, "truncated": true, "artifact": "ordinary text"
+        }});
+        let result = SemanticResult::new(facts.clone(), None).command(
+            "sess_native",
+            "command",
+            CommandReply {
+                token: 1,
+                class: "done".into(),
+                record: gdb_ai_mi::parse_record(b"1^done", gdb_ai_mi::MiLimits::default()).unwrap(),
+                stream_records: Vec::new(),
+                stream_truncated: false,
+                evidence_seq: 42,
+            },
+        );
+        let audit = OperationResult::from(result.clone()).detailed_value();
+        let detailed = ApiResponse::semantic_success(&request, None, result.clone(), true);
+        let compact = ApiResponse::semantic_success(&request, None, result, false);
+        assert_eq!(detailed.result.as_ref(), Some(&audit));
+        assert!(detailed.result.unwrap()["command"]["record"].is_object());
+        assert_eq!(compact.result.as_ref(), Some(&facts));
+        assert!(!compact.truncated);
+        assert!(compact.artifacts.is_empty());
+        assert_eq!(compact.evidence, vec![Evidence::journal("sess_native", 42)]);
+        assert_eq!(compact.evidence, detailed.evidence);
+        let restored: ApiResponse = serde_json::from_value(json!(compact)).unwrap();
+        assert_eq!(restored.result, compact.result);
+        assert_eq!(restored.semantics, compact.semantics);
+    }
+
+    #[test]
+    fn projected_exit_codes_are_decimal_integers() {
+        assert_eq!(projected_exit_code("0170"), json!(120));
+        assert_eq!(projected_exit_code("0"), json!(0));
+        assert_eq!(projected_exit_code("unknown"), json!("unknown"));
+    }
 
     #[test]
     fn published_schema_uses_the_canonical_method_set() {
@@ -701,11 +1229,14 @@ mod tests {
             results: BTreeMap::from([("stack".into(), json!({"frames": []}))]),
             failures: BTreeMap::new(),
             complete: true,
+            availability: BTreeMap::new(),
             warnings: Vec::new(),
             evidence: vec![Evidence {
                 kind: "journal-entry".into(),
                 uri: "gdbai://session/sess_test/event/9".into(),
             }],
+            artifacts: Vec::new(),
+            truncated: false,
         };
 
         let serialized = serde_json::to_value(&observation).unwrap();

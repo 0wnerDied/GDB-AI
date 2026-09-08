@@ -3,7 +3,9 @@
 from .client import (
     ApiError,
     Client,
+    ObservationContext,
     ProtocolVersion,
+    ResultSemantics,
     RpcError,
     Session,
     ValueChange,
@@ -14,7 +16,9 @@ from .client import (
 __all__ = [
     "ApiError",
     "Client",
+    "ObservationContext",
     "ProtocolVersion",
+    "ResultSemantics",
     "RpcError",
     "Session",
     "ValueChange",

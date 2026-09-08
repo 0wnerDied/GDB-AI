@@ -517,6 +517,18 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
         .await;
     assert_eq!(denied.error.unwrap().code, ErrorCode::PolicyDenied);
 
+    let partial = successful(gateway.dispatch_agent(request(
+        "partial-expression-list", Some(&session_id), "value.evaluate", None,
+        json!({"stop_id": second_stop, "expressions": ["observed", "missing_symbol", "observed + 1"]})
+    ), &caller).await);
+    assert!(!partial.semantics.unwrap().complete);
+    let partial = partial.result.unwrap();
+    assert_eq!(partial["results"][0]["status"], "available");
+    assert_eq!(partial["results"][1]["status"], "failed");
+    assert_eq!(partial["results"][2]["status"], "available");
+    assert!(partial["failures"]["1"]["details"].get("record").is_none());
+    assert!(partial.get("commands").is_none());
+
     let snapshot_response = successful(
         gateway
             .dispatch(

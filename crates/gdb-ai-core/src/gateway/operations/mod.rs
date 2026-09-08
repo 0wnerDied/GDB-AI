@@ -1,9 +1,7 @@
-use serde_json::Value;
-
 use crate::{
     Result,
     gateway::{Caller, Gateway, RequestMode},
-    protocol::{ApiRequest, CanonicalMethod},
+    protocol::{ApiRequest, CanonicalMethod, ObservationContext, OperationResult, SemanticResult},
 };
 
 mod agent;
@@ -32,8 +30,17 @@ impl Gateway {
         request: &ApiRequest,
         caller: &Caller,
         mode: RequestMode,
-    ) -> Result<Value> {
-        match request.method {
+    ) -> Result<OperationResult> {
+        if request.method == CanonicalMethod::InspectionGet
+            && request
+                .parameters
+                .get("view")
+                .and_then(serde_json::Value::as_str)
+                == Some("evaluate")
+        {
+            return self.value_evaluate(request).await.map(Into::into);
+        }
+        let result = match request.method {
             CanonicalMethod::SessionCreate => self.session_create(request, caller, mode).await,
             CanonicalMethod::SessionGet => self.session_get(request, caller).await,
             CanonicalMethod::SessionList => self.session_list(caller).await,
@@ -74,12 +81,22 @@ impl Gateway {
             CanonicalMethod::InspectionGet => self.inspection_get(request).await,
             CanonicalMethod::InspectionSnapshot => self.inspection_snapshot(request).await,
             CanonicalMethod::InspectionDiff => self.inspection_diff(request).await,
-            CanonicalMethod::InspectionBatch => self.inspection_batch(request).await,
+            CanonicalMethod::InspectionBatch => {
+                return self.inspection_batch(request).await.map(Into::into);
+            }
             CanonicalMethod::InspectionSnapshotGet => self.inspection_snapshot_get(request).await,
-            CanonicalMethod::ValueEvaluate => self.value_evaluate(request).await,
-            CanonicalMethod::ValueCreate => self.value_create(request).await,
-            CanonicalMethod::ValueChildren => self.value_children(request).await,
-            CanonicalMethod::ValueUpdate => self.value_update(request).await,
+            CanonicalMethod::ValueEvaluate => {
+                return self.value_evaluate(request).await.map(Into::into);
+            }
+            CanonicalMethod::ValueCreate => {
+                return self.value_create(request).await.map(Into::into);
+            }
+            CanonicalMethod::ValueChildren => {
+                return self.value_children(request).await.map(Into::into);
+            }
+            CanonicalMethod::ValueUpdate => {
+                return self.value_update(request).await.map(Into::into);
+            }
             CanonicalMethod::ValueRelease => self.value_release(request).await,
             CanonicalMethod::MemoryRead => self.memory_read(request).await,
             CanonicalMethod::MemoryWrite => self.memory_write(request).await,
@@ -110,6 +127,48 @@ impl Gateway {
             CanonicalMethod::EventsWait => self.events_wait(request).await,
             CanonicalMethod::RawMi => self.raw_mi(request).await,
             CanonicalMethod::RawConsole => self.raw_console(request).await,
+        }?;
+        if !matches!(
+            request.method,
+            CanonicalMethod::InspectionGet
+                | CanonicalMethod::InspectionDiff
+                | CanonicalMethod::InspectionSnapshotGet
+                | CanonicalMethod::MemoryRead
+                | CanonicalMethod::MemorySearch
+                | CanonicalMethod::MemoryCompare
+                | CanonicalMethod::RegisterRead
+                | CanonicalMethod::DisassemblyRead
+                | CanonicalMethod::InferiorIoRead
+        ) {
+            return Ok(OperationResult::Legacy(result));
         }
+        let session_id = required_session(request)?;
+        let historical = result.get("historical") == Some(&serde_json::Value::Bool(true));
+        let context = if historical {
+            ObservationContext::from_observation(&result)?
+        } else {
+            self.entry(session_id)
+                .await?
+                .handle
+                .with_state(|state| context::observation_context(&request.parameters, state))?
+        };
+        let mut result = SemanticResult::read(result, context, session_id);
+        if request.method == CanonicalMethod::InspectionGet
+            && request
+                .parameters
+                .get("view")
+                .and_then(serde_json::Value::as_str)
+                == Some("source")
+        {
+            result.metadata.semantics.complete = true;
+        }
+        if request.method == CanonicalMethod::InspectionSnapshotGet {
+            for field in ["failures", "observation_failures"] {
+                if let Some(failures) = result.facts.get(field) {
+                    result.failures(field, serde_json::from_value(failures.clone())?);
+                }
+            }
+        }
+        Ok(result.into())
     }
 }

@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, future::Future, pin::Pin, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    pin::Pin,
+    time::Instant,
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_mi::{MiRecord, MiResult};
@@ -28,14 +33,17 @@ use crate::{
     backend::MiCommand,
     domain::{DomainEvent, FrameId, SessionId, TrackingDefinition},
     gateway::{Gateway, SessionEntry},
-    protocol::{ApiError, ApiRequest, ObservationContext, ObservationResult, result_evidence},
+    protocol::{
+        ApiError, ApiRequest, FactAvailability, ObservationContext, ObservationResult,
+        SemanticResult, result_evidence,
+    },
     providers::mappings,
     session::CommandReply,
 };
 
 #[derive(Clone)]
 enum CachedObservation {
-    Result(Value),
+    Result(Box<SemanticResult>),
     Failure(ApiError),
 }
 
@@ -256,7 +264,10 @@ impl Gateway {
                     .handle
                     .with_state(|state| state.signal_policies.clone()),
             )?),
-            "evaluate" => self.value_evaluate(request).await,
+            "evaluate" => self
+                .value_evaluate(request)
+                .await
+                .map(|result| result.into_value(true)),
             "memory" => self.observation_memory_read(request).await,
             "disassembly" => self.disassembly_read(request).await,
             "tracked" => self.inspection_tracking(&entry, request).await,
@@ -792,7 +803,7 @@ impl Gateway {
         Ok(snapshot)
     }
 
-    pub(super) async fn inspection_batch(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn inspection_batch(&self, request: &ApiRequest) -> Result<SemanticResult> {
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
         require_stopped_context(&request.parameters, &baseline)?;
@@ -803,19 +814,7 @@ impl Gateway {
         let observation = self
             .capture_observations(request, &entry, &baseline, requests, true)
             .await?;
-        let context = observation.context;
-        Ok(json!({
-            "observation_context": &context,
-            "observation_id": context.observation_id,
-            "stop_id": context.stop_id,
-            "revision": context.captured_revision,
-            "execution_epoch": context.execution_epoch,
-            "results": observation.results,
-            "failures": observation.failures,
-            "evidence": observation.evidence,
-            "complete": observation.complete,
-            "partial": !observation.complete
-        }))
+        Ok(observation.into_batch_result())
     }
 
     pub(super) async fn capture_observations(
@@ -835,16 +834,26 @@ impl Gateway {
         // 2026-09-08: Separate per-item limits allowed one turn to request
         // sixteen full memory reads. Validate the complete immutable plan and
         // its aggregate byte budget before the first backend observation.
-        let requests =
-            parse_observation_requests(items, stop_id, self.config.limits.memory_read_bytes)?;
+        let requests = parse_observation_requests(
+            items,
+            stop_id,
+            self.config.limits.memory_read_bytes,
+            &parent.parameters,
+        )?;
         let observation = entry
             .handle
             .stable_observation(
                 baseline,
                 Box::pin(async {
+                    let mut context = observation_context(&parent.parameters, baseline)?
+                        .expect("a stopped baseline has an observation context");
                     let mut results = BTreeMap::new();
                     let mut failures = BTreeMap::new();
                     let mut evidence = BTreeMap::new();
+                    let mut artifacts = BTreeSet::new();
+                    let mut warnings = Vec::new();
+                    let mut truncated = false;
+                    let mut availability = BTreeMap::new();
                     let mut cache = BTreeMap::<String, CachedObservation>::new();
                     let mut partial_success = false;
                     for request in requests {
@@ -854,11 +863,8 @@ impl Gateway {
                             Some(outcome) => outcome,
                             None => match self.execute_observation(parent, entry, &request).await {
                                 Ok(mut result) => {
-                                    for item in result_evidence(&entry.handle.id().0, &result) {
-                                        evidence.insert(item.uri.clone(), item);
-                                    }
-                                    request.finalize_result(&mut result);
-                                    CachedObservation::Result(result)
+                                    request.finalize_result(&mut result.facts);
+                                    CachedObservation::Result(Box::new(result))
                                 }
                                 Err(error) if independent_failure(error.code) => {
                                     // 2026-09-08: One unavailable read aborted
@@ -889,11 +895,39 @@ impl Gateway {
                                 .or_insert_with(|| outcome.clone());
                         }
                         match outcome {
-                            CachedObservation::Result(result) => {
-                                partial_success |= request.is_partial_result(&result);
-                                results.insert(request.name().to_owned(), result);
+                            CachedObservation::Result(mut result) => {
+                                partial_success |= !result.metadata.semantics.complete;
+                                for item in &result.metadata.evidence {
+                                    evidence.insert(item.uri.clone(), item.clone());
+                                }
+                                artifacts.extend(result.metadata.artifacts.iter().cloned());
+                                warnings.extend(result.metadata.warnings.iter().cloned());
+                                truncated |= result.metadata.truncated;
+                                availability
+                                    .insert(request.name().to_owned(), FactAvailability::Captured);
+                                // 2026-09-08: Native composition repeated the
+                                // shared stop in every view. The capture owns
+                                // attribution; historical facts keep theirs.
+                                if !result.metadata.semantics.historical
+                                    && result.facts.get("stop_id").and_then(Value::as_str)
+                                        == Some(&context.stop_id.0)
+                                {
+                                    result.facts.as_object_mut().unwrap().remove("stop_id");
+                                }
+                                results.insert(request.name().to_owned(), result.into_value(false));
                             }
                             CachedObservation::Failure(error) => {
+                                let status = if matches!(
+                                    error.code,
+                                    ErrorCode::CapabilityMissing
+                                        | ErrorCode::Unsupported
+                                        | ErrorCode::NotFound
+                                ) {
+                                    FactAvailability::Unavailable
+                                } else {
+                                    FactAvailability::Failed
+                                };
+                                availability.insert(request.name().to_owned(), status);
                                 failures.insert(request.name().to_owned(), error);
                             }
                         }
@@ -903,27 +937,17 @@ impl Gateway {
                     // complete turn because only explicit sibling failures
                     // contributed to the aggregate completeness flag.
                     let complete = failures.is_empty() && !partial_success;
-                    let captured_revision = entry.handle.with_state(|state| state.revision);
-                    let frame_id = baseline
-                        .stopped_thread_id
-                        .as_ref()
-                        .zip(baseline.stopped_frame())
-                        .map(|(thread, frame)| FrameId::new(thread, stop_id, frame.level));
+                    context.captured_revision = entry.handle.with_state(|state| state.revision);
                     Ok(ObservationResult {
-                        context: ObservationContext {
-                            observation_id: None,
-                            stop_id: stop_id.clone(),
-                            captured_revision,
-                            execution_epoch: baseline.execution_epoch,
-                            inferior_id: baseline.stopped_inferior_id.clone(),
-                            thread_id: baseline.stopped_thread_id.clone(),
-                            frame_id,
-                        },
+                        context,
                         complete,
                         results,
                         failures,
-                        warnings: Vec::new(),
+                        availability,
+                        warnings,
                         evidence: evidence.into_values().collect(),
+                        artifacts: artifacts.into_iter().collect(),
+                        truncated,
                     })
                 }),
             )
@@ -949,19 +973,29 @@ impl Gateway {
         parent: &'a ApiRequest,
         entry: &'a SessionEntry,
         request: &'a super::observation::ObservationRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<SemanticResult>> + Send + 'a>> {
         Box::pin(async move {
             let subrequest = request.subrequest(parent);
-            match request.kind() {
+            if request.kind() == ObservationKind::Evaluate {
+                return self.value_evaluate(&subrequest).await;
+            }
+            let context = entry
+                .handle
+                .with_state(|state| observation_context(&subrequest.parameters, state))?;
+            let result = match request.kind() {
                 ObservationKind::Inspection => self.inspection_get(&subrequest).await,
-                ObservationKind::Evaluate => self.value_evaluate(&subrequest).await,
+                ObservationKind::Evaluate => unreachable!(),
                 ObservationKind::Memory => {
                     self.observation_memory_read_with_entry(entry, &subrequest)
                         .await
                 }
                 ObservationKind::Disassembly => self.disassembly_read(&subrequest).await,
                 ObservationKind::Diff => self.inspection_diff(&subrequest).await,
-            }
+            }?;
+            let partial = request.is_partial_result(&result);
+            let mut result = SemanticResult::read(result, context, &entry.handle.id().0);
+            result.metadata.semantics.complete = !partial;
+            Ok(result)
         })
     }
 

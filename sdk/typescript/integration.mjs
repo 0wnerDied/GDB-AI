@@ -51,6 +51,8 @@ async function canonical(client, program) {
     assert.equal(context.result.stop_id, stopId);
     const stack = await session.call("inspection.get", { view: "stack", stop_id: stopId, limit: 4 });
     assert.ok(stack.result.frames.length);
+    assert.equal(stack.semantics.projection, "detailed");
+    assert.equal(stack.semantics.context.stop_id, stopId);
     await assert.rejects(session.call("inspection.get", { view: "stack", stop_id: "stale" }),
       (error) => error instanceof ApiError && error.code === "STALE_CONTEXT" && error.response.revision !== undefined);
     // I/O accepts the latest revision, so this keyed replay does not change
@@ -96,6 +98,8 @@ async function projected(client, program) {
     assert.equal(launched.state.backend, undefined);
     const stack = await call("gdb_inspect", { view: "stack", limit: 4 });
     assert.ok(stack.result.frames.length);
+    assert.equal(stack.context.stop_id, launched.state.stop_id);
+    assert.ok(stack.complete && stack.evidence.length);
     const statusUri = `gdbai://session/${sessionId}/status`;
     assert.ok((await client.listResources()).some((resource) => resource.uri === statusUri));
     const status = JSON.parse((await client.readResource(statusUri))[0].text);
@@ -109,6 +113,8 @@ async function projected(client, program) {
     ] })).result;
     assert.equal(captured.complete, false);
     assert.equal(captured.failures.missing.code, "GDB_ERROR");
+    assert.equal(captured.availability.missing, "failed");
+    assert.equal(captured.results.evaluate.status, "available");
     assert.equal(captured.results.evaluate.command, undefined);
     assert.equal(captured.failures.missing.details?.record, undefined);
     lookup = { session_id: sessionId, view: "observation", snapshot_id: captured.observation_id };

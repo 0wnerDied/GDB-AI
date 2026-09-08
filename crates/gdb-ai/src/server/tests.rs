@@ -12,6 +12,25 @@ use gdb_ai_core::{
 use tempfile::tempdir;
 
 #[test]
+fn native_projection_preserves_business_fields_and_typed_metadata() {
+    let response: ApiResponse = serde_json::from_value(json!({
+        "api_version": API_VERSION, "request_id": "native",
+        "result": {"value": "18446744073709551615", "command": {"record": "user fact"}},
+        "semantics": {"state": {"exit_code": 0}, "complete": false, "historical": true, "projection": "compact"},
+        "warnings": [], "truncated": false, "artifacts": [],
+        "evidence": [{"kind": "journal-entry", "uri": "gdbai://session/sess_test/event/42"}]
+    }))
+    .unwrap();
+    let facts = response.result.clone().unwrap();
+    let projected = compact_tool_response(response, CanonicalMethod::ValueEvaluate);
+    assert_eq!(projected["result"], facts);
+    assert_eq!(projected["complete"], false);
+    assert_eq!(projected["historical"], true);
+    assert_eq!(projected["state"]["exit_code"], 0);
+    assert_eq!(projected["evidence"][0]["kind"], "journal-entry");
+}
+
+#[test]
 fn initialize_teaches_agents_the_stateful_workflow() {
     let mut phase = Phase::New;
     let mut caller = Caller::local("test");
@@ -870,13 +889,6 @@ fn tool_results_compact_status_and_preserve_explicit_target_state() {
     assert_eq!(listed["revision"], 7);
     assert_eq!(listed["breakpoints"].as_object().unwrap().len(), 64);
     assert_eq!(listed["limitations"][0], "large repeated diagnostic");
-}
-
-#[test]
-fn projected_exit_codes_are_decimal_integers() {
-    assert_eq!(projected_exit_code("0170"), json!(120));
-    assert_eq!(projected_exit_code("0"), json!(0));
-    assert_eq!(projected_exit_code("unknown"), json!("unknown"));
 }
 
 #[test]

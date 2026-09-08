@@ -8,11 +8,12 @@ use std::{
 };
 
 use gdb_ai_core::{
-    domain::{
-        BackendHealth, Consistency, SessionLifecycle, SessionState, SnapshotStatus, TargetOrigin,
-    },
+    domain::SessionState,
     gateway::{Caller, Gateway},
-    protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod, is_command_reply},
+    protocol::{
+        API_VERSION, ApiRequest, ApiResponse, CanonicalMethod, is_command_reply,
+        session_coordination_state,
+    },
 };
 use serde_json::{Map, Value, json};
 use tokio::{
@@ -734,6 +735,11 @@ fn projected_tool_result(structured: Value) -> Value {
 // registries after every tool call consumed Agent context and serialized data
 // unrelated to the operation. Detailed views remain available on demand.
 fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Value {
+    if response.semantics.as_ref().is_some_and(|semantics| {
+        semantics.projection == gdb_ai_core::protocol::ResultProjection::Compact
+    }) {
+        return semantic_tool_response(response);
+    }
     let ApiResponse {
         session_id: _,
         revision: _,
@@ -1054,6 +1060,46 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
     Value::Object(compact)
 }
 
+fn semantic_tool_response(response: ApiResponse) -> Value {
+    // 2026-09-08: Native facts were reconstructed as a full envelope and
+    // recursively pruned by method. The core now owns their context,
+    // completeness and evidence; MCP only projects the typed envelope.
+    let semantics = response.semantics.expect("native response has semantics");
+    let mut projected = Map::new();
+    if let Some(state) = semantics.state {
+        projected.insert("state".into(), state);
+    }
+    if let Some(result) = response.result {
+        projected.insert("result".into(), result);
+    }
+    if let Some(context) = semantics.context {
+        projected.insert("context".into(), json!(context));
+    }
+    projected.insert("complete".into(), Value::Bool(semantics.complete));
+    if semantics.historical {
+        projected.insert("historical".into(), Value::Bool(true));
+    }
+    if !response.warnings.is_empty() {
+        projected.insert("warnings".into(), json!(response.warnings));
+    }
+    if response.truncated {
+        projected.insert("truncated".into(), Value::Bool(true));
+    }
+    if let Some(continuation) = response.continuation {
+        projected.insert("continuation".into(), continuation);
+    }
+    if !response.artifacts.is_empty() {
+        projected.insert("artifacts".into(), json!(response.artifacts));
+    }
+    if !response.evidence.is_empty() {
+        projected.insert("evidence".into(), json!(response.evidence));
+    }
+    if let Some(error) = response.error {
+        projected.insert("error".into(), json!(error));
+    }
+    Value::Object(projected)
+}
+
 fn compact_observation_errors(result: &mut Map<String, Value>) {
     // 2026-09-08: Composite observation failures bypassed the envelope error
     // projector and exposed raw MI records. Limit compaction to typed slots.
@@ -1153,113 +1199,6 @@ fn compact_mapping_metadata(value: &mut Value) {
         }
         _ => {}
     }
-}
-
-fn session_coordination_state(state: &SessionState) -> Value {
-    let mut summary = json!({});
-    let summary = summary.as_object_mut().unwrap();
-    // 2026-09-01: Healthy active state repeated on every successful stopped
-    // turn in the blind trace. Absence means the ordinary case; exceptional
-    // lifecycle and backend values remain explicit.
-    if state.lifecycle != SessionLifecycle::Active {
-        summary.insert("lifecycle".into(), json!(state.lifecycle));
-    }
-    if state.backend != BackendHealth::Healthy {
-        summary.insert("backend".into(), json!(state.backend));
-    }
-    if state.consistency != Consistency::Clean {
-        summary.insert("consistency".into(), json!(state.consistency));
-    }
-    if state.reconciliation_required {
-        summary.insert("reconciliation_required".into(), Value::Bool(true));
-    }
-    if state.target_origin != TargetOrigin::Unknown {
-        summary.insert("target_origin".into(), json!(state.target_origin));
-    }
-    let inferior = state
-        .stopped_inferior_id
-        .as_ref()
-        .and_then(|id| state.inferiors.values().find(|inferior| &inferior.id == id))
-        .or_else(|| {
-            (state.inferiors.len() == 1)
-                .then(|| state.inferiors.values().next())
-                .flatten()
-        });
-    if let Some(inferior) = inferior {
-        summary.insert("status".into(), json!(inferior.status));
-        if let Some(pid) = inferior.pid {
-            summary.insert("pid".into(), Value::from(pid));
-        }
-        if let Some(exit_code) = &inferior.exit_code {
-            summary.insert("exit_code".into(), projected_exit_code(exit_code));
-        }
-    }
-    if !state.outcome_unknown_tokens.is_empty() {
-        summary.insert(
-            "outcome_unknown_tokens".into(),
-            json!(state.outcome_unknown_tokens),
-        );
-    }
-    if let Some(stop_id) = &state.stop_id {
-        summary.insert("stop_id".into(), json!(stop_id));
-    }
-    if let Some(reason) = &state.stop_reason_detail {
-        summary.insert("stop_reason".into(), json!(reason));
-    } else if let Some(reason) = &state.stop_reason {
-        summary.insert("stop_reason".into(), Value::String(reason.clone()));
-    }
-    if let Some(inferior_id) = &state.stopped_inferior_id {
-        summary.insert("inferior_id".into(), json!(inferior_id));
-    }
-    if let Some(thread_id) = &state.stopped_thread_id {
-        summary.insert("thread_id".into(), json!(thread_id));
-    }
-    // 2026-08-31: The compact stop state omitted an already captured frame,
-    // forcing Agents to spend another tool call on stop_context.
-    if let Some(frame) = state.stopped_frame() {
-        let mut frame = json!(frame);
-        if let Some(frame) = frame.as_object_mut() {
-            frame.retain(|_, value| !value.is_null());
-            if frame.get("function").and_then(Value::as_str) == Some("??") {
-                frame.remove("function");
-            }
-        }
-        summary.insert("frame".into(), frame);
-    }
-    if let Some(snapshot) = &state.snapshot
-        && (snapshot.partial
-            || snapshot.status != SnapshotStatus::Ready
-            || state.stop_id.as_ref() != Some(&snapshot.stop_id))
-    {
-        // A ready, complete snapshot for this stop repeats stop_id and adds no
-        // next-action semantics. Preserve every incomplete or mismatched case.
-        summary.insert("snapshot".into(), json!(snapshot));
-    }
-    if let Some(reason) = summary
-        .get_mut("stop_reason")
-        .and_then(Value::as_object_mut)
-    {
-        reason.retain(|_, value| !value.is_null());
-        if reason.get("disposition").and_then(Value::as_str) == Some("keep") {
-            reason.remove("disposition");
-        }
-    }
-    Value::Object(std::mem::take(summary))
-}
-
-// 2026-09-04: Projected state exposed GDB/MI's octal exit-code text, making
-// Agents translate values such as 0170 before checking an exploit result.
-// Preserve unknown backend forms, but report recognized process codes as
-// decimal.
-fn projected_exit_code(exit_code: &str) -> Value {
-    let parsed = if exit_code == "0" {
-        Some(0)
-    } else if let Some(octal) = exit_code.strip_prefix('0') {
-        u32::from_str_radix(octal, 8).ok()
-    } else {
-        exit_code.parse().ok()
-    };
-    parsed.map(Value::from).unwrap_or_else(|| exit_code.into())
 }
 
 fn canonical_request(

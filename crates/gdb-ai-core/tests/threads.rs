@@ -181,8 +181,11 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
         )
         .await,
     );
+    let value_context = value.semantics.as_ref().unwrap().context.as_ref().unwrap();
+    assert_eq!(json!(value_context.thread_id), worker["thread_id"]);
+    assert_eq!(json!(value_context.frame_id), worker_frame["frame_id"]);
     let value_id = &value.result.as_ref().unwrap()["value_id"];
-    successful(
+    let children = successful(
         call(
             "bound-children",
             "value.children",
@@ -191,6 +194,10 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
             }),
         )
         .await,
+    );
+    assert_eq!(
+        children.semantics.unwrap().context.unwrap().frame_id,
+        value_context.frame_id
     );
     let mismatch = call(
         "bound-mismatch",

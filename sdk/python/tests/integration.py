@@ -56,6 +56,8 @@ def canonical(client, program):
         assert context["result"]["stop_id"] == stop_id, context
         stack = session.call("inspection.get", {"view": "stack", "stop_id": stop_id, "limit": 4})
         assert stack["result"]["frames"], stack
+        assert stack["semantics"]["projection"] == "detailed", stack
+        assert stack["semantics"]["context"]["stop_id"] == stop_id, stack
         try:
             session.call("inspection.get", {"view": "stack", "stop_id": "stale"})
         except ApiError as error:
@@ -103,6 +105,8 @@ def projected(client, program):
         assert "backend" not in launched["state"], launched
         stack = call("gdb_inspect", view="stack", limit=4)
         assert stack["result"]["frames"], stack
+        assert stack["context"]["stop_id"] == launched["state"]["stop_id"], stack
+        assert stack["complete"] and stack["evidence"], stack
         status_uri = f"gdbai://session/{session_id}/status"
         assert status_uri in {resource["uri"] for resource in client.list_resources()}
         status = json.loads(client.read_resource(status_uri)[0]["text"])
@@ -121,6 +125,8 @@ def projected(client, program):
         ])["result"]
         assert not captured["complete"], captured
         assert captured["failures"]["missing"]["code"] == "GDB_ERROR", captured
+        assert captured["availability"]["missing"] == "failed", captured
+        assert captured["results"]["evaluate"]["status"] == "available", captured
         assert "command" not in captured["results"]["evaluate"], captured
         assert "record" not in captured["failures"]["missing"].get("details", {}), captured
         observation_id = captured["observation_id"]

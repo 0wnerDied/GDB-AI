@@ -18,7 +18,7 @@ use crate::{
     metrics::Metrics,
     persistence::{ArtifactLimits, StorageLock, Store, prune_retained_sessions},
     policy::{Effect, Profile, effect_for_method},
-    protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod, Warning},
+    protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod, OperationResult, Warning},
     session::SessionHandle,
 };
 
@@ -280,7 +280,17 @@ impl Gateway {
             .await;
         let mut response = match result {
             Ok((state, result, warnings)) => {
-                let mut response = ApiResponse::success(&request, state, result);
+                let mut response = match result {
+                    OperationResult::Semantic(result) => ApiResponse::semantic_success(
+                        &request,
+                        state,
+                        *result,
+                        mode == RequestMode::Canonical,
+                    ),
+                    OperationResult::Legacy(result) => {
+                        ApiResponse::success(&request, state, result)
+                    }
+                };
                 response.warnings.extend(warnings);
                 response
             }
@@ -351,7 +361,11 @@ impl Gateway {
         caller: &Caller,
         admitted: bool,
         mode: RequestMode,
-    ) -> Result<(Option<crate::domain::SessionState>, Value, Vec<Warning>)> {
+    ) -> Result<(
+        Option<crate::domain::SessionState>,
+        OperationResult,
+        Vec<Warning>,
+    )> {
         // 2026-08-30: Canonical MCP operations are fully validated before
         // admission. Avoid repeating schema and request-size traversal when
         // their Gateway-owned task dispatches the same immutable request.
@@ -684,7 +698,7 @@ impl Gateway {
         let completed_entry = match (&entry, result.as_ref()) {
             (Some(entry), _) => Some(entry.clone()),
             (None, Ok(result)) if request.method == CanonicalMethod::SessionCreate => {
-                match result.get("session_id").and_then(Value::as_str) {
+                match result.facts().get("session_id").and_then(Value::as_str) {
                     Some(id) => self.sessions.read().await.get(id).cloned(),
                     None => None,
                 }
@@ -722,7 +736,7 @@ impl Gateway {
                 }
             }
             let audit_result = match &result {
-                Ok(result) => serde_json::json!({ "result": result }),
+                Ok(result) => serde_json::json!({ "result": result.detailed_value() }),
                 Err(error) => serde_json::json!({
                     "error": {
                         "code": error.code,
@@ -747,7 +761,9 @@ impl Gateway {
         let result = result?;
         let state = match completed_entry {
             Some(entry)
-                if mode == RequestMode::Agent && self_attributed_observation(request, &result) =>
+                if mode == RequestMode::Agent
+                    && (matches!(result, OperationResult::Semantic(_))
+                        || self_attributed_observation(request, result.facts())) =>
             {
                 // 2026-09-08: Agent observations already carry their captured
                 // stop/epoch context, but success still cloned every growing
