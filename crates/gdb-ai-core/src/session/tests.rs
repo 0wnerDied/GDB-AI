@@ -358,12 +358,17 @@ async fn timeout_fences_late_result() {
         .bare("console")
         .unwrap()
         .string("shell sleep 0.5");
-    let timeout = session
-        .command_with_timeout(slow, Duration::from_millis(10))
-        .await
-        .unwrap_err();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let operation = ActiveOperation::new(OperationId::new(), cancelled.clone());
+    let timeout = scope_operation(
+        operation.clone(),
+        session.command_with_timeout(slow, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(timeout.code, ErrorCode::Timeout);
     assert!(!session.state().outcome_unknown_tokens.is_empty());
+    cancelled.store(true, Ordering::Release);
 
     let fenced = session
         .command(MiCommand::new("-gdb-version").unwrap())
@@ -379,7 +384,35 @@ async fn timeout_fences_late_result() {
     .await
     .unwrap();
     assert!(session.state().reconciliation_required);
+    // Attribution of a late success clears the MI fence, but cannot revive
+    // the cancelled caller or turn its next command into a target effect.
+    let rejected = scope_operation(
+        operation,
+        session.command(MiCommand::new("-gdb-version").unwrap()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(rejected.code, ErrorCode::Cancelled);
+    session
+        .command(MiCommand::new("-gdb-version").unwrap())
+        .await
+        .unwrap();
     session.close().await.unwrap();
+    let replayed = crate::replay::replay(
+        directory
+            .path()
+            .join("sessions")
+            .join(&session.id().0)
+            .join("journal.jsonl"),
+        session.id().clone(),
+    )
+    .unwrap();
+    assert!(replayed.complete);
+    assert!(replayed.state.outcome_unknown_tokens.is_empty());
+    assert_eq!(
+        replayed.state.lifecycle,
+        crate::domain::SessionLifecycle::Closed
+    );
 }
 
 #[tokio::test]
