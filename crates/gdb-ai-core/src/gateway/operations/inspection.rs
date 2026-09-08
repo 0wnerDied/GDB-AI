@@ -46,6 +46,19 @@ enum CachedObservation {
     Failure(ApiError),
 }
 
+fn disassembly_architecture(reply: Result<CommandReply>) -> Result<&'static str> {
+    // 2026-09-08: Optional architecture metadata swallowed control failures
+    // after disassembly. Only independent read errors may degrade to unknown.
+    match reply {
+        Ok(reply) => Ok(target_architecture(&result_string_list(
+            &reply.record,
+            "register-names",
+        ))),
+        Err(error) if independent_failure(error.code) => Ok("unknown"),
+        Err(error) => Err(error),
+    }
+}
+
 impl Gateway {
     pub(super) async fn inspection_get(&self, request: &ApiRequest) -> Result<Value> {
         let view = string(&request.parameters, "view")?;
@@ -1388,13 +1401,7 @@ impl Gateway {
                     .bare(mode)?,
             )
             .await?;
-        let architecture = entry
-            .handle
-            .register_names()
-            .await
-            .ok()
-            .map(|reply| target_architecture(&result_string_list(&reply.record, "register-names")))
-            .unwrap_or("unknown");
+        let architecture = disassembly_architecture(entry.handle.register_names().await)?;
         let mut instructions = disassembly_instructions(&reply.record, current, around_limit);
         // 2026-08-31: Some GDB modes still supplied source metadata and the
         // normalizer emitted null opcode fields. Enforce both requested
@@ -1513,5 +1520,29 @@ impl Gateway {
             "partial": start > 0 || end < lines.len(),
             "source": {"provider": "linux-userland", "mechanism": "workspace-file"}
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disassembly_metadata_preserves_control_failures() {
+        for code in [
+            ErrorCode::Timeout,
+            ErrorCode::Cancelled,
+            ErrorCode::StaleContext,
+            ErrorCode::GdbExited,
+            ErrorCode::GdbUnresponsive,
+        ] {
+            let error =
+                disassembly_architecture(Err(Error::new(code, "metadata failed"))).unwrap_err();
+            assert_eq!(error.code, code);
+        }
+        assert_eq!(
+            disassembly_architecture(Err(Error::new(ErrorCode::GdbError, "unsupported"))).unwrap(),
+            "unknown"
+        );
     }
 }
