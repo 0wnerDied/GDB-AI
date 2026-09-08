@@ -109,11 +109,9 @@ try:
             "program": "/workspace/app",
             "stop": "main",
             "wait": {"until": "snapshot", "timeout_ms": 5000},
+            "inspect": [{"view": "stack", "limit": 8}],
         })
-        stack = session.call("inspection.get", {
-            "view": "stack", "stop_id": launched["state"]["stop_id"], "limit": 8,
-        })
-        print(stack["result"])
+        print(launched["result"]["observations"]["stack"])
         session.call("execution.control", {
             "action": "continue", "wait": {"until": "exited", "timeout_ms": 5000},
         })
@@ -146,13 +144,11 @@ try {
   );
   const session_id = created.result!.session_id;
   try {
-    await client.callTool("gdb_session", {
+    const launched = await client.callTool("gdb_session", {
       action: "launch", session_id, program: "/workspace/app", stop: "main",
+      inspect: [{ view: "stack", limit: 8 }],
     });
-    const stack = await client.callTool("gdb_inspect", {
-      session_id, view: "stack", limit: 8,
-    });
-    console.log(stack.result);
+    console.log(launched.result);
     await client.callTool("gdb_run", { session_id, action: "continue" });
   } finally {
     const closed = await client.callTool("gdb_session", { session_id, action: "close" });

@@ -50,8 +50,11 @@ def canonical(client, program):
         launched = session.call("target.launch", {
             "program": program, "environment": {"GDB_AI_TEST_ENV": "sdk-世界"},
             "stop": "first_instruction", "wait": {"until": "snapshot", "timeout_ms": 5000},
+            "inspect": [{"view": "stack", "limit": 4}],
         })
         stop_id = launched["state"]["stop_id"]
+        assert launched["result"]["observations"]["stack"]["frames"], launched
+        assert launched["semantics"]["context"]["stop_id"] == stop_id, launched
         context = session.call("inspection.get", {"view": "stop_context"})
         assert context["result"]["stop_id"] == stop_id, context
         stack = session.call("inspection.get", {"view": "stack", "stop_id": stop_id, "limit": 4})
