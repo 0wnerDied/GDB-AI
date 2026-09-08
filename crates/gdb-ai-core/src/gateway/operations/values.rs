@@ -52,6 +52,11 @@ pub(super) fn value_status(fields: &[MiResult]) -> ValueStatus {
         Some("1" | "true") | None => {
             match MiResult::find(fields, "value").and_then(|value| value.as_bytes()) {
                 Some(b"<optimized out>" | b"<unavailable>") => ValueStatus::Unavailable,
+                // 2026-09-09: GDB can return ^done with a variable read error
+                // as its value. Preserve the text without claiming a value.
+                Some(value) if value.starts_with(b"<error reading variable:") => {
+                    ValueStatus::Failed
+                }
                 Some(_) => ValueStatus::Available,
                 None => ValueStatus::NotCollected,
             }

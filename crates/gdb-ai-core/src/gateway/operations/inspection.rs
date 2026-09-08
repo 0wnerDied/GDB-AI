@@ -16,10 +16,11 @@ use super::{
     evaluation::safe_evaluate_command,
     memory::read_memory_bytes,
     mi::{
-        disassembly_instructions, frame_summary, normalized_arguments, normalized_frames,
-        normalized_modules, normalized_source_files, normalized_symbols, normalized_threads,
-        normalized_variables, register_role_candidates, register_values, resolve_register_name,
-        result_string_list, result_text, target_architecture, valid_integer_literal,
+        disassembly_instructions, frame_summary, normalized_arguments, normalized_frame_variables,
+        normalized_frames, normalized_modules, normalized_source_files, normalized_symbols,
+        normalized_threads, normalized_variables, register_role_candidates, register_values,
+        resolve_register_name, result_string_list, result_text, target_architecture,
+        valid_integer_literal,
     },
     observation::{
         ObservationKind, parse_observation_requests, snapshot_requests,
@@ -63,9 +64,11 @@ fn disassembly_architecture(reply: Result<CommandReply>) -> Result<&'static str>
 fn thread_facts(stop_id: Option<&StopId>, threads: Vec<Value>, evidence_seq: u64) -> Value {
     // 2026-09-08: Per-thread stack errors retained valid siblings but left
     // direct and composed reads marked complete. Carry the gap with the facts.
-    let partial = threads
-        .iter()
-        .any(|thread| thread.get("error").is_some() || thread.get("arguments_error").is_some());
+    let partial = threads.iter().any(|thread| {
+        thread.get("error").is_some()
+            || thread.get("arguments_error").is_some()
+            || thread["partial"] == true
+    });
     json!({
         "stop_id": stop_id,
         "threads": threads,
@@ -118,6 +121,39 @@ fn stack_facts(
     Ok(facts)
 }
 
+fn compact_stack_variable_errors(mut result: SemanticResult, threads: bool) -> SemanticResult {
+    if result.metadata.semantics.complete {
+        return result;
+    }
+    fn compact_frames(frames: &mut Value) {
+        let Some(frames) = frames.as_array_mut() else {
+            return;
+        };
+        for frame in frames {
+            if let Some(error) = frame.get_mut("variables_error") {
+                let detailed: ApiError = serde_json::from_value(error.take())
+                    .expect("frame variable failures are API errors");
+                *error = json!(detailed.compact());
+            }
+        }
+    }
+    // 2026-09-09: Partial frame reads otherwise expose raw MI in native
+    // facts. Evidence is already promoted; keep originals only for detailed
+    // output, without scanning variable values or copying successful stacks.
+    let field = if threads { "threads" } else { "frames" };
+    let detailed = result.facts[field].clone();
+    if threads {
+        for thread in result.facts[field].as_array_mut().unwrap() {
+            if let Some(frames) = thread.get_mut("frames") {
+                compact_frames(frames);
+            }
+        }
+    } else {
+        compact_frames(&mut result.facts[field]);
+    }
+    result.detail(field, detailed)
+}
+
 impl Gateway {
     pub(super) async fn inspection_result(&self, request: &ApiRequest) -> Result<SemanticResult> {
         let view = string(&request.parameters, "view")?;
@@ -150,8 +186,11 @@ impl Gateway {
                 .with_state(|state| observation_context(&request.parameters, state))?
         };
         let mut result = SemanticResult::read(facts, context, session_id);
-        if view == "source" {
-            result.metadata.semantics.complete = true;
+        match view.as_str() {
+            "source" => result.metadata.semantics.complete = true,
+            "stack" => result = compact_stack_variable_errors(result, false),
+            "threads" => result = compact_stack_variable_errors(result, true),
+            _ => {}
         }
         Ok(result)
     }
@@ -388,7 +427,35 @@ impl Gateway {
                             vec![("bare", offset.to_string()), ("bare", end.to_string())],
                         )
                         .await?;
-                    let frames = normalized_frames(&reply.record, state, &request.parameters)?;
+                    let mut frames = normalized_frames(&reply.record, state, &request.parameters)?;
+                    if bool_value(&request.parameters, "include_locals", false) {
+                        // 2026-09-09: Caller locals and aggregate contents
+                        // required follow-up turns after discovering frames.
+                        // Read each captured frame at this same fenced stop.
+                        let mut evidence_seq = reply.evidence_seq;
+                        let mut partial = false;
+                        for frame in &mut frames {
+                            let mut variables_request = request.clone();
+                            variables_request.parameters["frame_level"] = frame["level"].clone();
+                            variables_request.parameters["frame_id"] = frame["frame_id"].clone();
+                            match self.inspection_frame_variables(entry, &variables_request).await {
+                                Ok(mut variables) => {
+                                    let variables = variables.as_object_mut().unwrap();
+                                    evidence_seq = variables.remove("evidence_seq").unwrap().as_u64().unwrap();
+                                    partial |= variables.contains_key("variables_error");
+                                    frame.as_object_mut().unwrap().extend(std::mem::take(variables));
+                                }
+                                Err(error) if error.code.is_independent_read_failure() => {
+                                    frame["arguments"] = Value::Null;
+                                    frame["locals"] = Value::Null;
+                                    frame["variables_error"] = json!(ApiError::from(error));
+                                    partial = true;
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        return Ok(json!({"stop_id": state.stop_id, "frames": frames, "partial": partial, "evidence_seq": evidence_seq}));
+                    }
                     let arguments = self
                         .inspection_command(
                             entry,
@@ -410,6 +477,66 @@ impl Gateway {
             .await
     }
 
+    async fn inspection_frame_variables(
+        &self,
+        entry: &SessionEntry,
+        request: &ApiRequest,
+    ) -> Result<Value> {
+        let types = self
+            .inspection_command(
+                entry,
+                request,
+                "-stack-list-variables",
+                vec![("bare", "--simple-values".into())],
+            )
+            .await?;
+        let (mut arguments, mut locals) = normalized_frame_variables(&types.record, None)?;
+        let mut evidence_seq = types.evidence_seq;
+        let mut error = None;
+        if arguments
+            .iter()
+            .chain(&locals)
+            .any(|variable| variable["status"] == "not_collected")
+        {
+            let values = self
+                .inspection_command(
+                    entry,
+                    request,
+                    "-stack-list-variables",
+                    vec![("bare", "--all-values".into())],
+                )
+                .await;
+            let merged = values.and_then(|values| {
+                evidence_seq = values.evidence_seq;
+                normalized_frame_variables(&types.record, Some(&values.record))
+            });
+            match merged {
+                Ok(variables) => (arguments, locals) = variables,
+                Err(failure) if failure.code.is_independent_read_failure() => {
+                    error = Some(ApiError::from(failure))
+                }
+                Err(failure) => return Err(failure),
+            }
+        }
+        if error.is_none()
+            && arguments
+                .iter()
+                .chain(&locals)
+                .any(|variable| variable["status"] == "failed")
+        {
+            error = Some(ApiError::from(Error::new(
+                ErrorCode::GdbError,
+                "GDB could not read every frame variable",
+            )));
+        }
+        let mut facts =
+            json!({"arguments": arguments, "locals": locals, "evidence_seq": evidence_seq});
+        if let Some(error) = error {
+            facts["variables_error"] = json!(error);
+        }
+        Ok(facts)
+    }
+
     async fn inspection_threads(
         &self,
         entry: &SessionEntry,
@@ -417,13 +544,16 @@ impl Gateway {
     ) -> Result<Value> {
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
-        let limit = bounded_limit(
+        let mut limit = bounded_limit(
             &request.parameters,
             64.min(self.config.limits.value_children),
             self.config.limits.value_children,
         )?;
         let offset = request.parameters["offset"].as_u64().unwrap_or(0);
-        let depth = request.parameters["stack_depth"].as_u64();
+        let include_locals = bool_value(&request.parameters, "include_locals", false);
+        let depth = request.parameters["stack_depth"]
+            .as_u64()
+            .or_else(|| include_locals.then_some(1));
         if depth.is_some_and(|depth| depth == 0 || depth > self.config.limits.stack_frames as u64) {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
@@ -432,6 +562,11 @@ impl Gateway {
                     self.config.limits.stack_frames
                 ),
             ));
+        }
+        if include_locals {
+            // Full variables need per-frame reads. Bound a thread page by the
+            // existing frame budget rather than multiplying it by thread count.
+            limit = limit.min(self.config.limits.stack_frames / depth.unwrap() as usize);
         }
         // 2026-09-05: Thread discovery followed by per-thread stack calls
         // split hang diagnosis across turns. Capture the page at one stop,
@@ -454,7 +589,7 @@ impl Gateway {
                             })?;
                             let mut stack_request = request.clone();
                             stack_request.parameters =
-                                json!({"stop_id": state.stop_id, "thread_id": thread_id});
+                                json!({"stop_id": state.stop_id, "thread_id": thread_id, "include_locals": include_locals});
                             match self
                                 .inspection_stack(entry, &state, &stack_request, 0, depth as usize)
                                 .await
@@ -466,6 +601,9 @@ impl Gateway {
                                         thread["next_frame_offset"] = Value::from(depth);
                                     }
                                     thread["frames"] = frames;
+                                    if include_locals && stack["partial"] == true {
+                                        thread["partial"] = Value::Bool(true);
+                                    }
                                     thread.as_object_mut().unwrap().remove("frame");
                                     if let Some(error) =
                                         stack.as_object_mut().unwrap().remove("arguments_error")
@@ -1678,6 +1816,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stack_variable_errors_keep_evidence_and_detailed_diagnostics() {
+        let failure = json!({
+            "code": "GDB_ERROR", "message": "variable unavailable", "retryable": false,
+            "details": {"record": {"class": "error"}, "token": 7, "evidence_seq": 91, "frame_level": 2}
+        });
+        let frame = json!({
+            "level": 2, "arguments": [], "variables_error": failure,
+            "locals": [{"name": "data", "value": {"variables_error": failure}}]
+        });
+        for threads in [false, true] {
+            let facts = if threads {
+                json!({"threads": [{"frames": [frame]}, {"error": {"code": "GDB_ERROR"}}], "partial": true})
+            } else {
+                json!({"frames": [frame], "partial": true})
+            };
+            let result = compact_stack_variable_errors(
+                SemanticResult::read(facts.clone(), None, "sess_stack"),
+                threads,
+            );
+            assert!(!result.metadata.semantics.complete);
+            assert!(
+                result
+                    .metadata
+                    .evidence
+                    .iter()
+                    .any(|evidence| { evidence.uri == "gdbai://session/sess_stack/event/91" })
+            );
+            assert_eq!(result.clone().into_value(true), facts);
+            let compact = result.into_value(false);
+            let captured = if threads {
+                assert_eq!(compact["threads"][1], facts["threads"][1]);
+                &compact["threads"][0]["frames"][0]
+            } else {
+                &compact["frames"][0]
+            };
+            assert_eq!(
+                captured["variables_error"]["details"],
+                json!({"frame_level": 2})
+            );
+            assert_eq!(
+                captured["variables_error"]["message"],
+                "variable unavailable"
+            );
+            assert_eq!(captured["locals"], frame["locals"]);
+        }
+    }
+
+    #[test]
     fn stack_arguments_keep_absolute_levels_and_partial_failures() {
         let frames = vec![json!({"level": 2}), json!({"level": 4})];
         let record = gdb_ai_mi::parse_record(
@@ -1771,6 +1957,18 @@ mod tests {
         );
         assert!(!partial.metadata.semantics.complete);
         assert_eq!(partial.facts["threads"], json!([captured, failed]));
+        let mut locals_failed = captured.clone();
+        locals_failed["partial"] = Value::Bool(true);
+        assert!(
+            !SemanticResult::read(
+                thread_facts(None, vec![locals_failed], 1),
+                None,
+                "session_test"
+            )
+            .metadata
+            .semantics
+            .complete
+        );
         let mut arguments_failed = captured;
         arguments_failed["arguments_error"] = json!({"code": "GDB_ERROR"});
         assert!(

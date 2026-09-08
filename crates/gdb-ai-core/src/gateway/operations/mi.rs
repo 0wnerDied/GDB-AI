@@ -131,6 +131,53 @@ pub(super) fn normalized_variables(record: &MiRecord, name: &str) -> Vec<Value> 
         .collect()
 }
 
+pub(super) fn normalized_frame_variables(
+    types: &MiRecord,
+    values: Option<&MiRecord>,
+) -> Result<(Vec<Value>, Vec<Value>)> {
+    fn fields(record: &MiRecord) -> Result<&MiValue> {
+        MiResult::find(record.results(), "variables")
+            .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB omitted frame variables"))
+    }
+    let typed = aggregate_items(fields(types)?, "variable");
+    let values = values
+        .map(|record| fields(record).map(|fields| aggregate_items(fields, "variable")))
+        .transpose()?;
+    // All-values omits types. Join only identical ordered symbol identities,
+    // including declaration and shadowing fields when GDB supplies them.
+    if let Some(values) = &values
+        && (typed.len() != values.len()
+            || typed.iter().zip(values).any(|(typed, value)| {
+                ["name", "arg", "filename", "fullname", "line", "shadowed"]
+                    .iter()
+                    .any(|field| MiResult::find(typed, field) != MiResult::find(value, field))
+            }))
+    {
+        return Err(Error::new(
+            ErrorCode::GdbError,
+            "GDB variable identities changed between type and value reads",
+        ));
+    }
+    let mut arguments = Vec::new();
+    let mut locals = Vec::new();
+    for (index, fields) in typed.iter().enumerate() {
+        let mut variable = normalized_variable(fields);
+        if let Some(values) = &values {
+            variable["value"] = result_value(values[index], "value").unwrap_or(Value::Null);
+            variable["status"] = json!(value_status(values[index]));
+            if let Some(dynamic) = result_bool(values[index], "dynamic") {
+                variable["dynamic"] = Value::Bool(dynamic);
+            }
+        }
+        if result_bool(fields, "arg") == Some(true) {
+            arguments.push(variable);
+        } else {
+            locals.push(variable);
+        }
+    }
+    Ok((arguments, locals))
+}
+
 pub(super) fn normalized_arguments(record: &MiRecord) -> Vec<Value> {
     let Some(frames) = MiResult::find(record.results(), "stack-args") else {
         return Vec::new();
@@ -483,6 +530,82 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn frame_variables_join_values_only_for_identical_symbols() {
+        let parse = |text: &str| {
+            gdb_ai_mi::parse_record(text.as_bytes(), gdb_ai_mi::MiLimits::default()).unwrap()
+        };
+        let types = parse(
+            r#"1^done,variables=[{name="input",arg="1",type="int",value="2"},{name="counts",type="struct summary"},{name="x",type="int",value="1",fullname="scope.c",line="1",shadowed="true"},{name="x",type="char",value="2",fullname="scope.c",line="2"}]"#,
+        );
+        let full = r#"2^done,variables=[{name="input",arg="1",value="2"},{name="counts",value="{accepted = 8, rejected = 1}"},{name="x",value="1",fullname="scope.c",line="1",shadowed="true"},{name="x",value="\377",fullname="scope.c",line="2"}]"#;
+        let (arguments, simple) = normalized_frame_variables(&types, None).unwrap();
+        assert_eq!(
+            arguments,
+            vec![json!({"name": "input", "type": "int", "value": "2", "status": "available"})]
+        );
+        assert_eq!(simple[0]["status"], "not_collected");
+        let (merged_arguments, merged) =
+            normalized_frame_variables(&types, Some(&parse(full))).unwrap();
+        assert_eq!(merged_arguments, arguments);
+        assert_eq!(
+            merged[0],
+            json!({"name": "counts", "type": "struct summary", "value": "{accepted = 8, rejected = 1}", "status": "available"})
+        );
+        assert_eq!(merged[1]["value"], "1");
+        assert_eq!(merged[2]["type"], "char");
+        assert_eq!(merged[2]["value"]["data_base64"], "/w==");
+        for (before, after) in [
+            ("name=\"counts\"", "name=\"other\""),
+            ("arg=\"1\"", "arg=\"0\""),
+            ("scope.c", "other.c"),
+            ("line=\"1\"", "line=\"3\""),
+            ("shadowed=\"true\"", "shadowed=\"false\""),
+        ] {
+            let changed = parse(&full.replace(before, after));
+            assert_eq!(
+                normalized_frame_variables(&types, Some(&changed))
+                    .unwrap_err()
+                    .code,
+                ErrorCode::GdbError
+            );
+        }
+        for missing in ["2^done", "2^done,variables=[]"] {
+            assert_eq!(
+                normalized_frame_variables(&types, Some(&parse(missing)))
+                    .unwrap_err()
+                    .code,
+                ErrorCode::GdbError
+            );
+        }
+    }
+
+    #[test]
+    fn full_frame_variables_preserve_native_read_errors_as_failed_values() {
+        let types = gdb_ai_mi::parse_record(
+            br#"1^done,variables=[{name="counts",type="Summary &"}]"#,
+            gdb_ai_mi::MiLimits::default(),
+        )
+        .unwrap();
+        let full = gdb_ai_mi::parse_record(
+            br#"2^done,variables=[{name="counts",value="<error reading variable: Cannot access memory at address 0x1234>"}]"#,
+            gdb_ai_mi::MiLimits::default(),
+        ).unwrap();
+        let (_, variables) = normalized_frame_variables(&types, Some(&full)).unwrap();
+        assert_eq!(variables[0]["type"], "Summary &");
+        assert_eq!(variables[0]["status"], "failed");
+        assert_eq!(
+            variables[0]["value"],
+            "<error reading variable: Cannot access memory at address 0x1234>"
+        );
+        let quoted = gdb_ai_mi::parse_record(
+            br#"3^done,variables=[{name="counts",value="\"<error reading variable: user text>\""}]"#,
+            gdb_ai_mi::MiLimits::default(),
+        ).unwrap();
+        let (_, variables) = normalized_frame_variables(&types, Some(&quoted)).unwrap();
+        assert_eq!(variables[0]["status"], "available");
+    }
 
     #[test]
     fn thread_pages_preserve_metadata_order_and_total() {

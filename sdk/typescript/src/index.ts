@@ -68,8 +68,8 @@ export type LaunchParameters = MutationParameters & {
 // The typed helpers cover common native diagnosis views. Other views and
 // provider-specific parameters remain available through the canonical call.
 export type InspectionView = TargetSelection & (
-  | { view: "stack"; limit?: number; offset?: number }
-  | { view: "threads"; limit?: number; offset?: number; stack_depth?: number }
+  | { view: "stack"; limit?: number; offset?: number; include_locals?: boolean }
+  | { view: "threads"; limit?: number; offset?: number; stack_depth?: number; include_locals?: boolean }
   | { view: "frame" | "locals" | "arguments" }
   | { view: "registers"; roles?: string[]; limit?: number; offset?: number }
   | { view: "crash"; profile?: "minimal" | "brief" | "standard" | "deep";

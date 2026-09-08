@@ -207,7 +207,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_inspect",
-        description: "Read one bounded view; threads with stack_depth returns thread identities and their stacks at one stop (limit/offset page threads). modules includes main-executable mappings. symbols takes query plus functions|types|variables kind and optional type_layout with field offsets. tracked samples configured tracking; snapshot accepts inspect for extra reads. observation retrieves snapshot_id; diff compares before_snapshot_id and after_snapshot_id without rereading the target.",
+        description: "Read one bounded view; stack include_locals=true adds typed locals and aggregate values. threads with stack_depth returns thread identities and their stacks at one stop (limit/offset page threads; include_locals is supported). modules includes main-executable mappings. symbols takes query plus functions|types|variables kind and optional type_layout with field offsets. tracked samples configured tracking; snapshot accepts inspect for extra reads. observation retrieves snapshot_id; diff compares before_snapshot_id and after_snapshot_id without rereading the target.",
         discriminator: Some("view"),
         actions: INSPECTION_ACTIONS,
         read_only: true,

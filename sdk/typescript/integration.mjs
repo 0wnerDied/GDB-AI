@@ -46,10 +46,11 @@ async function canonical(client, program) {
       program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "none",
       breakpoints: [{ function: "main" }],
       wait: { until: "snapshot", timeout_ms: 5000 },
-      inspect: [{ view: "stack", limit: 4 }],
+      inspect: [{ view: "stack", limit: 4, include_locals: true }],
     });
     const stopId = launched.state.stop_id;
     assert.ok(launched.result.observations.stack.frames.length);
+    assert.ok(Array.isArray(launched.result.observations.stack.frames[0].locals));
     assert.equal(launched.result.created_breakpoints.length, 1);
     assert.equal(launched.semantics.context.stop_id, stopId);
     assert.ok(launched.result.command.record && launched.result.capabilities);

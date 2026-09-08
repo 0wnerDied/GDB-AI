@@ -327,6 +327,11 @@ Argument values require matching debug information; optimized-out values stay
 explicitly unavailable. Standard and deep snapshots retain their separate
 `arguments` field without collecting or presenting those values twice.
 
+Set `include_locals: true` on `stack` or `threads` to capture each returned
+frame's typed locals, including aggregate contents, in the same turn. This
+also works inside launch, run, batch, and snapshot inspection plans. Full
+thread pages share the configured frame budget; continue with `next_offset`.
+
 If the desired stop is known before launch, install its breakpoint and collect
 the thread stacks in one call. For example, to stop at `pthread_join`:
 

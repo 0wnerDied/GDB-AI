@@ -4,12 +4,12 @@ import { Session, type ApiResponse } from "./dist/index.js";
 
 function check(session: Session) {
   session.launch({ program: "/workspace/app", argv: ["a b"], stop: "main" });
-  session.launch({ program: "/workspace/app", stop: "main", inspect: [{ view: "stack" }] });
+  session.launch({ program: "/workspace/app", stop: "main", inspect: [{ view: "stack", include_locals: true }] });
   session.launch({ program: "/workspace/app", stop: "none", wait: { until: "settled" },
     inspect: [{ view: "crash", profile: "brief" }] });
   session.launch({ program: "/workspace/app", stop: "none", breakpoints: [
     { function: "main" }, { source: { path: "/workspace/main.c", line: 10 } },
-  ], inspect: [{ view: "threads", stack_depth: 8 }] });
+  ], inspect: [{ view: "threads", stack_depth: 8, include_locals: true }] });
   session.control({ action: "until", location: "main", wait: { until: "stopped" } });
   session.control({ action: "continue", input: { text: "1\n" },
     wait: { until: "snapshot" }, inspect: [{ view: "threads", stack_depth: 8 }] });
@@ -37,6 +37,8 @@ function check(session: Session) {
   session.inspect({ view: "stack", limit: 8 });
   // @ts-expect-error View names are checked.
   session.inspect({ view: "stacks", accept_current_stop: true });
+  // @ts-expect-error Local capture is an explicit boolean.
+  session.inspect({ view: "stack", accept_current_stop: true, include_locals: "all" });
   // @ts-expect-error A running acknowledgement cannot support stop inspection.
   session.control({ action: "continue", wait: { until: "running" }, inspect: [{ view: "stack" }] });
   // @ts-expect-error Inspection needs an explicit stop-producing wait.

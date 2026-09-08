@@ -135,6 +135,17 @@ existing bounded tracking history. `view: "diff"` accepts
 `before_snapshot_id` and `after_snapshot_id` and compares retained facts;
 its result is explicitly historical and preserves both observation IDs.
 
+`stack` with `include_locals: true` captures arguments and local variables
+for every returned frame, including aggregate values while retaining types.
+Variable identities must agree before type and value reads are combined.
+Independent failures retain the available frame facts with `variables_error`
+and mark the capture incomplete. Native variable-read error text is preserved
+with `status: "failed"`, not treated as an available value.
+Local capture is opt-in; ordinary stack reads add no per-frame queries.
+The option also applies to `threads`: omitted `stack_depth` defaults to one,
+and the returned thread page is capped so its requested frame count fits
+`limits.stack_frames`. Follow `next_offset` to collect another thread page.
+
 Composite responses expose the captured stop, execution epoch, revision, and
 available inferior/thread/frame identity through `semantics.context` in the
 canonical envelope or top-level `context` in MCP. Canonical detailed results

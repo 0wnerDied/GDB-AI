@@ -39,6 +39,7 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
         ..Config::default()
     };
     config.security.workspace_roots = vec![directory.path().to_owned()];
+    config.limits.stack_frames = 16;
     if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
         config.gdb.path = path.into();
     }
@@ -195,6 +196,84 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
     .result
     .unwrap();
     assert_eq!(worker_page["frames"], json!([worker_frame]));
+    let full_worker = successful(
+        call(
+            "worker-locals",
+            "inspection.get",
+            json!({"view": "stack", "stop_id": stop, "frame_id": worker_frame["frame_id"],
+               "offset": worker_frame["level"], "limit": 1, "include_locals": true}),
+        )
+        .await,
+    );
+    assert!(full_worker.semantics.unwrap().complete);
+    let mut full_worker = full_worker.result.unwrap()["frames"][0].take();
+    assert_eq!(
+        full_worker.as_object_mut().unwrap().remove("locals"),
+        Some(json!([]))
+    );
+    assert_eq!(&full_worker, worker_frame);
+
+    let full_page = successful(
+        call(
+            "thread-locals",
+            "inspection.get",
+            json!({"view": "threads", "stop_id": stop, "stack_depth": 8, "include_locals": true}),
+        )
+        .await,
+    )
+    .result
+    .unwrap();
+    assert_eq!(full_page["threads"].as_array().unwrap().len(), 2);
+    assert_eq!(full_page["next_offset"], 2);
+    let last_page = successful(call(
+        "last-thread-locals", "inspection.get",
+        json!({"view": "threads", "stop_id": stop, "offset": 2, "stack_depth": 8, "include_locals": true}),
+    ).await).result.unwrap();
+    assert_eq!(last_page["threads"].as_array().unwrap().len(), 1);
+    assert!(last_page.get("next_offset").is_none());
+    for thread in full_page["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(last_page["threads"].as_array().unwrap())
+    {
+        let original = threads
+            .iter()
+            .find(|original| original["thread_id"] == thread["thread_id"])
+            .unwrap();
+        assert_eq!(
+            thread["frames"].as_array().unwrap().len(),
+            original["frames"].as_array().unwrap().len()
+        );
+        for frame in thread["frames"].as_array().unwrap() {
+            assert!(frame.get("locals").is_some(), "{frame}");
+            assert!(
+                original["frames"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|original| original["frame_id"] == frame["frame_id"])
+            );
+        }
+    }
+    let top_locals = successful(
+        call(
+            "thread-top-locals",
+            "inspection.get",
+            json!({"view": "threads", "stop_id": stop, "include_locals": true}),
+        )
+        .await,
+    )
+    .result
+    .unwrap();
+    assert_eq!(top_locals["threads"].as_array().unwrap().len(), 3);
+    assert!(
+        top_locals["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|thread| thread["frames"].as_array().unwrap().len() == 1)
+    );
     let snapshot = successful(
         call(
             "worker-snapshot",

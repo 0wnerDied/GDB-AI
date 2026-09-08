@@ -279,6 +279,161 @@ async fn shared_library_frames_keep_their_origin_without_source_symbols() {
 }
 
 #[tokio::test]
+async fn stack_locals_capture_caller_aggregates_in_one_turn() {
+    if !support::require_commands(&["gdb", "cc"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("stack.c");
+    let executable = directory.path().join("stack");
+    std::fs::write(
+        &source,
+        r#"struct summary { int accepted; int rejected; };
+static int finish(int total) {
+    int expected = 10;
+    __builtin_trap();
+    return total == expected;
+}
+static int collect(int requested) {
+    struct summary counts = {requested, 1};
+    int total = counts.accepted + counts.rejected;
+    return finish(total);
+}
+int main(void) {
+    int requested = 8;
+    return collect(requested);
+}
+"#,
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("stack-locals/mcp:writer");
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let invalid = gateway.dispatch_agent(request(
+        "invalid-locals", None, "target.launch", None,
+        json!({"program": executable, "inspect": [{"view": "stack", "include_locals": "all"}]})
+    ), &caller).await;
+    assert_eq!(invalid.error.unwrap().code, ErrorCode::InvalidArgument);
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total"),
+        before
+    );
+    let launched = successful(gateway.dispatch_agent(request(
+        "launch", None, "target.launch", None,
+        json!({"program": executable, "stop": "none", "inspect": [{"view": "stack", "limit": 8, "include_locals": true}]})
+    ), &caller).await);
+    let session = launched.session_id.as_ref().unwrap();
+    let frames = &launched.result.as_ref().unwrap()["observations"]["stack"]["frames"];
+    let call = async |id: &str, mut parameters: serde_json::Value| {
+        parameters["stop_id"] = json!(
+            launched
+                .semantics
+                .as_ref()
+                .unwrap()
+                .context
+                .as_ref()
+                .unwrap()
+                .stop_id
+        );
+        gateway
+            .dispatch_agent(
+                request(id, Some(session), "inspection.get", None, parameters),
+                &caller,
+            )
+            .await
+    };
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let full = call(
+        "full-stack",
+        json!({"view": "stack", "limit": 8, "include_locals": true}),
+    )
+    .await;
+    let full_cost = metric_value(&gateway.metrics(), "gdbai_commands_total") - before;
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let basic = call("basic-stack", json!({"view": "stack", "limit": 8})).await;
+    let basic_cost = metric_value(&gateway.metrics(), "gdbai_commands_total") - before;
+    let page = call("caller-page", json!({"view": "stack", "offset": 1, "limit": 1, "frame_id": frames[1]["frame_id"], "include_locals": true})).await;
+    successful(
+        gateway
+            .dispatch_agent(
+                request("close", Some(session), "session.close", None, json!({})),
+                &caller,
+            )
+            .await,
+    );
+    assert!(launched.semantics.as_ref().unwrap().complete);
+    let full = successful(full);
+    assert_eq!(full_cost, 5);
+    assert_eq!(basic_cost, 2);
+    assert!(full.semantics.unwrap().complete);
+    assert_eq!(&full.result.unwrap()["frames"], frames);
+    let page = successful(page);
+    assert_eq!(page.result.unwrap()["frames"], json!([frames[1]]));
+    assert_eq!(frames.as_array().unwrap().len(), 3);
+    for (level, name, value) in [
+        (0, "expected", "10"),
+        (1, "total", "9"),
+        (2, "requested", "8"),
+    ] {
+        assert!(frames[level]["locals"].as_array().unwrap().iter().any(|local| {
+            local == &json!({"name": name, "type": "int", "value": value, "status": "available"})
+        }));
+    }
+    assert!(frames[1]["locals"].as_array().unwrap().iter().any(|local| {
+        local == &json!({"name": "counts", "type": "struct summary", "value": "{accepted = 8, rejected = 1}", "status": "available"})
+    }));
+    let mut locations = frames.clone();
+    for frame in locations.as_array_mut().unwrap() {
+        frame.as_object_mut().unwrap().remove("locals");
+    }
+    assert_eq!(successful(basic).result.unwrap()["frames"], locations);
+    let history = successful(gateway.dispatch_agent(request(
+        "reader", Some(session), "inspection.snapshot_get", None,
+        json!({"snapshot_id": launched.semantics.as_ref().unwrap().context.as_ref().unwrap().observation_id})
+    ), &Caller::local("stack-locals/mcp:reader")).await);
+    assert_eq!(
+        &history.result.unwrap()["results"]["stack"]["frames"],
+        frames
+    );
+    assert!(
+        gdb_ai_core::replay::replay(
+            directory
+                .path()
+                .join("sessions")
+                .join(session)
+                .join("journal.jsonl"),
+            gdb_ai_core::domain::SessionId::parse(session).unwrap(),
+        )
+        .unwrap()
+        .complete
+    );
+}
+
+#[tokio::test]
 async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     if !support::require_commands(&["gdb", "cc"]) {
         return;

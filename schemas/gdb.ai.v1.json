@@ -697,6 +697,9 @@
                     "include_bytes": {
                       "type": "boolean"
                     },
+                    "include_locals": {
+                      "type": "boolean"
+                    },
                     "include_source": {
                       "type": "boolean"
                     },
@@ -1161,6 +1164,9 @@
                     "include_bytes": {
                       "type": "boolean"
                     },
+                    "include_locals": {
+                      "type": "boolean"
+                    },
                     "include_source": {
                       "type": "boolean"
                     },
@@ -1509,6 +1515,9 @@
                     "include_bytes": {
                       "type": "boolean"
                     },
+                    "include_locals": {
+                      "type": "boolean"
+                    },
                     "include_source": {
                       "type": "boolean"
                     },
@@ -1775,6 +1784,9 @@
                       "type": "integer"
                     },
                     "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_locals": {
                       "type": "boolean"
                     },
                     "include_source": {
@@ -2360,6 +2372,9 @@
               "include_bytes": {
                 "type": "boolean"
               },
+              "include_locals": {
+                "type": "boolean"
+              },
               "include_source": {
                 "type": "boolean"
               },
@@ -2597,6 +2612,9 @@
                       "type": "integer"
                     },
                     "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_locals": {
                       "type": "boolean"
                     },
                     "include_source": {
@@ -2900,6 +2918,9 @@
                       "type": "integer"
                     },
                     "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_locals": {
                       "type": "boolean"
                     },
                     "include_source": {
@@ -4767,6 +4788,9 @@
                     "include_bytes": {
                       "type": "boolean"
                     },
+                    "include_locals": {
+                      "type": "boolean"
+                    },
                     "include_source": {
                       "type": "boolean"
                     },
@@ -5333,6 +5357,9 @@
                       "type": "integer"
                     },
                     "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_locals": {
                       "type": "boolean"
                     },
                     "include_source": {

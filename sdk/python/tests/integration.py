@@ -51,10 +51,11 @@ def canonical(client, program):
             "program": program, "environment": {"GDB_AI_TEST_ENV": "sdk-世界"},
             "stop": "none", "breakpoints": [{"function": "main"}],
             "wait": {"until": "snapshot", "timeout_ms": 5000},
-            "inspect": [{"view": "stack", "limit": 4}],
+            "inspect": [{"view": "stack", "limit": 4, "include_locals": True}],
         })
         stop_id = launched["state"]["stop_id"]
         assert launched["result"]["observations"]["stack"]["frames"], launched
+        assert isinstance(launched["result"]["observations"]["stack"]["frames"][0]["locals"], list), launched
         assert len(launched["result"]["created_breakpoints"]) == 1, launched
         assert launched["semantics"]["context"]["stop_id"] == stop_id, launched
         context = session.call("inspection.get", {"view": "stop_context"})
