@@ -40,6 +40,11 @@ gdbserver, QEMU, runtime binaries, and cross-compilers are needed only for the
 corresponding integration tests. Python-enabled GDB is needed for helpers
 that execute Python inside GDB.
 
+The default configuration trusts the workspace and server account. Debugger
+API permissions do not isolate target programs; untrusted code requires an
+external container or VM boundary around the server, GDB, and local target.
+Review the [deployment contract](docs/security.md) before running such code.
+
 [Published releases](https://github.com/0wnerDied/GDB-AI/releases) provide
 packaged binaries and checksums. Use the README at the corresponding tag
 when running a release binary; this document describes its repository revision.

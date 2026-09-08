@@ -1,3 +1,6 @@
+# Defaults are for a trusted local workspace. API profiles do not isolate
+# target execution; see docs/security.md for the external isolation boundary.
+
 [server]
 max_sessions = 8
 max_http_sessions = 128

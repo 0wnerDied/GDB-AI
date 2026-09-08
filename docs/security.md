@@ -1,5 +1,14 @@
 # Security Model
 
+The default deployment is a trusted local development workspace under the
+server's OS account. API ownership and profiles control debugger requests;
+they do not contain code executed by GDB, its helpers, or the target. For
+untrusted programs, place the server, GDB, helpers, and local targets inside
+an externally managed container or VM, with resource limits and filesystem
+and network access set by that supervisor. Loopback HTTP and Origin checks
+protect transport access, not target execution. This is not an out-of-the-box
+public, multi-tenant code execution service.
+
 GDB starts with initialization, target auto-load, debuginfod, and inferior
 function calls disabled. Launch uses GDB's standard shell startup with each
 `argv` value quoted literally, without variable or command expansion.
