@@ -422,7 +422,16 @@ impl Gateway {
                     state.inferiors.values().find_map(|inferior| inferior.pid),
                 )
             });
-            let range_effect = classify_memory_range(target_origin, target_pid, request)?;
+            let range_effect = classify_memory_range(
+                target_origin,
+                target_pid,
+                &request.parameters,
+                if request.method == CanonicalMethod::MemorySearch {
+                    "start"
+                } else {
+                    "address"
+                },
+            )?;
             // 2026-09-01: Labeling an admitted target-effect read as a
             // mutation made projected MCP demand a revision for local memory
             // failures. Mutation-capable profiles preserve read coordination;
@@ -599,6 +608,8 @@ impl Gateway {
             }
             // 2026-08-28: LOST sessions previously blocked transcript access,
             // removing the evidence needed to diagnose and recover the session.
+            // 2026-09-08: Immutable observations are historical evidence, so
+            // target consistency cannot make an already committed value unsafe.
             if matches!(consistency, crate::domain::Consistency::Lost)
                 && !matches!(
                     request.method,
@@ -609,6 +620,7 @@ impl Gateway {
                         | CanonicalMethod::SessionForceAbort
                         | CanonicalMethod::SessionAcquireWriteLease
                         | CanonicalMethod::SessionAttemptRecovery
+                        | CanonicalMethod::InspectionSnapshotGet
                         | CanonicalMethod::ArtifactGet
                 )
             {
@@ -622,10 +634,15 @@ impl Gateway {
         // 2026-08-30: Ordinary reads only need one journal representation.
         // Move it into the worker instead of cloning the complete request;
         // mutations retain one copy for durable audit.
-        let mut request_value = (entry.is_some() || durable_audit)
+        // 2026-09-08: Immutable snapshot lookup still journaled through the
+        // live actor, coupling historical sharing to target-worker progress.
+        // Its stored value remains authoritative without a live GDB request.
+        let journal_through_actor =
+            entry.is_some() && request.method != CanonicalMethod::InspectionSnapshotGet;
+        let mut request_value = (journal_through_actor || durable_audit)
             .then(|| serde_json::to_value(request))
             .transpose()?;
-        if let Some(entry) = &entry {
+        if journal_through_actor && let Some(entry) = &entry {
             let journal_request = if durable_audit {
                 request_value.as_ref().unwrap().clone()
             } else {
@@ -728,7 +745,31 @@ impl Gateway {
             }
         }
         let result = result?;
-        let state = completed_entry.map(|entry| entry.handle.state());
+        let state = match completed_entry {
+            Some(entry)
+                if mode == RequestMode::Agent && self_attributed_observation(request, &result) =>
+            {
+                // 2026-09-08: Agent observations already carry their captured
+                // stop/epoch context, but success still cloned every growing
+                // session registry for projection to discard it. Borrow only
+                // evidence-gap metadata and leave canonical envelopes unchanged.
+                entry.handle.with_state(|state| {
+                    warnings.extend(
+                        state
+                            .limitations
+                            .iter()
+                            .filter(|reason| reason.starts_with("evidence gap: "))
+                            .map(|reason| Warning {
+                                code: "EVIDENCE_GAP".into(),
+                                message: reason.clone(),
+                            }),
+                    );
+                });
+                None
+            }
+            Some(entry) => Some(entry.handle.state()),
+            None => None,
+        };
         Ok((state, result, warnings))
     }
 
@@ -921,6 +962,27 @@ impl Gateway {
             // abandoned controllers expire without writing every mutation.
             lease.expires_at_unix_ms = now.saturating_add(lease_ms);
             self.store.upsert_lease(lease)?;
+        }
+        Ok(())
+    }
+
+    fn authorize_observation_memory(&self, entry: &SessionEntry, parameters: &Value) -> Result<()> {
+        let (target_origin, target_pid) = entry.handle.with_state(|state| {
+            (
+                state.target_origin,
+                state.inferiors.values().find_map(|inferior| inferior.pid),
+            )
+        });
+        // 2026-09-08: Composite observations bypassed top-level MemoryRead
+        // classification after resolving an address internally. Apply the
+        // same range policy immediately before the nested byte read.
+        if classify_memory_range(target_origin, target_pid, parameters, "address")?
+            != MemoryRangeEffect::Ordinary
+        {
+            entry
+                .handle
+                .profile()
+                .authorize_method(CanonicalMethod::MemoryRead, Effect::VolatileTargetRead)?;
         }
         Ok(())
     }
@@ -1194,6 +1256,8 @@ fn remove_repeated_state(response: &mut ApiResponse) {
 }
 
 fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
+    // 2026-09-08: Snapshot lookup previously inherited the live target fence
+    // even though it reads immutable SQLite evidence without issuing MI.
     matches!(
         request.method,
         CanonicalMethod::SessionGet
@@ -1203,9 +1267,34 @@ fn request_allowed_during_unknown_outcome(request: &ApiRequest) -> bool {
             | CanonicalMethod::SessionForceAbort
             | CanonicalMethod::SessionAcquireWriteLease
             | CanonicalMethod::SessionAttemptRecovery
+            | CanonicalMethod::InspectionSnapshotGet
             | CanonicalMethod::ArtifactGet
     ) || (request.method == CanonicalMethod::ExecutionControl
         && request.parameters.get("action").and_then(Value::as_str) == Some("interrupt"))
+}
+
+fn self_attributed_observation(request: &ApiRequest, result: &Value) -> bool {
+    matches!(
+        request.method,
+        CanonicalMethod::InspectionBatch
+            | CanonicalMethod::InspectionSnapshot
+            | CanonicalMethod::InspectionSnapshotGet
+    ) || matches!(
+        request.method,
+        CanonicalMethod::InspectionGet
+            | CanonicalMethod::ValueEvaluate
+            | CanonicalMethod::MemoryRead
+            | CanonicalMethod::MemorySearch
+            | CanonicalMethod::MemoryCompare
+            | CanonicalMethod::RegisterRead
+            | CanonicalMethod::DisassemblyRead
+    ) && result
+        .get("stop_id")
+        .is_some_and(|stop_id| !stop_id.is_null())
+        || matches!(
+            request.method,
+            CanonicalMethod::ExecutionControl | CanonicalMethod::ExecutionWait
+        ) && result.get("observation_context").is_some()
 }
 
 // 2026-09-01: Waiting and then observing without one target-state guard let a
@@ -1241,20 +1330,16 @@ enum MemoryRangeEffect {
 fn classify_memory_range(
     target_origin: TargetOrigin,
     target_pid: Option<u64>,
-    request: &ApiRequest,
+    parameters: &Value,
+    address_field: &str,
 ) -> Result<MemoryRangeEffect> {
-    let address_field = if request.method == CanonicalMethod::MemorySearch {
-        "start"
-    } else {
-        "address"
-    };
     let address =
-        Address::parse(request.parameters[address_field].as_str().ok_or_else(|| {
+        Address::parse(parameters[address_field].as_str().ok_or_else(|| {
             Error::new(ErrorCode::InvalidArgument, "memory address is required")
         })?)?;
     let start = u64::from_str_radix(&address.as_str()[2..], 16)
         .map_err(|_| Error::new(ErrorCode::InvalidArgument, "invalid memory address"))?;
-    let length = request.parameters["length"]
+    let length = parameters["length"]
         .as_u64()
         .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "memory length is required"))?;
     // 2026-08-30: Range policy used an unrepresentable exclusive end at the

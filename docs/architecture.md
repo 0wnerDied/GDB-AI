@@ -57,6 +57,7 @@ kernel         conditional Linux kernel provider
 lifecycle      sessions and target lifecycle
 memory         stop-consistent memory operations
 mi             MI result normalization
+observation    bounded shared read descriptors and per-turn validation
 raw            controlled raw MI and console operations
 reconciliation managed-state reconciliation
 request        request parsing and common validation
@@ -134,6 +135,13 @@ starve debugger state events.
 - Snapshot, batch, and chunked memory success belongs to one stop and one
   execution epoch. A context change returns `STALE_CONTEXT` instead of mixed
   evidence.
+- Run, batch, and snapshot observation plans share typed capture context and
+  per-item failures. Register metadata is reused inside one guarded turn;
+  target values are not cached across turns.
+- Committed observations have unique, immutable IDs and bounded retention.
+  Authorized historical readers use the existing snapshot storage without
+  entering the GDB command queue. Controller handoff preserves the same
+  authenticated owner boundary and transfers only mutation coordination.
 - Every public response is bounded. Large content becomes a content-addressed
   artifact or a paged result with explicit continuation metadata. MCP applies
   this bound after projection, including its tool-result wrapper and recovered

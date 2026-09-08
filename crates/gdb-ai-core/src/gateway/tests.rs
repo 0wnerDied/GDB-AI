@@ -1173,23 +1173,24 @@ fn classifies_linux_memory_ranges_without_client_input() {
     };
     state.target_origin = TargetOrigin::Remote;
     assert_eq!(
-        classify_memory_range(state.target_origin, None, &request).unwrap(),
+        classify_memory_range(state.target_origin, None, &request.parameters, "address").unwrap(),
         MemoryRangeEffect::Unknown
     );
     state.target_origin = TargetOrigin::Core;
     assert_eq!(
-        classify_memory_range(state.target_origin, None, &request).unwrap(),
+        classify_memory_range(state.target_origin, None, &request.parameters, "address").unwrap(),
         MemoryRangeEffect::Ordinary
     );
     let mut final_byte = request;
     final_byte.parameters = json!({"address": "0xffffffffffffffff", "length": 1});
     assert_eq!(
-        classify_memory_range(state.target_origin, None, &final_byte).unwrap(),
+        classify_memory_range(state.target_origin, None, &final_byte.parameters, "address")
+            .unwrap(),
         MemoryRangeEffect::Ordinary
     );
     final_byte.parameters["length"] = json!(2);
     assert_eq!(
-        classify_memory_range(state.target_origin, None, &final_byte)
+        classify_memory_range(state.target_origin, None, &final_byte.parameters, "address")
             .unwrap_err()
             .code,
         ErrorCode::InvalidArgument

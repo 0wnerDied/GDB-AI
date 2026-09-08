@@ -104,6 +104,33 @@ async fn persistence_failures_preserve_debugging_unless_durability_is_required()
                 .iter()
                 .any(|reason| reason.starts_with("evidence gap: "))
         );
+        if !fill_journal {
+            // 2026-09-08: Store-only historical lookup made a successfully
+            // captured performance-mode observation disappear after SQLite
+            // failed. The live session must retain and share its bounded copy.
+            let fresh = call(
+                session,
+                "inspection.snapshot",
+                json!({
+                    "profile": "minimal",
+                    "stop_id": current.stop_id.as_ref().unwrap()
+                }),
+            )
+            .await;
+            assert!(fresh.error.is_none(), "{:?}", fresh.error);
+            let fresh_snapshot_id = fresh.result.unwrap()["snapshot_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let fresh_lookup = call(
+                session,
+                "inspection.snapshot_get",
+                json!({"snapshot_id": fresh_snapshot_id}),
+            )
+            .await;
+            assert!(fresh_lookup.error.is_none(), "{:?}", fresh_lookup.error);
+            assert_eq!(fresh_lookup.result.unwrap()["historical"], true);
+        }
         let snapshot_id = current.snapshot.as_ref().unwrap().snapshot_id.clone();
         let snapshot = call(
             session,

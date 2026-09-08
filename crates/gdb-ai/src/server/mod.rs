@@ -8,12 +8,11 @@ use std::{
 };
 
 use gdb_ai_core::{
-    ErrorCode,
     domain::{
         BackendHealth, Consistency, SessionLifecycle, SessionState, SnapshotStatus, TargetOrigin,
     },
     gateway::{Caller, Gateway},
-    protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod},
+    protocol::{API_VERSION, ApiRequest, ApiResponse, CanonicalMethod, is_command_reply},
 };
 use serde_json::{Map, Value, json};
 use tokio::{
@@ -814,6 +813,7 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
             {
                 result.remove("commands");
             }
+            compact_observation_errors(result);
             // 2026-09-01: Successful projected responses discarded evidence
             // URIs but left their MI journal counters throughout the payload.
             // Remove the orphaned transport metadata; raw tools retain it.
@@ -935,6 +935,12 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                 result.remove("revision");
                 remove_batched_stop_ids(result, "results");
             }
+            CanonicalMethod::InspectionSnapshotGet => {
+                // 2026-09-08: Stored composite observations retained item-level
+                // stop IDs that their original Agent projection had removed.
+                remove_batched_stop_ids(result, "results");
+                remove_batched_stop_ids(result, "observations");
+            }
             CanonicalMethod::ExecutionWait => {
                 // 2026-09-01: A completed projected wait returned its full
                 // operation record even though only a timeout needs a handle.
@@ -1042,23 +1048,51 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
     }
     if let Some(error) = error {
         let mut projected = json!(error);
-        if error.code == ErrorCode::GdbError
-            && let Some(projected) = projected.as_object_mut()
-            && let Some(details) = projected.get_mut("details").and_then(Value::as_object_mut)
-        {
-            // 2026-09-01: Projected GDB failures expanded the already rendered
-            // message into a complete MI AST and byte array. Canonical replies
-            // and journal evidence retain the record for exact diagnostics.
-            for field in ["record", "token", "evidence_seq"] {
-                details.remove(field);
-            }
-            if details.is_empty() {
-                projected.remove("details");
-            }
-        }
+        compact_gdb_error(&mut projected);
         compact.insert("error".into(), projected);
     }
     Value::Object(compact)
+}
+
+fn compact_observation_errors(result: &mut Map<String, Value>) {
+    // 2026-09-08: Composite observation failures bypassed the envelope error
+    // projector and exposed raw MI records. Limit compaction to typed slots.
+    for field in ["failures", "observation_failures"] {
+        if let Some(failures) = result.get_mut(field).and_then(Value::as_object_mut) {
+            failures.values_mut().for_each(compact_gdb_error);
+        }
+    }
+    if let Some(error) = result.get_mut("observation_error") {
+        compact_gdb_error(error);
+    }
+    if let Some(error) = result
+        .get_mut("after")
+        .and_then(Value::as_object_mut)
+        .and_then(|after| after.get_mut("observation_error"))
+    {
+        compact_gdb_error(error);
+    }
+}
+
+fn compact_gdb_error(error: &mut Value) {
+    if error.get("code").and_then(Value::as_str) != Some("GDB_ERROR") {
+        return;
+    }
+    let Some(projected) = error.as_object_mut() else {
+        return;
+    };
+    let Some(details) = projected.get_mut("details").and_then(Value::as_object_mut) else {
+        return;
+    };
+    // 2026-09-01: Projected GDB failures expanded the already rendered
+    // message into a complete MI AST and byte array. Canonical replies and
+    // journal evidence retain the record for exact diagnostics.
+    for field in ["record", "token", "evidence_seq"] {
+        details.remove(field);
+    }
+    if details.is_empty() {
+        projected.remove("details");
+    }
 }
 
 fn remove_evidence_sequences(value: &mut Value) {
@@ -1075,7 +1109,13 @@ fn remove_evidence_sequences(value: &mut Value) {
 }
 
 fn remove_batched_stop_ids(result: &mut Map<String, Value>, field: &str) {
-    if result.get("stop_id").is_none_or(Value::is_null) {
+    let attributed_stop = result.get("stop_id").or_else(|| {
+        result
+            .get("context")
+            .or_else(|| result.get("observation_context"))
+            .and_then(|context| context.get("stop_id"))
+    });
+    if attributed_stop.is_none_or(Value::is_null) {
         return;
     }
     // 2026-09-01: Every batch item repeated the outer stop ID. The batch is
@@ -1113,12 +1153,6 @@ fn compact_mapping_metadata(value: &mut Value) {
         }
         _ => {}
     }
-}
-
-fn is_command_reply(value: &Value) -> bool {
-    value.get("record").is_some_and(Value::is_object)
-        && value.get("stream_records").is_some_and(Value::is_array)
-        && value.get("evidence_seq").is_some_and(Value::is_u64)
 }
 
 fn session_coordination_state(state: &SessionState) -> Value {

@@ -540,10 +540,18 @@ impl StateMutator<'_> {
                 });
                 true
             }
-            DomainEvent::SnapshotReady { stop_id, partial }
-                if self.state.stop_id.as_ref() == Some(stop_id) =>
-            {
+            DomainEvent::SnapshotReady {
+                stop_id,
+                snapshot_id,
+                partial,
+            } if self.state.stop_id.as_ref() == Some(stop_id) => {
                 if let Some(snapshot) = &mut self.state.snapshot {
+                    // 2026-09-08: Stop-only references could name overwritten
+                    // captures. Publish the committed immutable ID; old journals
+                    // without one retain their original snapshot reference.
+                    if let Some(snapshot_id) = snapshot_id {
+                        snapshot.snapshot_id.clone_from(snapshot_id);
+                    }
                     snapshot.status = SnapshotStatus::Ready;
                     snapshot.partial = *partial;
                 }
@@ -881,19 +889,29 @@ mod tests {
             3,
             DomainEvent::SnapshotReady {
                 stop_id: stop_id.clone(),
+                snapshot_id: Some("obs_committed".into()),
                 partial: true,
             },
         );
         let committed = reducer.state().snapshot.clone();
+        assert_eq!(committed.as_ref().unwrap().snapshot_id, "obs_committed");
+
+        let legacy = serde_json::json!({
+            "type": "snapshot_ready", "stop_id": stop_id, "partial": true
+        });
+        let legacy_event: DomainEvent = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&legacy_event).unwrap(), legacy);
+        apply(&mut reducer, 4, legacy_event);
+        assert_eq!(reducer.state().snapshot, committed);
 
         apply(
             &mut reducer,
-            4,
+            5,
             DomainEvent::SnapshotStarted {
                 stop_id: stop_id.clone(),
             },
         );
-        apply(&mut reducer, 5, DomainEvent::SnapshotFailed { stop_id });
+        apply(&mut reducer, 6, DomainEvent::SnapshotFailed { stop_id });
 
         assert_eq!(reducer.state().snapshot, committed);
     }

@@ -165,6 +165,12 @@ and `controller`. The current controller can call `gdb_session` action
 `handoff` with `to` equal to the recipient's exact `caller_identity`.
 Keep projected sessions on `call_tool` / `callTool` after handoff.
 
+Run inspections, batches, and snapshots return `observation_id`. An authorized
+worker can retrieve the same capture using `gdb_inspect` with
+`view: "observation"` and `snapshot_id` set to that ID. The response is
+historical, including at the same stop, and remains unchanged after resume
+or close until retention removes it. Lookup does not re-read the target.
+
 Disconnecting the client is not the same as closing the debugging session.
 Close each session explicitly to release GDB and finalize retained output.
 `Session.close()` and `force_abort()` / `forceAbort()` return the response,
@@ -237,7 +243,8 @@ python3 sdk/verify.py target/debug/gdb-ai
 The real-server check compiles the existing C fixture in a temporary
 workspace. Both languages run canonical and projected debugging over both
 HTTP versions, under performance and durable history modes. It verifies
-launch, stop-bound inspection, errors, lease renewal, keyed I/O replay,
+launch, stop-bound inspection, immutable observation sharing, controller
+handoff, errors, lease renewal, keyed I/O replay,
 UTF-8 and binary PTY output, resource ranges, close artifacts, and complete
 journal replay. It shuts down its servers and removes the temporary
 workspace. The check is a required CI step, separate from the small mocked

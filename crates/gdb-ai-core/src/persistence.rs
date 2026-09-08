@@ -522,7 +522,7 @@ impl Store {
         })
     }
 
-    pub fn upsert_snapshot(
+    pub fn insert_snapshot(
         &self,
         session_id: &SessionId,
         snapshot_id: &str,
@@ -530,13 +530,12 @@ impl Store {
     ) -> Result<()> {
         let maximum = self.storage.max_snapshots_per_session;
         self.with_connection(|connection| {
-            connection
+            let inserted = connection
                 .execute(
                     "INSERT INTO snapshots
                  (session_id, snapshot_id, snapshot_json, created_unix_ms)
                  VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(session_id, snapshot_id) DO UPDATE SET
-                   snapshot_json=excluded.snapshot_json",
+                 ON CONFLICT(session_id, snapshot_id) DO NOTHING",
                     params![
                         session_id.0,
                         snapshot_id,
@@ -545,6 +544,25 @@ impl Store {
                     ],
                 )
                 .map_err(sql_error)?;
+            // 2026-09-08: Snapshot upserts allowed a same-stop enrichment to
+            // rewrite evidence already shared with another Agent. An ID may
+            // deduplicate identical bytes, but it can never change its value.
+            if inserted == 0 {
+                let existing = connection
+                    .query_row(
+                        "SELECT snapshot_json FROM snapshots
+                         WHERE session_id=?1 AND snapshot_id=?2",
+                        params![session_id.0, snapshot_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(sql_error)?;
+                if existing != serde_json::to_string(snapshot)? {
+                    return Err(Error::new(
+                        ErrorCode::Conflict,
+                        "observation ID already contains different data",
+                    ));
+                }
+            }
             // 2026-08-29: Repeated stops retained every snapshot for a live
             // session, so enforce the configured bound at the shared writer.
             connection
@@ -1276,13 +1294,59 @@ mod tests {
         assert_eq!(store.get_session(&state.session_id).unwrap(), Some(state));
         let snapshot = serde_json::json!({"snapshot_id": "snap_test"});
         store
-            .upsert_snapshot(&SessionId("sess_sql".into()), "snap_test", &snapshot)
+            .insert_snapshot(&SessionId("sess_sql".into()), "snap_test", &snapshot)
             .unwrap();
         assert_eq!(
             store
                 .get_snapshot(&SessionId("sess_sql".into()), "snap_test")
                 .unwrap(),
             Some(snapshot)
+        );
+    }
+
+    #[test]
+    fn observations_are_immutable_and_keep_same_stop_versions() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(directory.path().join("state.sqlite")).unwrap();
+        let session = SessionId("sess_observations".into());
+        let first = serde_json::json!({
+            "observation_id": "obs_first",
+            "snapshot_id": "obs_first",
+            "stop_id": "s1",
+            "value": 1
+        });
+        let second = serde_json::json!({
+            "observation_id": "obs_second",
+            "snapshot_id": "obs_second",
+            "stop_id": "s1",
+            "value": 2
+        });
+        store
+            .insert_snapshot(&session, "obs_first", &first)
+            .unwrap();
+        store
+            .insert_snapshot(&session, "obs_second", &second)
+            .unwrap();
+        assert_eq!(
+            store.get_snapshot(&session, "obs_first").unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(
+            store.get_snapshot(&session, "obs_second").unwrap(),
+            Some(second)
+        );
+
+        let replacement = serde_json::json!({"stop_id": "s1", "value": 3});
+        assert_eq!(
+            store
+                .insert_snapshot(&session, "obs_first", &replacement)
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            store.get_snapshot(&session, "obs_first").unwrap(),
+            Some(first)
         );
     }
 
@@ -1517,7 +1581,7 @@ mod tests {
         for index in 0..3 {
             let snapshot_id = format!("snap_{index}");
             store
-                .upsert_snapshot(&session, &snapshot_id, &serde_json::json!({"index": index}))
+                .insert_snapshot(&session, &snapshot_id, &serde_json::json!({"index": index}))
                 .unwrap();
             store
                 .upsert_operation(&OperationRecord {

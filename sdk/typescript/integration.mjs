@@ -78,11 +78,17 @@ async function projected(client, program) {
   assert.equal(created.api_version, undefined);
   assert.equal(created.revision, undefined);
   assert.equal(created.result.write_lease, undefined);
+  assert.equal(created.result.controller, created.result.caller_identity);
   const sessionId = created.result.session_id;
   const expected = Buffer.from("environment: sdk-世界\nmarker reached\ninput received: \0\n");
-  const call = (name, arguments_) => client.callTool(name, { session_id: sessionId, ...arguments_ });
+  const observer = new Client(endpoint, { protocolVersion, clientName: "typescript-observer" });
+  let controller = client;
+  const call = (name, arguments_) => controller.callTool(name, { session_id: sessionId, ...arguments_ });
   let closed;
+  let lookup;
+  let shared;
   try {
+    await observer.connect();
     const launched = await call("gdb_session", {
       action: "launch", program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
     });
@@ -96,20 +102,49 @@ async function projected(client, program) {
     assert.equal(status.stop_id, launched.state.stop_id);
     await assert.rejects(call("gdb_inspect", { view: "stack", stop_id: "stale" }),
       (error) => error instanceof ApiError && error.code === "STALE_CONTEXT" && error.response.revision === undefined);
+    const captured = (await call("gdb_batch", { requests: [
+      { view: "registers", roles: ["pc", "sp"] },
+      { view: "evaluate", expression: "$pc" },
+      { name: "missing", view: "evaluate", expression: "gdb_ai_missing_sdk_symbol" },
+    ] })).result;
+    assert.equal(captured.complete, false);
+    assert.equal(captured.failures.missing.code, "GDB_ERROR");
+    assert.equal(captured.results.evaluate.command, undefined);
+    assert.equal(captured.failures.missing.details?.record, undefined);
+    lookup = { session_id: sessionId, view: "observation", snapshot_id: captured.observation_id };
+    shared = (await observer.callTool("gdb_inspect", lookup)).result;
+    assert.equal(shared.historical, true);
+    assert.equal(shared.observation_id, captured.observation_id);
+    assert.deepEqual(shared.results.evaluate, captured.results.evaluate);
+    assert.deepEqual(shared.failures, captured.failures);
+    const peerStatus = await observer.callTool("gdb_session", { action: "status", session_id: sessionId });
+    const peerIdentity = peerStatus.result.caller_identity;
+    assert.notEqual(peerIdentity, created.result.controller);
+    const transferred = await call("gdb_session", { action: "handoff", to: peerIdentity });
+    assert.equal(transferred.result.controller, peerIdentity);
+    controller = observer;
+    await assert.rejects(client.callTool("gdb_run", { action: "continue", session_id: sessionId }),
+      (error) => error instanceof ApiError && error.code === "WRITE_LEASE_REQUIRED");
     const exited = await call("gdb_run", { action: "continue", input: { data_base64: "AAo=" } });
     assert.equal(exited.result.settled_by, "exited");
     assert.equal(exited.state.exit_code, 0);
     const output = await call("gdb_io", { action: "read", after_offset: 0, max_bytes: 4096 });
     assert.ok(!output.truncated);
     await verifyOutput(client, sessionId, output.result, expected);
+    assert.deepEqual((await client.callTool("gdb_inspect", lookup)).result, shared);
   } finally {
-    closed = await call("gdb_session", { action: "close" });
+    try {
+      closed = await call("gdb_session", { action: "close" });
+    } finally {
+      await observer.disconnect();
+    }
   }
   await verifyClose(client, closed, expected);
+  assert.deepEqual((await client.callTool("gdb_inspect", lookup)).result, shared);
 }
 
 const [endpoint, program, protocolVersion] = process.argv.slice(2);
-const client = new Client(endpoint, { protocolVersion });
+const client = new Client(endpoint, { protocolVersion, clientName: "typescript-controller" });
 try {
   await client.connect();
   const names = (await client.listTools()).map((tool) => tool.name);

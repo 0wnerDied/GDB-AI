@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, future::Future, pin::Pin, time::Instant};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_mi::MiRecord;
@@ -16,18 +16,28 @@ use super::{
         normalized_variables, register_role_candidates, register_values, resolve_register_name,
         result_string_list, result_text, target_architecture, valid_integer_literal,
     },
+    observation::{
+        ObservationKind, independent_failure, parse_observation_requests,
+        validate_observation_requests,
+    },
     reconciliation::{optional_command, reconcile_breakpoints},
     request::{bool_value, bounded_limit, required_session, string},
 };
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{DomainEvent, SessionId, TrackingDefinition},
+    domain::{DomainEvent, FrameId, SessionId, TrackingDefinition},
     gateway::{Gateway, SessionEntry},
-    protocol::{ApiRequest, CanonicalMethod},
+    protocol::{ApiError, ApiRequest, ObservationContext, ObservationResult, result_evidence},
     providers::mappings,
     session::CommandReply,
 };
+
+#[derive(Clone)]
+enum CachedObservation {
+    Result(Value),
+    Failure(ApiError),
+}
 
 impl Gateway {
     pub(super) async fn inspection_get(&self, request: &ApiRequest) -> Result<Value> {
@@ -230,6 +240,11 @@ impl Gateway {
                     .handle
                     .with_state(|state| state.signal_policies.clone()),
             )?),
+            "evaluate" => self.value_evaluate(request).await,
+            "memory" => self.observation_memory_read(request).await,
+            "disassembly" => self.disassembly_read(request).await,
+            "tracked" => self.inspection_tracking(&entry, request).await,
+            "diff" => self.inspection_diff(request).await,
             _ => Err(Error::new(
                 ErrorCode::InvalidArgument,
                 "unsupported inspection view",
@@ -472,6 +487,9 @@ impl Gateway {
                 ));
             }
         };
+        if let Some(inspect) = request.parameters.get("inspect") {
+            validate_observation_requests(inspect, self.config.limits.memory_read_bytes)?;
+        }
         // 2026-08-28: Publishing SnapshotStarted before profile validation
         // left the current snapshot permanently BUILDING on invalid input.
         entry
@@ -621,22 +639,39 @@ impl Gateway {
             .await
         {
             Ok(tracking) => tracking,
-            Err(error) => {
+            Err(error) if independent_failure(error.code) => {
                 warnings.push(json!({
                     "code": "TRACKING_UNAVAILABLE",
                     "message": error.to_string()
                 }));
                 (BTreeMap::new(), BTreeMap::new())
             }
+            // 2026-09-08: Tracking downgraded stop, deadline, and cancellation
+            // failures into snapshot warnings. Those failures invalidate the
+            // whole capture rather than producing uncertain evidence.
+            Err(error) => return Err(error),
         };
         let partial = !warnings.is_empty();
         let stop_id = state.stop_id.clone().unwrap();
         let current = entry.handle.state();
-        let snapshot_id = format!("snap_{stop_id}");
+        let frame_id = state
+            .stopped_thread_id
+            .as_ref()
+            .zip(state.stopped_frame())
+            .map(|(thread, frame)| FrameId::new(thread, &stop_id, frame.level));
+        let observation_context = ObservationContext {
+            observation_id: None,
+            stop_id: stop_id.clone(),
+            captured_revision: current.revision,
+            execution_epoch: state.execution_epoch,
+            inferior_id: state.stopped_inferior_id.clone(),
+            thread_id: state.stopped_thread_id.clone(),
+            frame_id,
+        };
         let snapshot = json!({
-            "snapshot_id": &snapshot_id,
             "stop_id": &stop_id,
             "revision": current.revision,
+            "execution_epoch": state.execution_epoch,
             "profile": profile,
             "reason": state.stop_reason,
             "reason_detail": state.stop_reason_detail,
@@ -647,19 +682,32 @@ impl Gateway {
             "disassembly": disassembly,
             "tracked": tracked,
             "changes": changes,
+            "observation_context": observation_context,
+            "observation_complete": !partial,
+            "observations": {},
+            "observation_failures": {},
             "warnings": warnings,
             "partial": partial,
             "evidence": [{"kind": "mi-event", "uri": format!("gdbai://session/{}/event/{}", entry.handle.id(), current.event_seq)}]
         });
-        entry
+        let mut snapshot = snapshot;
+        let mut partial = partial;
+        if let Some(requests) = request.parameters.get("inspect") {
+            let observation = self
+                .capture_observations(request, entry, state, requests, false)
+                .await?;
+            partial |= !observation.complete;
+            snapshot["observation_context"] = serde_json::to_value(&observation.context)?;
+            snapshot["observation_complete"] = Value::Bool(observation.complete);
+            snapshot["observation_evidence"] = serde_json::to_value(&observation.evidence)?;
+            snapshot["observations"] = serde_json::to_value(observation.results)?;
+            snapshot["observation_failures"] = serde_json::to_value(observation.failures)?;
+            snapshot["partial"] = Value::Bool(partial);
+            snapshot["observation_complete"] = Value::Bool(!partial);
+        }
+        let snapshot = entry
             .handle
-            .commit_snapshot(
-                snapshot_id,
-                snapshot.clone(),
-                stop_id,
-                state.execution_epoch,
-                partial,
-            )
+            .commit_snapshot(snapshot, stop_id, state.execution_epoch, partial)
             .await?;
         self.metrics
             .snapshot(started.elapsed().as_micros() as u64, partial);
@@ -667,13 +715,23 @@ impl Gateway {
     }
 
     pub(super) async fn inspection_diff(&self, request: &ApiRequest) -> Result<Value> {
-        let entry = self.entry(required_session(request)?).await?;
+        let session_id = SessionId::parse(required_session(request)?)?;
         let before_id = string(&request.parameters, "before_snapshot_id")?;
         let after_id = string(&request.parameters, "after_snapshot_id")?;
-        let before = entry.handle.snapshot(before_id.clone()).await?;
-        let after = entry.handle.snapshot(after_id.clone()).await?;
+        let before = self.historical_observation(&session_id, &before_id).await?;
+        let after = self.historical_observation(&session_id, &after_id).await?;
         let mut changes = BTreeMap::new();
-        for field in ["reason", "stack", "locals", "registers", "tracked"] {
+        for field in [
+            "reason",
+            "stack",
+            "locals",
+            "registers",
+            "tracked",
+            "results",
+            "failures",
+            "observations",
+            "observation_failures",
+        ] {
             let old = before.get(field).cloned().unwrap_or(Value::Null);
             let new = after.get(field).cloned().unwrap_or(Value::Null);
             if old != new {
@@ -683,6 +741,7 @@ impl Gateway {
         Ok(json!({
             "before_snapshot_id": before_id,
             "after_snapshot_id": after_id,
+            "historical": true,
             "changes": changes,
             "partial": before.get("partial") == Some(&Value::Bool(true))
                 || after.get("partial") == Some(&Value::Bool(true))
@@ -692,14 +751,28 @@ impl Gateway {
     pub(super) async fn inspection_snapshot_get(&self, request: &ApiRequest) -> Result<Value> {
         let session_id = SessionId::parse(required_session(request)?)?;
         let snapshot_id = string(&request.parameters, "snapshot_id")?;
-        if let Ok(entry) = self.entry(&session_id.0).await {
-            return entry.handle.snapshot(snapshot_id).await;
+        self.historical_observation(&session_id, &snapshot_id).await
+    }
+
+    async fn historical_observation(
+        &self,
+        session_id: &SessionId,
+        snapshot_id: &str,
+    ) -> Result<Value> {
+        // 2026-09-08: Looking up immutable evidence through a live worker made
+        // sharing wait behind unrelated target control. SQLite owns snapshot
+        // history regardless of whether the session actor is still present.
+        let mut snapshot = if let Ok(entry) = self.entry(&session_id.0).await {
+            match entry.handle.snapshot_cached(snapshot_id) {
+                Some(snapshot) => Some(snapshot),
+                None => self.store.get_snapshot(session_id, snapshot_id)?,
+            }
+        } else {
+            self.store.get_snapshot(session_id, snapshot_id)?
         }
-        // 2026-08-28: Historical snapshots remain authoritative SQLite
-        // evidence after the live worker has been removed from the registry.
-        self.store
-            .get_snapshot(&session_id, &snapshot_id)?
-            .ok_or_else(|| Error::new(ErrorCode::NotFound, "snapshot not found"))
+        .ok_or_else(|| Error::new(ErrorCode::NotFound, "snapshot not found"))?;
+        snapshot["historical"] = Value::Bool(true);
+        Ok(snapshot)
     }
 
     pub(super) async fn inspection_batch(&self, request: &ApiRequest) -> Result<Value> {
@@ -709,55 +782,248 @@ impl Gateway {
         let requests = request
             .parameters
             .get("requests")
-            .and_then(Value::as_array)
             .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "batch requests are required"))?;
-        if requests.is_empty() || requests.len() > 16 {
-            return Err(Error::new(
-                ErrorCode::InvalidArgument,
-                "batch accepts 1 to 16 reads",
-            ));
+        let observation = self
+            .capture_observations(request, &entry, &baseline, requests, true)
+            .await?;
+        let context = observation.context;
+        Ok(json!({
+            "observation_context": &context,
+            "observation_id": context.observation_id,
+            "stop_id": context.stop_id,
+            "revision": context.captured_revision,
+            "execution_epoch": context.execution_epoch,
+            "results": observation.results,
+            "failures": observation.failures,
+            "evidence": observation.evidence,
+            "complete": observation.complete,
+            "partial": !observation.complete
+        }))
+    }
+
+    pub(super) async fn capture_observations(
+        &self,
+        parent: &ApiRequest,
+        entry: &SessionEntry,
+        baseline: &crate::domain::SessionState,
+        items: &Value,
+        persist: bool,
+    ) -> Result<ObservationResult> {
+        let stop_id = baseline.stop_id.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorCode::TargetRunning,
+                "observation requires stopped target",
+            )
+        })?;
+        // 2026-09-08: Separate per-item limits allowed one turn to request
+        // sixteen full memory reads. Validate the complete immutable plan and
+        // its aggregate byte budget before the first backend observation.
+        let requests =
+            parse_observation_requests(items, stop_id, self.config.limits.memory_read_bytes)?;
+        let observation = entry
+            .handle
+            .stable_observation(
+                baseline,
+                Box::pin(async {
+                    let mut results = BTreeMap::new();
+                    let mut failures = BTreeMap::new();
+                    let mut evidence = BTreeMap::new();
+                    let mut cache = BTreeMap::<String, CachedObservation>::new();
+                    let mut partial_success = false;
+                    for request in requests {
+                        entry.handle.require_active_operation()?;
+                        let cached = request.cache_key().and_then(|key| cache.get(key)).cloned();
+                        let outcome = match cached {
+                            Some(outcome) => outcome,
+                            None => match self.execute_observation(parent, entry, &request).await {
+                                Ok(mut result) => {
+                                    for item in result_evidence(&entry.handle.id().0, &result) {
+                                        evidence.insert(item.uri.clone(), item);
+                                    }
+                                    request.finalize_result(&mut result);
+                                    CachedObservation::Result(result)
+                                }
+                                Err(error) if independent_failure(error.code) => {
+                                    // 2026-09-08: One unavailable read aborted
+                                    // already-valid siblings. Retain only
+                                    // independent failures; stop, epoch,
+                                    // deadline, and cancellation errors still
+                                    // invalidate the complete observation.
+                                    let failure = ApiError {
+                                        code: error.code,
+                                        message: error.message,
+                                        retryable: error.retryable,
+                                        details: error.details,
+                                    };
+                                    for item in result_evidence(
+                                        &entry.handle.id().0,
+                                        &serde_json::to_value(&failure)?,
+                                    ) {
+                                        evidence.insert(item.uri.clone(), item);
+                                    }
+                                    CachedObservation::Failure(failure)
+                                }
+                                Err(error) => return Err(error),
+                            },
+                        };
+                        if let Some(key) = request.cache_key() {
+                            cache
+                                .entry(key.to_owned())
+                                .or_insert_with(|| outcome.clone());
+                        }
+                        match outcome {
+                            CachedObservation::Result(result) => {
+                                partial_success |= request.is_partial_result(&result);
+                                results.insert(request.name().to_owned(), result);
+                            }
+                            CachedObservation::Failure(error) => {
+                                failures.insert(request.name().to_owned(), error);
+                            }
+                        }
+                    }
+                    entry.handle.require_active_operation()?;
+                    // 2026-09-08: A successful partial read was reported as a
+                    // complete turn because only explicit sibling failures
+                    // contributed to the aggregate completeness flag.
+                    let complete = failures.is_empty() && !partial_success;
+                    let captured_revision = entry.handle.with_state(|state| state.revision);
+                    let frame_id = baseline
+                        .stopped_thread_id
+                        .as_ref()
+                        .zip(baseline.stopped_frame())
+                        .map(|(thread, frame)| FrameId::new(thread, stop_id, frame.level));
+                    Ok(ObservationResult {
+                        context: ObservationContext {
+                            observation_id: None,
+                            stop_id: stop_id.clone(),
+                            captured_revision,
+                            execution_epoch: baseline.execution_epoch,
+                            inferior_id: baseline.stopped_inferior_id.clone(),
+                            thread_id: baseline.stopped_thread_id.clone(),
+                            frame_id,
+                        },
+                        complete,
+                        results,
+                        failures,
+                        warnings: Vec::new(),
+                        evidence: evidence.into_values().collect(),
+                    })
+                }),
+            )
+            .await?;
+        if !persist {
+            return Ok(observation);
         }
+        let partial = !observation.complete;
+        let finalized = entry
+            .handle
+            .commit_observation(
+                serde_json::to_value(observation)?,
+                stop_id.clone(),
+                baseline.execution_epoch,
+                partial,
+            )
+            .await?;
+        Ok(serde_json::from_value(finalized)?)
+    }
+
+    fn execute_observation<'a>(
+        &'a self,
+        parent: &'a ApiRequest,
+        entry: &'a SessionEntry,
+        request: &'a super::observation::ObservationRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+        Box::pin(async move {
+            let subrequest = request.subrequest(parent);
+            match request.kind() {
+                ObservationKind::Inspection => self.inspection_get(&subrequest).await,
+                ObservationKind::Evaluate => self.value_evaluate(&subrequest).await,
+                ObservationKind::Memory => {
+                    self.observation_memory_read_with_entry(entry, &subrequest)
+                        .await
+                }
+                ObservationKind::Disassembly => self.disassembly_read(&subrequest).await,
+                ObservationKind::Diff => self.inspection_diff(&subrequest).await,
+            }
+        })
+    }
+
+    async fn observation_memory_read(&self, request: &ApiRequest) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        self.observation_memory_read_with_entry(&entry, request)
+            .await
+    }
+
+    async fn inspection_tracking(
+        &self,
+        entry: &SessionEntry,
+        request: &ApiRequest,
+    ) -> Result<Value> {
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
         entry
             .handle
             .stable_observation(
-                &baseline,
+                &state,
                 Box::pin(async {
-                    let mut results = BTreeMap::new();
-                    for item in requests {
-                        let view = string(item, "view")?;
-                        // 2026-09-01: Requiring a name identical to every view
-                        // repeated request tokens. Use the view as its result
-                        // key; names remain available for duplicate views.
-                        let name = item
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or(&view)
-                            .to_owned();
-                        if results.contains_key(&name) {
-                            return Err(Error::new(
-                                ErrorCode::Conflict,
-                                "batch request names must be unique",
-                            ));
-                        }
-                        let mut parameters = item.clone();
-                        parameters["stop_id"] =
-                            Value::String(baseline.stop_id.as_ref().unwrap().0.clone());
-                        let subrequest = ApiRequest {
-                            api_version: request.api_version.clone(),
-                            request_id: format!("{}:{name}", request.request_id),
-                            session_id: request.session_id.clone(),
-                            method: CanonicalMethod::InspectionGet,
-                            expected_revision: None,
-                            idempotency_key: None,
-                            parameters,
-                        };
-                        results.insert(name, self.inspection_get(&subrequest).await?);
-                    }
+                    let mut warnings = Vec::new();
+                    let (tracked, changes) = self
+                        .capture_tracking(entry, request, &state, &mut warnings)
+                        .await?;
+                    let partial = !warnings.is_empty();
                     Ok(json!({
-                        "stop_id": baseline.stop_id,
-                        "revision": entry.handle.with_state(|state| state.revision),
-                        "results": results
+                        "stop_id": state.stop_id,
+                        "tracked": tracked,
+                        "changes": changes,
+                        "warnings": warnings,
+                        "partial": partial
                     }))
+                }),
+            )
+            .await
+    }
+
+    async fn observation_memory_read_with_entry(
+        &self,
+        entry: &SessionEntry,
+        request: &ApiRequest,
+    ) -> Result<Value> {
+        let state = entry.handle.state();
+        require_stopped_context(&request.parameters, &state)?;
+        entry
+            .handle
+            .stable_observation(
+                &state,
+                Box::pin(async {
+                    let mut resolved = request.clone();
+                    if let Some(expression) = request
+                        .parameters
+                        .get("address_expression")
+                        .and_then(Value::as_str)
+                    {
+                        let reply = safe_evaluate_command(
+                            &entry.handle,
+                            context_options(
+                                MiCommand::new("-data-evaluate-expression")?.string(expression),
+                                &request.parameters,
+                                &state,
+                            )?,
+                        )
+                        .await?;
+                        let value = result_text(&reply.record, "value").ok_or_else(|| {
+                            Error::new(ErrorCode::GdbError, "address expression returned no value")
+                        })?;
+                        let address = crate::domain::Address::parse(&format!(
+                            "0x{:x}",
+                            parse_address(&value)?
+                        ))?;
+                        let parameters = resolved.parameters.as_object_mut().unwrap();
+                        parameters.remove("address_expression");
+                        parameters
+                            .insert("address".into(), Value::String(address.as_str().to_owned()));
+                    }
+                    self.authorize_observation_memory(entry, &resolved.parameters)?;
+                    self.memory_read(&resolved).await
                 }),
             )
             .await
@@ -800,13 +1066,18 @@ impl Gateway {
                                     "sha256": format!("{:x}", Sha256::digest(value.as_bytes())),
                                     "preview": value.chars().take(max_value_bytes.min(256)).collect::<String>(),
                                     "artifact": uri,
-                                    "truncated": true
+                                    "truncated": true,
+                                    "evidence_seq": reply.evidence_seq
                                 })
                             } else {
-                                json!({ "expression": expression, "value": value })
+                                json!({
+                                    "expression": expression,
+                                    "value": value,
+                                    "evidence_seq": reply.evidence_seq
+                                })
                             }
                         }
-                        Err(error) => {
+                        Err(error) if independent_failure(error.code) => {
                             warnings.push(json!({
                                 "code": "TRACKED_EXPRESSION_UNAVAILABLE",
                                 "tracking_id": tracking_id,
@@ -814,6 +1085,7 @@ impl Gateway {
                             }));
                             continue;
                         }
+                        Err(error) => return Err(error),
                     }
                 }
                 TrackingDefinition::Memory {
@@ -838,13 +1110,34 @@ impl Gateway {
                         Err(error) => Err(error),
                     };
                     let bytes = match address {
-                        Ok(address) => {
-                            read_memory_bytes(&entry.handle, state, address, length, true).await
-                        }
+                        Ok(address) => match self.authorize_observation_memory(
+                            entry,
+                            &json!({"address": format!("0x{address:x}"), "length": length}),
+                        ) {
+                            // 2026-09-08: Newly exposed tracked reads used the
+                            // resolved address without applying the ordinary
+                            // memory range/MMIO policy at capture time.
+                            Ok(()) => {
+                                read_memory_bytes(&entry.handle, state, address, length, true).await
+                            }
+                            Err(error) => Err(error),
+                        },
                         Err(error) => Err(error),
                     };
                     match bytes {
                         Ok((bytes, evidence_seq)) => {
+                            // 2026-09-08: Partial tracked reads shadowed the
+                            // requested length and made snapshots claim the
+                            // shortened sample was complete.
+                            if bytes.len() != length {
+                                warnings.push(json!({
+                                    "code": "TRACKED_MEMORY_PARTIAL",
+                                    "message": format!("tracked memory returned {} of {length} bytes", bytes.len()),
+                                    "tracking_id": tracking_id,
+                                    "requested_length": length,
+                                    "read_length": bytes.len()
+                                }));
+                            }
                             let length = bytes.len();
                             let sha256 = format!("{:x}", Sha256::digest(&bytes));
                             let data_base64 = BASE64.encode(&bytes);
@@ -876,7 +1169,7 @@ impl Gateway {
                                 "evidence_seq": evidence_seq
                             })
                         }
-                        Err(error) => {
+                        Err(error) if independent_failure(error.code) => {
                             warnings.push(json!({
                                 "code": "TRACKED_MEMORY_UNAVAILABLE",
                                 "tracking_id": tracking_id,
@@ -884,6 +1177,7 @@ impl Gateway {
                             }));
                             continue;
                         }
+                        Err(error) => return Err(error),
                     }
                 }
             };
@@ -893,7 +1187,17 @@ impl Gateway {
             observations.insert(tracking_id.clone(), observation);
             presented.insert(tracking_id, presentation);
         }
-        let changes = entry.handle.record_tracking(observations).await?;
+        // 2026-09-08: Tracking converted cancelled reads into warnings and
+        // could still update history. Check cancellation before advancing the
+        // shared baseline used by future change captures.
+        entry.handle.require_active_operation()?;
+        let stop_id = state.stop_id.clone().ok_or_else(|| {
+            Error::new(ErrorCode::TargetRunning, "tracking requires stopped target")
+        })?;
+        let changes = entry
+            .handle
+            .record_tracking(observations, stop_id, state.execution_epoch)
+            .await?;
         Ok((presented, changes))
     }
 
@@ -901,10 +1205,7 @@ impl Gateway {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
-        let names_reply = entry
-            .handle
-            .command(MiCommand::new("-data-list-register-names")?)
-            .await?;
+        let names_reply = entry.handle.register_names().await?;
         let names = result_string_list(&names_reply.record, "register-names");
         let requested_roles = request
             .parameters
@@ -1005,10 +1306,7 @@ impl Gateway {
             .stable_observation(
                 &state,
                 Box::pin(async {
-                    let names_reply = entry
-                        .handle
-                        .command(MiCommand::new("-data-list-register-names")?)
-                        .await?;
+                    let names_reply = entry.handle.register_names().await?;
                     let names = result_string_list(&names_reply.record, "register-names");
                     let register = resolve_register_name(&requested, &names)?;
                     let read = |expression: String| {
@@ -1121,7 +1419,7 @@ impl Gateway {
             .await?;
         let architecture = entry
             .handle
-            .command(MiCommand::new("-data-list-register-names")?)
+            .register_names()
             .await
             .ok()
             .map(|reply| target_architecture(&result_string_list(&reply.record, "register-names")))

@@ -643,6 +643,253 @@ async fn cancelled_operation_skips_queued_observation_commands() {
 }
 
 #[tokio::test]
+async fn cancelled_operation_rejects_a_cached_register_name_hit() {
+    let Some(session) = control_test_session().await else {
+        return;
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let operation = ActiveOperation::new(OperationId::new(), cancelled.clone());
+    let expected = session.state();
+
+    scope_operation(
+        operation,
+        session.stable_observation(
+            &expected,
+            Box::pin(async {
+                session.register_names().await?;
+                cancelled.store(true, Ordering::Release);
+                assert_eq!(
+                    session.register_names().await.unwrap_err().code,
+                    ErrorCode::Cancelled
+                );
+                Ok(())
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_queued_snapshot_commit_publishes_nothing() {
+    let Some(session) = control_test_session().await else {
+        return;
+    };
+    session
+        .record_event(DomainEvent::TargetStopped {
+            backend_inferior: None,
+            backend_thread: None,
+            reason: "test-stop".into(),
+            reason_detail: None,
+            frame: None,
+        })
+        .await
+        .unwrap();
+    let stopped = session.state();
+    let stop_id = stopped.stop_id.unwrap();
+    let snapshots_before = session
+        .snapshots
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .len();
+    let marker_directory = tempdir().unwrap();
+    let marker = marker_directory.path().join("command-started");
+    let blocking_session = session.clone();
+    let blocking_marker = marker.clone();
+    let blocker = tokio::spawn(async move {
+        blocking_session
+            .command(
+                MiCommand::new("-interpreter-exec")
+                    .unwrap()
+                    .bare("console")
+                    .unwrap()
+                    .string(format!(
+                        "shell touch {}; sleep 1",
+                        blocking_marker.display()
+                    )),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = oneshot::channel();
+    session
+        .requests
+        .send(WorkerRequest::CommitSnapshot {
+            snapshot: serde_json::json!({"result": "must-not-publish"}),
+            expected_stop_id: stop_id,
+            expected_execution_epoch: stopped.execution_epoch,
+            partial: false,
+            publish_snapshot: false,
+            operation: Some(ActiveOperation::new(OperationId::new(), cancelled.clone())),
+            response: sender,
+        })
+        .await
+        .unwrap();
+    cancelled.store(true, Ordering::Release);
+
+    blocker.await.unwrap().unwrap();
+    assert_eq!(
+        receiver.await.unwrap().unwrap_err().code,
+        ErrorCode::Cancelled
+    );
+    assert_eq!(
+        session
+            .snapshots
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len(),
+        snapshots_before
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_queued_tracking_samples_preserve_the_last_valid_baseline() {
+    let Some(session) = control_test_session().await else {
+        return;
+    };
+    session
+        .record_event(DomainEvent::TargetStopped {
+            backend_inferior: None,
+            backend_thread: None,
+            reason: "test-stop".into(),
+            reason_detail: None,
+            frame: None,
+        })
+        .await
+        .unwrap();
+    let initial = session.state();
+    let initial_stop = initial.stop_id.clone().unwrap();
+    let tracking_id = crate::domain::TrackingId::new();
+    session
+        .add_tracking(TrackingDefinition::Expression {
+            tracking_id: tracking_id.clone(),
+            expression: "value".into(),
+            max_value_bytes: 128,
+        })
+        .await
+        .unwrap();
+    session
+        .record_tracking(
+            BTreeMap::from([(tracking_id.0.clone(), serde_json::json!({"value": 1}))]),
+            initial_stop.clone(),
+            initial.execution_epoch,
+        )
+        .await
+        .unwrap();
+
+    let marker_directory = tempdir().unwrap();
+    let marker = marker_directory.path().join("tracking-command-started");
+    let blocking_session = session.clone();
+    let blocking_marker = marker.clone();
+    let blocker = tokio::spawn(async move {
+        blocking_session
+            .command(
+                MiCommand::new("-interpreter-exec")
+                    .unwrap()
+                    .bare("console")
+                    .unwrap()
+                    .string(format!(
+                        "shell touch {}; sleep 1",
+                        blocking_marker.display()
+                    )),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = oneshot::channel();
+    session
+        .requests
+        .send(WorkerRequest::RecordTracking {
+            observations: BTreeMap::from([(
+                tracking_id.0.clone(),
+                serde_json::json!({"value": 2}),
+            )]),
+            expected_stop_id: initial_stop.clone(),
+            expected_execution_epoch: initial.execution_epoch,
+            operation: Some(ActiveOperation::new(OperationId::new(), cancelled.clone())),
+            response: sender,
+        })
+        .await
+        .unwrap();
+    cancelled.store(true, Ordering::Release);
+    blocker.await.unwrap().unwrap();
+    assert_eq!(
+        receiver.await.unwrap().unwrap_err().code,
+        ErrorCode::Cancelled
+    );
+
+    let after_cancel = session
+        .record_tracking(
+            BTreeMap::from([(tracking_id.0.clone(), serde_json::json!({"value": 3}))]),
+            initial_stop.clone(),
+            initial.execution_epoch,
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_cancel[&tracking_id.0]["before"]["value"], 1);
+    assert_eq!(after_cancel[&tracking_id.0]["after"]["value"], 3);
+
+    session
+        .record_event(DomainEvent::TargetRunning {
+            backend_inferiors: vec![],
+        })
+        .await
+        .unwrap();
+    session
+        .record_event(DomainEvent::TargetStopped {
+            backend_inferior: None,
+            backend_thread: None,
+            reason: "next-test-stop".into(),
+            reason_detail: None,
+            frame: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .record_tracking(
+                BTreeMap::from([(tracking_id.0.clone(), serde_json::json!({"value": 4}),)]),
+                initial_stop,
+                initial.execution_epoch,
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::StaleContext
+    );
+    let current = session.state();
+    let after_stale = session
+        .record_tracking(
+            BTreeMap::from([(tracking_id.0.clone(), serde_json::json!({"value": 5}))]),
+            current.stop_id.unwrap(),
+            current.execution_epoch,
+        )
+        .await
+        .unwrap();
+    assert_eq!(after_stale[&tracking_id.0]["before"]["value"], 3);
+    assert_eq!(after_stale[&tracking_id.0]["after"]["value"], 5);
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn expired_capability_refresh_never_reaches_gdb() {
     let Some(session) = control_test_session().await else {
         return;
@@ -962,7 +1209,6 @@ async fn stale_snapshot_commit_leaves_no_snapshot() {
     };
     let error = session
         .commit_snapshot(
-            "snap_invalid".into(),
             serde_json::json!({"snapshot_id": "snap_invalid"}),
             StopId("stop_missing".into()),
             session.state().execution_epoch,
@@ -978,6 +1224,97 @@ async fn stale_snapshot_commit_leaves_no_snapshot() {
             .unwrap_err()
             .code,
         ErrorCode::NotFound
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_snapshot_cache_evicts_in_fifo_order() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.storage.max_snapshots_per_session = 2;
+    let store =
+        Arc::new(Store::open_with_storage(&config.persistence.sqlite, &config.storage).unwrap());
+    let session = SessionHandle::start(
+        Arc::new(config),
+        Profile::RawAdmin,
+        store,
+        Arc::new(Metrics::default()),
+    )
+    .await
+    .unwrap();
+    session
+        .record_event(DomainEvent::TargetStopped {
+            backend_inferior: None,
+            backend_thread: None,
+            reason: "test-stop".into(),
+            reason_detail: None,
+            frame: None,
+        })
+        .await
+        .unwrap();
+    let stopped = session.state();
+    let stop_id = stopped.stop_id.clone().unwrap();
+    let observation = session
+        .commit_observation(
+            serde_json::json!({
+                "context": {
+                    "observation_id": null,
+                    "stop_id": "provisional",
+                    "captured_revision": 0,
+                    "execution_epoch": 999
+                },
+                "results": {}
+            }),
+            stop_id.clone(),
+            stopped.execution_epoch,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        observation["context"]["observation_id"],
+        observation["observation_id"]
+    );
+    assert_eq!(observation["context"]["stop_id"], stop_id.0);
+    assert_eq!(
+        observation["context"]["captured_revision"],
+        stopped.revision
+    );
+    assert_eq!(session.state().revision, stopped.revision);
+    assert_eq!(session.state().snapshot, stopped.snapshot);
+    let mut ids = Vec::new();
+    for index in 0..3 {
+        let snapshot = session
+            .commit_snapshot(
+                serde_json::json!({"index": index}),
+                stop_id.clone(),
+                stopped.execution_epoch,
+                false,
+            )
+            .await
+            .unwrap();
+        ids.push(snapshot["snapshot_id"].as_str().unwrap().to_owned());
+    }
+
+    assert!(session.snapshot_cached(&ids[0]).is_none());
+    assert_eq!(session.snapshot_cached(&ids[1]).unwrap()["index"], 1);
+    assert_eq!(session.snapshot_cached(&ids[2]).unwrap()["index"], 2);
+    assert!(
+        ids.iter()
+            .all(|id| id.starts_with("obs_") && id.len() == 30)
     );
     session.close().await.unwrap();
 }

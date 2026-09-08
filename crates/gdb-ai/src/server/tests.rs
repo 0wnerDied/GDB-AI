@@ -381,6 +381,105 @@ fn projected_value_collections_keep_semantics_without_mi_records() {
     assert!(result["structuredContent"]["result"]["result"].is_object());
 }
 
+#[test]
+fn stored_composite_projection_matches_original_item_facts() {
+    let context = json!({
+        "observation_id": "obs_test",
+        "stop_id": "stop_test",
+        "captured_revision": 7,
+        "execution_epoch": 2
+    });
+    let item = json!({
+        "stop_id": "stop_test", "value": "42", "side_effects": "denied",
+        "expression": "counter", "selection": {"thread_id": "t2", "frame_level": 1}
+    });
+    let failure = json!({
+        "code": "GDB_ERROR",
+        "message": "No symbol named missing_symbol",
+        "retryable": false,
+        "details": {
+            "token": 11,
+            "record": {"record": "result", "data": {"class": "error"}},
+            "evidence_seq": 9,
+            "console": {"encoding": "utf-8", "text": "symbol lookup failed\n"}
+        }
+    });
+
+    let batch_request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "batch-original".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::InspectionBatch,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let batch = tool_result(
+        ApiResponse::success(
+            &batch_request,
+            None,
+            json!({
+                "stop_id": "stop_test",
+                "revision": 7,
+                "observation_context": context,
+                "results": {"evaluate": item},
+                "failures": {"missing": failure}
+            }),
+        ),
+        CanonicalMethod::InspectionBatch,
+    );
+
+    let lookup_request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "batch-lookup".into(),
+        session_id: Some("sess_test".into()),
+        method: CanonicalMethod::InspectionSnapshotGet,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let lookup = tool_result(
+        ApiResponse::success(
+            &lookup_request,
+            None,
+            json!({
+                "context": context,
+                "results": {"evaluate": item},
+                "failures": {"missing": failure},
+                "historical": true
+            }),
+        ),
+        CanonicalMethod::InspectionSnapshotGet,
+    );
+
+    let original = &batch["structuredContent"]["result"];
+    let stored = &lookup["structuredContent"]["result"];
+    assert_eq!(
+        stored["results"]["evaluate"],
+        original["results"]["evaluate"]
+    );
+    assert_eq!(
+        stored["failures"]["missing"],
+        original["failures"]["missing"]
+    );
+    assert!(stored["results"]["evaluate"].get("command").is_none());
+    assert_eq!(stored["results"]["evaluate"]["expression"], "counter");
+    assert_eq!(
+        stored["results"]["evaluate"]["selection"]["thread_id"],
+        "t2"
+    );
+    assert_eq!(stored["results"]["evaluate"]["selection"]["frame_level"], 1);
+    let failure = &stored["failures"]["missing"];
+    assert_eq!(failure["code"], "GDB_ERROR");
+    assert_eq!(failure["retryable"], false);
+    assert_eq!(failure["details"]["console"]["encoding"], "utf-8");
+    assert!(failure["details"].get("record").is_none());
+    assert!(failure["details"].get("token").is_none());
+    assert!(failure["details"].get("evidence_seq").is_none());
+    assert_eq!(stored["historical"], true);
+    assert_eq!(stored["context"]["stop_id"], "stop_test");
+}
+
 #[tokio::test]
 async fn projected_tools_keep_control_without_lease_renewal() {
     if std::process::Command::new("gdb")

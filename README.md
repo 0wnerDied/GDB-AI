@@ -133,7 +133,8 @@ stop in one request:
     "input": {"text": "1\n"},
     "inspect": [
       {"view": "stack", "limit": 8},
-      {"view": "registers", "roles": ["pc", "sp"]}
+      {"view": "registers", "roles": ["pc", "sp"]},
+      {"view": "evaluate", "expressions": ["$pc", "$sp"]}
     ]
   }
 }
@@ -141,6 +142,12 @@ stop in one request:
 
 Continue and step wait for a stop or exit by default. Requested views apply
 to a resulting stop; a target that exits instead is reported as exited.
+Run `inspect`, `gdb_batch` requests, and snapshot `inspect` share the same
+bounded read vocabulary, including expressions, memory, disassembly, and
+per-item thread, frame, and source selectors. Independent read failures
+preserve successful siblings and mark the observation incomplete.
+The same plan can sample configured tracking definitions or compare two
+retained observations without building a full snapshot.
 An `observation_error` reports failed post-stop inspection while preserving
 the execution outcome; it does not imply that execution should be repeated.
 Use `accepted` or `running` without `inspect` for asynchronous interaction.
@@ -174,8 +181,8 @@ The default MCP catalog contains eleven tools:
 | `gdb_run` | Execution control, direct restart, input, waits, and requested views |
 | `gdb_probe` | Temporary breakpoint, optional trigger, bounded capture, and cleanup |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
-| `gdb_inspect` | Target, thread, stack, symbol/type, source, mapping, and snapshot views |
-| `gdb_batch` | Multiple bounded views at one stop |
+| `gdb_inspect` | Target, thread, stack, symbol/type, source, mapping, tracking, snapshots, and historical differences |
+| `gdb_batch` | Bounded mixed reads captured at one stop and shared by observation ID |
 | `gdb_evaluate` | Single or ordered-batch expression evaluation |
 | `gdb_memory` | Memory reads and retrieval of artifact content |
 | `gdb_disassemble` | Instructions, addresses, bytes, and available source context |
@@ -240,6 +247,13 @@ interrupt/close have a separate control path. MCP-created sessions retain a
 fixed caller controller without recurring lease renewal. Same-principal
 callers may observe within their access rights; concurrent clients do not
 automatically acquire independent mutation authority over one target.
+
+Run inspections, batches, and snapshots return an immutable `observation_id`.
+Share it with an authorized observer through `gdb_inspect` view `observation`
+and `snapshot_id: "<observation-id>"`; lookup issues no new GDB commands.
+Retrieved observations are explicitly historical, even before the target
+resumes. New captures never overwrite an earlier ID, and configured snapshot
+and session retention limits still apply.
 
 Session create/status returns `caller_identity` and `controller`. The current
 controller can use `gdb_session` action `handoff` with `to` set to another

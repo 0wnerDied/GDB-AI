@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use super::{
     context::{WaitSpec, apply_wait, apply_wait_baseline, context_options, wait_spec},
     encoding::{MAX_INFERIOR_INPUT_BYTES, byte_content, input_bytes},
+    observation::validate_observation_requests,
     reconciliation::{reconcile_breakpoints, synchronize_breakpoint},
     request::{bool_value, required_session, string},
 };
@@ -117,7 +118,7 @@ use crate::{
     },
     gateway::{Gateway, SessionEntry},
     normalize::breakpoint_number as inserted_breakpoint_number,
-    protocol::{ApiRequest, CanonicalMethod},
+    protocol::ApiRequest,
     session::{CommandReply, OutputRing, PendingModuleBreakpoint, settled_by},
 };
 
@@ -236,6 +237,9 @@ impl Gateway {
         let action = string(&request.parameters, "action")?;
         let wait = wait_spec(&request.parameters)?;
         validate_inspection_wait(&request.parameters, wait.as_ref())?;
+        if let Some(inspect) = request.parameters.get("inspect") {
+            validate_observation_requests(inspect, self.config.limits.memory_read_bytes)?;
+        }
         let input = turn_input(&request.parameters)?;
         if action == "interrupt" && input.is_some() {
             return Err(Error::new(
@@ -406,6 +410,9 @@ impl Gateway {
             Error::new(ErrorCode::InvalidArgument, "wait parameters are required")
         })?;
         validate_inspection_wait(&request.parameters, Some(&wait))?;
+        if let Some(inspect) = request.parameters.get("inspect") {
+            validate_observation_requests(inspect, self.config.limits.memory_read_bytes)?;
+        }
         let report_settled_by = wait.until == "settled";
         let input = feed_inferior(&entry, input, Duration::from_millis(wait.timeout_ms)).await?;
         // 2026-08-28: Waiting without the operation's creation baseline let
@@ -472,21 +479,32 @@ impl Gateway {
         if state.stop_id.is_none() {
             return;
         }
-        let observation_request = ApiRequest {
-            api_version: request.api_version.clone(),
-            request_id: format!("{}:inspect", request.request_id),
-            session_id: request.session_id.clone(),
-            method: CanonicalMethod::InspectionBatch,
-            expected_revision: None,
-            idempotency_key: None,
-            parameters: json!({
-                "stop_id": state.stop_id,
-                "requests": requests
-            }),
-        };
         result["stop_id"] = json!(state.stop_id);
-        match self.inspection_batch(&observation_request).await {
-            Ok(batch) => result["observations"] = batch["results"].clone(),
+        let observation = match required_session(request) {
+            Ok(session_id) => match self.entry(session_id).await {
+                Ok(entry) => {
+                    self.capture_observations(request, &entry, state, requests, true)
+                        .await
+                }
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        match observation {
+            Ok(observation) => {
+                if let Some(observation_id) = &observation.context.observation_id {
+                    result["observation_id"] = Value::String(observation_id.clone());
+                }
+                result["observation_context"] = json!(observation.context);
+                result["observation_complete"] = Value::Bool(observation.complete);
+                result["observations"] = json!(observation.results);
+                if !observation.failures.is_empty() {
+                    result["observation_failures"] = json!(observation.failures);
+                }
+                if !observation.evidence.is_empty() {
+                    result["observation_evidence"] = json!(observation.evidence);
+                }
+            }
             Err(error) => {
                 // 2026-09-01: A post-stop observation failure must not
                 // disguise successful execution and invite a second resume.

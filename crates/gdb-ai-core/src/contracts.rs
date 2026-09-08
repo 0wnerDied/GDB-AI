@@ -382,6 +382,11 @@ const INSPECTION_VIEWS: &[&str] = &[
     "source",
     "mappings",
     "signals",
+    "evaluate",
+    "memory",
+    "disassembly",
+    "tracked",
+    "diff",
 ];
 
 // 2026-08-29: The last generic object and array contracts let malformed
@@ -415,6 +420,14 @@ const INSPECTION_BATCH_ITEM_FIELDS: &[ParameterField] = &[
     optional("range", RANGE_KIND),
     optional("include_bytes", ParameterKind::Boolean),
     optional("include_source", ParameterKind::Boolean),
+    optional("expression", ParameterKind::String),
+    optional("expressions", ParameterKind::StringArray),
+    optional("address", ParameterKind::String),
+    optional("address_expression", ParameterKind::String),
+    optional("length", ParameterKind::Positive),
+    optional("allow_partial", ParameterKind::Boolean),
+    optional("before_snapshot_id", ParameterKind::String),
+    optional("after_snapshot_id", ParameterKind::String),
 ];
 const INSPECTION_BATCH_ITEM_OBJECT: ObjectContract =
     ObjectContract::new(INSPECTION_BATCH_ITEM_FIELDS, 0, &[]);
@@ -422,29 +435,7 @@ const INSPECTION_BATCH_ITEM_KIND: ParameterKind =
     ParameterKind::Shape(&INSPECTION_BATCH_ITEM_OBJECT);
 const INSPECTION_BATCH_KIND: ParameterKind = ParameterKind::ArrayOf(&INSPECTION_BATCH_ITEM_KIND);
 
-// 2026-09-01: Repeating the complete batch-item contract in both run branches
-// charged every Agent turn for rarely used cross-thread and source selectors.
-// Keep the high-value stop-turn controls here; gdb_batch retains the full set.
-const TURN_INSPECTION_ITEM_FIELDS: &[ParameterField] = &[
-    required("view", ParameterKind::Enum(INSPECTION_VIEWS)),
-    optional("limit", ParameterKind::Unsigned),
-    optional("stack_depth", ParameterKind::Positive),
-    optional("roles", ParameterKind::StringArray),
-    optional("query", ParameterKind::String),
-    optional(
-        "kind",
-        ParameterKind::Enum(&["functions", "types", "variables"]),
-    ),
-    optional("type_layout", ParameterKind::String),
-    optional(
-        "profile",
-        ParameterKind::Enum(&["minimal", "brief", "standard", "deep"]),
-    ),
-];
-const TURN_INSPECTION_ITEM_OBJECT: ObjectContract =
-    ObjectContract::new(TURN_INSPECTION_ITEM_FIELDS, 0, &[]);
-const TURN_INSPECTION_ITEM_KIND: ParameterKind = ParameterKind::Shape(&TURN_INSPECTION_ITEM_OBJECT);
-const TURN_INSPECTION_KIND: ParameterKind = ParameterKind::ArrayOf(&TURN_INSPECTION_ITEM_KIND);
+const TURN_INSPECTION_KIND: ParameterKind = INSPECTION_BATCH_KIND;
 
 const SIGNAL_POLICY_FIELDS: &[ParameterField] = &[
     required("stop", ParameterKind::Boolean),
@@ -769,6 +760,14 @@ impl CanonicalMethod {
                 optional("range", RANGE_KIND),
                 optional("include_bytes", Boolean),
                 optional("include_source", Boolean),
+                optional("expression", String),
+                optional("expressions", StringArray),
+                optional("address", String),
+                optional("address_expression", String),
+                optional("length", Positive),
+                optional("allow_partial", Boolean),
+                optional("before_snapshot_id", String),
+                optional("after_snapshot_id", String),
             ]),
             InspectionSnapshot => MethodContract::contextual(vec![
                 optional("profile", Enum(&["minimal", "brief", "standard", "deep"])),
@@ -778,6 +777,7 @@ impl CanonicalMethod {
                 optional("range", RANGE_KIND),
                 optional("include_bytes", Boolean),
                 optional("include_source", Boolean),
+                optional("inspect", TURN_INSPECTION_KIND),
             ]),
             InspectionDiff => MethodContract::plain(vec![
                 required("before_snapshot_id", String),
@@ -1097,7 +1097,12 @@ mod tests {
             .validate_parameters(&json!({
                 "requests": [
                     {"view": "stack", "limit": 4},
-                    {"view": "registers", "roles": ["pc", "sp"]}
+                    {"view": "registers", "roles": ["pc", "sp"]},
+                    {"view": "evaluate", "expressions": ["$pc", "$sp"]},
+                    {"view": "memory", "address_expression": "$sp", "length": 16},
+                    {"view": "disassembly", "around": {"expression": "$pc"}},
+                    {"view": "tracked"},
+                    {"view": "diff", "before_snapshot_id": "obs_before", "after_snapshot_id": "obs_after"}
                 ]
             }))
             .unwrap();
@@ -1115,7 +1120,18 @@ mod tests {
         CanonicalMethod::ExecutionWait
             .validate_parameters(&json!({
                 "wait": {"until": "settled"},
-                "inspect": [{"view": "stack", "limit": 4}]
+                "inspect": [{
+                    "view": "source",
+                    "path": "/tmp/a.c",
+                    "line": 4,
+                    "thread_id": "thread_test",
+                    "frame_level": 0
+                }]
+            }))
+            .unwrap();
+        CanonicalMethod::InspectionSnapshot
+            .validate_parameters(&json!({
+                "inspect": [{"view": "evaluate", "expression": "value"}]
             }))
             .unwrap();
         CanonicalMethod::SessionHandoff

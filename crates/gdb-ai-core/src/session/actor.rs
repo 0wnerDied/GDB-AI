@@ -10,6 +10,7 @@ use gdb_ai_mi::{MiLimits, MiRecord, MiResult, MiValue};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use ulid::Ulid;
 
 use super::{
     ActiveOperation, Capability, CapabilityStatus, CommandReply, OperationCancelMode, OutputRing,
@@ -104,18 +105,18 @@ pub(super) enum WorkerRequest {
     },
     RecordTracking {
         observations: BTreeMap<String, Value>,
+        expected_stop_id: StopId,
+        expected_execution_epoch: u64,
+        operation: Option<ActiveOperation>,
         response: oneshot::Sender<Result<BTreeMap<String, Value>>>,
     },
     CommitSnapshot {
-        snapshot_id: String,
         snapshot: Value,
         expected_stop_id: StopId,
         expected_execution_epoch: u64,
         partial: bool,
-        response: oneshot::Sender<Result<()>>,
-    },
-    GetSnapshot {
-        snapshot_id: String,
+        publish_snapshot: bool,
+        operation: Option<ActiveOperation>,
         response: oneshot::Sender<Result<Value>>,
     },
     ReadOutput {
@@ -222,13 +223,14 @@ pub(super) struct SessionWorker {
     values: BTreeMap<String, ValueBinding>,
     tracking: BTreeMap<String, TrackingDefinition>,
     tracking_history: BTreeMap<String, VecDeque<Value>>,
-    snapshots: BTreeMap<String, Value>,
+    snapshots: Arc<StdRwLock<VecDeque<(String, Value)>>>,
     stale_backend_values: Vec<String>,
     deferred_restoration: Vec<MiCommand>,
     pending_module_breakpoints: BTreeMap<String, PendingModuleBreakpoint>,
     active_resume_operation: Option<OperationId>,
     module_rebind_needed: bool,
     tracking_memory_limit: usize,
+    snapshot_limit: usize,
     artifact_limit: usize,
     owner_artifact_limit: usize,
     total_artifact_limit: usize,
@@ -256,6 +258,7 @@ impl SessionWorker {
         journal: Journal,
         state_sender: watch::Sender<SessionState>,
         events: broadcast::Sender<PublishedEvent>,
+        snapshots: Arc<StdRwLock<VecDeque<(String, Value)>>>,
         requests: mpsc::Receiver<WorkerRequest>,
         controls: mpsc::Receiver<ControlRequest>,
     ) -> Result<Self> {
@@ -376,13 +379,14 @@ impl SessionWorker {
             values: BTreeMap::new(),
             tracking: BTreeMap::new(),
             tracking_history: BTreeMap::new(),
-            snapshots: BTreeMap::new(),
+            snapshots,
             stale_backend_values: Vec::new(),
             deferred_restoration: Vec::new(),
             pending_module_breakpoints: BTreeMap::new(),
             active_resume_operation: None,
             module_rebind_needed: false,
             tracking_memory_limit: config.limits.memory_read_bytes,
+            snapshot_limit: config.storage.max_snapshots_per_session,
             artifact_limit: config.limits.session_artifact_bytes,
             owner_artifact_limit: config.limits.owner_artifact_bytes,
             total_artifact_limit: config.limits.total_artifact_bytes,
@@ -1003,77 +1007,113 @@ impl SessionWorker {
             }
             WorkerRequest::RecordTracking {
                 observations,
-                response,
-            } => {
-                let mut changes = BTreeMap::new();
-                for (tracking_id, current) in observations {
-                    let Some(definition) = self.tracking.get(&tracking_id) else {
-                        continue;
-                    };
-                    let maximum = match definition {
-                        TrackingDefinition::Expression { .. } => 32,
-                        TrackingDefinition::Memory { max_history, .. } => *max_history,
-                    }
-                    .clamp(1, 256);
-                    let history = self
-                        .tracking_history
-                        .entry(tracking_id.clone())
-                        .or_default();
-                    if let Some(previous) = history.back()
-                        && previous != &current
-                    {
-                        changes.insert(tracking_id, tracking_change(previous, &current));
-                    }
-                    let bytes = serde_json::to_vec(&current).map_or(1, |bytes| bytes.len().max(1));
-                    let bounded_maximum = maximum.min((1024 * 1024 / bytes).max(1));
-                    history.push_back(current);
-                    while history.len() > bounded_maximum {
-                        history.pop_front();
-                    }
-                }
-                let _ = response.send(Ok(changes));
-            }
-            WorkerRequest::CommitSnapshot {
-                snapshot_id,
-                snapshot,
                 expected_stop_id,
                 expected_execution_epoch,
-                partial,
+                operation,
                 response,
             } => {
-                // 2026-08-28: Snapshot data was persisted before the Gateway's
-                // final context check. Validate and publish it atomically in
-                // the state-owning worker so stale builds leave no evidence.
+                // 2026-09-08: A cancelled or stale capture could advance the
+                // tracking baseline while queued, so a later valid delta used
+                // an observation that its caller never received.
+                let active = operation
+                    .as_ref()
+                    .map_or(Ok(()), ActiveOperation::require_active);
                 let matches_context = {
                     let state = self.state.borrow();
                     state.stop_id.as_ref() == Some(&expected_stop_id)
                         && state.execution_epoch == expected_execution_epoch
                 };
-                let result = if !matches_context {
+                let result = if let Err(error) = active {
+                    Err(error)
+                } else if !matches_context {
+                    Err(Error::new(
+                        ErrorCode::StaleContext,
+                        "target stop changed before tracking commit",
+                    ))
+                } else {
+                    let mut changes = BTreeMap::new();
+                    for (tracking_id, current) in observations {
+                        let Some(definition) = self.tracking.get(&tracking_id) else {
+                            continue;
+                        };
+                        let maximum = match definition {
+                            TrackingDefinition::Expression { .. } => 32,
+                            TrackingDefinition::Memory { max_history, .. } => *max_history,
+                        }
+                        .clamp(1, 256);
+                        let history = self
+                            .tracking_history
+                            .entry(tracking_id.clone())
+                            .or_default();
+                        if let Some(previous) = history.back()
+                            && previous != &current
+                        {
+                            changes.insert(tracking_id, tracking_change(previous, &current));
+                        }
+                        let bytes =
+                            serde_json::to_vec(&current).map_or(1, |bytes| bytes.len().max(1));
+                        let bounded_maximum = maximum.min((1024 * 1024 / bytes).max(1));
+                        history.push_back(current);
+                        while history.len() > bounded_maximum {
+                            history.pop_front();
+                        }
+                    }
+                    Ok(changes)
+                };
+                let _ = response.send(result);
+            }
+            WorkerRequest::CommitSnapshot {
+                mut snapshot,
+                expected_stop_id,
+                expected_execution_epoch,
+                partial,
+                publish_snapshot,
+                operation,
+                response,
+            } => {
+                // 2026-08-28: Snapshot data was persisted before the Gateway's
+                // final context check. Validate and publish it atomically in
+                // the state-owning worker so stale builds leave no evidence.
+                // 2026-09-08: A cached-only observation could be cancelled
+                // after capture but still commit while queued. Recheck the
+                // carried operation immediately before any publication.
+                let active = operation
+                    .as_ref()
+                    .map_or(Ok(()), ActiveOperation::require_active);
+                let matches_context = {
+                    let state = self.state.borrow();
+                    state.stop_id.as_ref() == Some(&expected_stop_id)
+                        && state.execution_epoch == expected_execution_epoch
+                };
+                let result = if let Err(error) = active {
+                    Err(error)
+                } else if !matches_context {
                     Err(Error::new(
                         ErrorCode::StaleContext,
                         "target stop changed before snapshot commit",
                     ))
                 } else {
-                    self.store_snapshot_value(snapshot_id, snapshot)
-                        .and_then(|()| {
+                    let captured_revision = self.state.borrow().revision;
+                    snapshot["stop_id"] = Value::String(expected_stop_id.0.clone());
+                    snapshot["execution_epoch"] = Value::from(expected_execution_epoch);
+                    snapshot["captured_revision"] = Value::from(captured_revision);
+                    snapshot["partial"] = Value::Bool(partial);
+                    self.store_snapshot_value(snapshot).and_then(|snapshot| {
+                        let snapshot_id = observation_id(&snapshot)?.to_owned();
+                        // 2026-09-08: Publishing an ordinary batch/read as the
+                        // current snapshot advanced optimistic revisions and
+                        // made the next unrelated mutation stale. Only the
+                        // explicit snapshot lifecycle owns SessionState.snapshot.
+                        if publish_snapshot {
                             self.apply_event(DomainEvent::SnapshotReady {
                                 stop_id: expected_stop_id,
+                                snapshot_id: Some(snapshot_id),
                                 partial,
-                            })
-                        })
+                            })?;
+                        }
+                        Ok(snapshot)
+                    })
                 };
-                let _ = response.send(result);
-            }
-            WorkerRequest::GetSnapshot {
-                snapshot_id,
-                response,
-            } => {
-                let result = self
-                    .snapshots
-                    .get(&snapshot_id)
-                    .cloned()
-                    .ok_or_else(|| Error::new(ErrorCode::NotFound, "snapshot not found"));
                 let _ = response.send(result);
             }
             WorkerRequest::ReadOutput {
@@ -2245,21 +2285,22 @@ impl SessionWorker {
             let snapshot_started = Instant::now();
             // 2026-08-28: SnapshotReady was published without a stored object.
             // Commit the bounded stop context before advertising readiness.
-            let (stop_id, frame, revision, reason, session_id) = {
+            let (stop_id, frame, revision, execution_epoch, reason, session_id) = {
                 let state = self.state.borrow();
                 (
                     state.stop_id.clone().unwrap(),
                     state.stopped_frame().cloned(),
                     state.revision,
+                    state.execution_epoch,
                     state.stop_reason.clone(),
                     state.session_id.clone(),
                 )
             };
-            let snapshot_id = format!("snap_{stop_id}");
             let snapshot = serde_json::json!({
-                "snapshot_id": snapshot_id,
                 "stop_id": stop_id,
                 "revision": revision,
+                "captured_revision": revision,
+                "execution_epoch": execution_epoch,
                 "profile": "minimal",
                 "reason": reason,
                 "frame": frame,
@@ -2281,12 +2322,17 @@ impl SessionWorker {
                     )
                 }]
             });
-            if let Err(error) = self.store_snapshot_value(snapshot_id, snapshot) {
-                self.apply_event(DomainEvent::SnapshotFailed { stop_id })?;
-                return Err(error);
-            }
+            let snapshot = match self.store_snapshot_value(snapshot) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.apply_event(DomainEvent::SnapshotFailed { stop_id })?;
+                    return Err(error);
+                }
+            };
+            let snapshot_id = observation_id(&snapshot)?.to_owned();
             self.apply_event(DomainEvent::SnapshotReady {
                 stop_id,
+                snapshot_id: Some(snapshot_id),
                 partial: frame.is_none(),
             })?;
             self.metrics.snapshot(
@@ -2297,21 +2343,61 @@ impl SessionWorker {
         Ok(())
     }
 
-    fn store_snapshot_value(&mut self, snapshot_id: String, snapshot: Value) -> Result<()> {
+    fn store_snapshot_value(&mut self, mut snapshot: Value) -> Result<Value> {
+        let object = snapshot
+            .as_object_mut()
+            .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "snapshot must be an object"))?;
+        object.remove("observation_id");
+        object.remove("snapshot_id");
+        let snapshot_id = format!("obs_{}", Ulid::new());
+        object.insert("observation_id".into(), Value::String(snapshot_id.clone()));
+        object.insert("snapshot_id".into(), Value::String(snapshot_id.clone()));
+        let context = ["stop_id", "captured_revision", "execution_epoch"]
+            .map(|field| (field, object.get(field).cloned()));
+        for field in ["context", "observation_context"] {
+            let Some(nested) = object.get_mut(field).and_then(Value::as_object_mut) else {
+                continue;
+            };
+            nested.insert("observation_id".into(), Value::String(snapshot_id.clone()));
+            for (name, value) in &context {
+                if let Some(value) = value {
+                    nested.insert((*name).into(), value.clone());
+                }
+            }
+        }
+        // 2026-09-08: `snap_<stop>` upserts let later same-stop captures
+        // rewrite evidence already shared with another Agent, while nested
+        // observation contexts could retain a provisional ID or revision.
+        // Unique IDs and one actor-finalized context preserve every completed
+        // observation as exactly the value returned to its caller.
         let appended = self.journal.append_snapshot(&snapshot_id, &snapshot);
         self.journal_result(appended)?;
         if !self.store_failed {
             let session_id = self.state.borrow().session_id.clone();
             let stored = self
                 .store
-                .upsert_snapshot(&session_id, &snapshot_id, &snapshot);
+                .insert_snapshot(&session_id, &snapshot_id, &snapshot);
             self.store_result(stored)?;
         }
-        if self.snapshots.len() >= 128 {
-            self.snapshots.pop_first();
+        let mut snapshots = self
+            .snapshots
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, existing)) = snapshots.iter().find(|(id, _)| id == &snapshot_id) {
+            return if existing == &snapshot {
+                Ok(snapshot)
+            } else {
+                Err(Error::new(
+                    ErrorCode::Conflict,
+                    "observation ID already contains different data",
+                ))
+            };
         }
-        self.snapshots.insert(snapshot_id, snapshot);
-        Ok(())
+        while snapshots.len() >= self.snapshot_limit {
+            snapshots.pop_front();
+        }
+        snapshots.push_back((snapshot_id, snapshot.clone()));
+        Ok(snapshot)
     }
 
     fn journal_result<T>(&mut self, result: Result<T>) -> Result<T> {
@@ -2514,6 +2600,13 @@ fn mi_command_exists(record: &MiRecord) -> bool {
         .and_then(MiValue::results)
         .and_then(|results| MiResult::find_str(results, "exists"))
         == Some("true")
+}
+
+fn observation_id(snapshot: &Value) -> Result<&str> {
+    snapshot
+        .get("observation_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::new(ErrorCode::Internal, "stored observation has no ID"))
 }
 
 fn capability(

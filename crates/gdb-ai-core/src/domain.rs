@@ -746,6 +746,8 @@ pub enum DomainEvent {
     },
     SnapshotReady {
         stop_id: StopId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot_id: Option<String>,
         partial: bool,
     },
     SnapshotFailed {

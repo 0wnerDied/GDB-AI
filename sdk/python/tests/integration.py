@@ -86,12 +86,17 @@ def projected(client, program):
     assert "api_version" not in created and "revision" not in created, created
     assert "write_lease" not in created["result"], created
     session_id = created["result"]["session_id"]
+    assert created["result"]["controller"] == created["result"]["caller_identity"], created
     expected = "environment: sdk-世界\nmarker reached\ninput received: \0\n".encode()
+    observer = Client(client.endpoint, protocol_version=client.protocol_version,
+                      client_name="python-observer")
+    controller = client
 
     def call(name, **arguments):
-        return client.call_tool(name, {"session_id": session_id, **arguments})
+        return controller.call_tool(name, {"session_id": session_id, **arguments})
 
     try:
+        observer.connect()
         launched = call("gdb_session", action="launch", program=program,
                         environment={"GDB_AI_TEST_ENV": "sdk-世界"}, stop="first_instruction")
         assert launched["state"]["stop_id"], launched
@@ -109,20 +114,52 @@ def projected(client, program):
             assert "revision" not in error.response, error.response
         else:
             raise AssertionError("stale projected stop was accepted")
+        captured = call("gdb_batch", requests=[
+            {"view": "registers", "roles": ["pc", "sp"]},
+            {"view": "evaluate", "expression": "$pc"},
+            {"name": "missing", "view": "evaluate", "expression": "gdb_ai_missing_sdk_symbol"},
+        ])["result"]
+        assert not captured["complete"], captured
+        assert captured["failures"]["missing"]["code"] == "GDB_ERROR", captured
+        assert "command" not in captured["results"]["evaluate"], captured
+        assert "record" not in captured["failures"]["missing"].get("details", {}), captured
+        observation_id = captured["observation_id"]
+        lookup = {"session_id": session_id, "view": "observation", "snapshot_id": observation_id}
+        shared = observer.call_tool("gdb_inspect", lookup)["result"]
+        assert shared["historical"] and shared["observation_id"] == observation_id, shared
+        assert shared["results"]["evaluate"] == captured["results"]["evaluate"], shared
+        assert shared["failures"] == captured["failures"], shared
+        peer_status = observer.call_tool("gdb_session", {"action": "status", "session_id": session_id})
+        peer_identity = peer_status["result"]["caller_identity"]
+        assert peer_identity != created["result"]["controller"], peer_status
+        transferred = call("gdb_session", action="handoff", to=peer_identity)
+        assert transferred["result"]["controller"] == peer_identity, transferred
+        controller = observer
+        try:
+            client.call_tool("gdb_run", {"action": "continue", "session_id": session_id})
+        except ApiError as error:
+            assert error.code == "WRITE_LEASE_REQUIRED", error.response
+        else:
+            raise AssertionError("former controller retained mutation authority")
         exited = call("gdb_run", action="continue", input={"data_base64": "AAo="})
         assert exited["result"]["settled_by"] == "exited", exited
         assert exited["state"]["exit_code"] == 0, exited
         output = call("gdb_io", action="read", after_offset=0, max_bytes=4096)
         assert not output.get("truncated", False), output
         verify_output(client, session_id, output["result"], expected)
+        assert client.call_tool("gdb_inspect", lookup)["result"] == shared
     finally:
-        closed = call("gdb_session", action="close")
+        try:
+            closed = call("gdb_session", action="close")
+        finally:
+            observer.disconnect()
     verify_close(client, closed, expected)
+    assert client.call_tool("gdb_inspect", lookup)["result"] == shared
 
 
 def main():
     endpoint, program, version = sys.argv[1:]
-    client = Client(endpoint, protocol_version=version)
+    client = Client(endpoint, protocol_version=version, client_name="python-controller")
     try:
         client.connect()
         names = {tool["name"] for tool in client.list_tools()}

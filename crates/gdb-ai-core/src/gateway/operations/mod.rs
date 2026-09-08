@@ -18,6 +18,7 @@ mod kernel;
 mod lifecycle;
 mod memory;
 mod mi;
+mod observation;
 mod raw;
 mod reconciliation;
 mod request;

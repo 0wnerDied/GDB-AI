@@ -17,6 +17,7 @@ use super::{
     lifecycle::validate_argv,
     memory::read_memory_bytes,
     mi::{normalized_frames, result_text},
+    observation::validate_observation_requests,
     reconciliation::synchronize_breakpoint,
     request::{required_session, string, unsigned},
 };
@@ -460,6 +461,11 @@ impl Gateway {
     }
 
     pub(super) async fn agent_probe(&self, request: &ApiRequest) -> Result<Value> {
+        // 2026-09-08: Reject invalid read plans before this compound operation
+        // can restart, arm, feed, or resume the target.
+        if let Some(inspect) = request.parameters.get("inspect") {
+            validate_observation_requests(inspect, self.config.limits.memory_read_bytes)?;
+        }
         let input = turn_input(&request.parameters)?;
         let trigger: Option<ProbeTrigger> = request
             .parameters

@@ -61,7 +61,7 @@ If the journal fills or becomes unwritable, recording stops while debugging
 continues. `state.limitations` identifies the first sequence whose evidence is
 unavailable. Event identities remain monotonic, but later identities cannot be
 read back from the journal. SQLite failure also appears in limitations; live
-snapshots and execution waits stay available from the actor's current data.
+snapshots and execution waits stay available from the session's current data.
 Final session metadata is retried on close; if that write fails, the daemon
 keeps the final state within `storage.max_closed_sessions` so status and list
 do not report a terminated GDB as active. SQL admission and completion audit

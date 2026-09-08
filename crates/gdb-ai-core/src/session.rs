@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -14,7 +14,7 @@ use std::{
 use gdb_ai_mi::MiRecord;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, OnceCell, broadcast, mpsc, oneshot, watch};
 
 mod actor;
 mod state;
@@ -37,8 +37,14 @@ use crate::{
 };
 
 tokio::task_local! {
-    static ACTIVE_OBSERVATION_SESSION: String;
+    static ACTIVE_OBSERVATION: ObservationScope;
     static ACTIVE_OPERATION: ActiveOperation;
+}
+
+#[derive(Clone)]
+struct ObservationScope {
+    session_id: String,
+    register_names: Arc<OnceCell<CommandReply>>,
 }
 
 #[derive(Clone)]
@@ -185,6 +191,7 @@ pub struct SessionHandle {
     inferior_output: Arc<PtyOutput>,
     state: watch::Receiver<SessionState>,
     events: broadcast::Sender<PublishedEvent>,
+    snapshots: Arc<StdRwLock<VecDeque<(String, Value)>>>,
     command_timeout: Duration,
     session_dir: PathBuf,
     journal_path: PathBuf,
@@ -215,6 +222,7 @@ impl SessionHandle {
         let (state_sender, state) = watch::channel(initial_state);
         let (events, _) = broadcast::channel(512);
         let (requests, receiver) = mpsc::channel(128);
+        let snapshots = Arc::new(StdRwLock::new(VecDeque::new()));
         // 2026-08-28: Interrupt and close previously waited behind the command
         // they needed to preempt. Keep a dedicated bounded control lane.
         let (controls, control_receiver) = mpsc::channel(16);
@@ -231,6 +239,7 @@ impl SessionHandle {
             journal,
             state_sender,
             events.clone(),
+            snapshots.clone(),
             receiver,
             control_receiver,
         ))
@@ -257,6 +266,7 @@ impl SessionHandle {
             inferior_output,
             state,
             events,
+            snapshots,
             command_timeout: config.server.command_timeout(),
             session_dir,
             journal_path,
@@ -429,6 +439,39 @@ impl SessionHandle {
         self.send_safe_evaluate(command, deadline).await
     }
 
+    pub(crate) async fn register_names(&self) -> Result<CommandReply> {
+        self.require_active_operation()?;
+        let Some(scope) = self.observation_scope() else {
+            return self
+                .command(MiCommand::new("-data-list-register-names")?)
+                .await;
+        };
+        // 2026-09-08: Turn views independently queried invariant register
+        // metadata, multiplying MI traffic. Reuse it only inside this fenced
+        // stop/epoch observation; live values and later turns remain uncached.
+        let reply = scope
+            .register_names
+            .get_or_try_init(|| async {
+                self.send_command(
+                    MiCommand::new("-data-list-register-names")?,
+                    command_deadline(self.command_timeout),
+                )
+                .await
+            })
+            .await?;
+        Ok(reply.clone())
+    }
+
+    pub(crate) fn require_active_operation(&self) -> Result<()> {
+        // 2026-09-08: Cached observation results skipped the cancellation
+        // check normally enforced before enqueueing MI. A cancelled turn must
+        // stop even when its next result needs no backend command.
+        if let Some(operation) = active_operation() {
+            operation.require_active()?;
+        }
+        Ok(())
+    }
+
     async fn send_safe_evaluate(
         &self,
         command: MiCommand,
@@ -501,19 +544,30 @@ impl SessionHandle {
         let deadline = command_deadline(self.command_timeout);
         let _sequence = self.command_sequence_until(deadline).await?;
         self.require_observation_context(expected)?;
-        ACTIVE_OBSERVATION_SESSION
-            .scope(self.id.0.clone(), async {
-                let result = operation.await?;
-                self.require_observation_context(expected)?;
-                Ok(result)
-            })
+        ACTIVE_OBSERVATION
+            .scope(
+                ObservationScope {
+                    session_id: self.id.0.clone(),
+                    register_names: Arc::new(OnceCell::new()),
+                },
+                async {
+                    let result = operation.await?;
+                    self.require_observation_context(expected)?;
+                    Ok(result)
+                },
+            )
             .await
     }
 
     fn observation_active(&self) -> bool {
-        ACTIVE_OBSERVATION_SESSION
-            .try_with(|session_id| session_id == &self.id.0)
-            .unwrap_or(false)
+        self.observation_scope().is_some()
+    }
+
+    fn observation_scope(&self) -> Option<ObservationScope> {
+        ACTIVE_OBSERVATION
+            .try_with(|scope| (scope.session_id == self.id.0).then(|| scope.clone()))
+            .ok()
+            .flatten()
     }
 
     fn require_observation_context(&self, expected: &SessionState) -> Result<()> {
@@ -736,11 +790,27 @@ impl SessionHandle {
     pub async fn record_tracking(
         &self,
         observations: BTreeMap<String, Value>,
+        expected_stop_id: StopId,
+        expected_execution_epoch: u64,
     ) -> Result<BTreeMap<String, Value>> {
+        self.require_active_operation()?;
+        if !self.with_state(|state| {
+            state.stop_id.as_ref() == Some(&expected_stop_id)
+                && state.execution_epoch == expected_execution_epoch
+        }) {
+            return Err(Error::new(
+                ErrorCode::StaleContext,
+                "target stop changed before tracking commit",
+            ));
+        }
+        let operation = active_operation();
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(WorkerRequest::RecordTracking {
                 observations,
+                expected_stop_id,
+                expected_execution_epoch,
+                operation,
                 response: sender,
             })
             .await
@@ -752,20 +822,57 @@ impl SessionHandle {
 
     pub async fn commit_snapshot(
         &self,
-        snapshot_id: String,
         snapshot: Value,
         expected_stop_id: StopId,
         expected_execution_epoch: u64,
         partial: bool,
-    ) -> Result<()> {
+    ) -> Result<Value> {
+        self.commit_observation_inner(
+            snapshot,
+            expected_stop_id,
+            expected_execution_epoch,
+            partial,
+            true,
+        )
+        .await
+    }
+
+    pub async fn commit_observation(
+        &self,
+        observation: Value,
+        expected_stop_id: StopId,
+        expected_execution_epoch: u64,
+        partial: bool,
+    ) -> Result<Value> {
+        self.commit_observation_inner(
+            observation,
+            expected_stop_id,
+            expected_execution_epoch,
+            partial,
+            false,
+        )
+        .await
+    }
+
+    async fn commit_observation_inner(
+        &self,
+        snapshot: Value,
+        expected_stop_id: StopId,
+        expected_execution_epoch: u64,
+        partial: bool,
+        publish_snapshot: bool,
+    ) -> Result<Value> {
+        self.require_active_operation()?;
+        let operation = active_operation();
         let (sender, receiver) = oneshot::channel();
         self.requests
             .send(WorkerRequest::CommitSnapshot {
-                snapshot_id,
                 snapshot,
                 expected_stop_id,
                 expected_execution_epoch,
                 partial,
+                publish_snapshot,
+                operation,
                 response: sender,
             })
             .await
@@ -776,17 +883,20 @@ impl SessionHandle {
     }
 
     pub async fn snapshot(&self, snapshot_id: String) -> Result<Value> {
-        let (sender, receiver) = oneshot::channel();
-        self.requests
-            .send(WorkerRequest::GetSnapshot {
-                snapshot_id,
-                response: sender,
-            })
-            .await
-            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?;
-        receiver
-            .await
-            .map_err(|_| Error::new(ErrorCode::GdbExited, "session worker stopped"))?
+        self.snapshot_cached(&snapshot_id)
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "snapshot not found"))
+    }
+
+    pub(crate) fn snapshot_cached(&self, snapshot_id: &str) -> Option<Value> {
+        // 2026-09-08: Immutable snapshots were readable only through the actor
+        // queue, and a store-only fast path lost performance-mode observations
+        // after SQLite failed. Share the actor's one bounded in-memory history.
+        self.snapshots
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|(id, _)| id == snapshot_id)
+            .map(|(_, snapshot)| snapshot.clone())
     }
 
     pub async fn wait(&self, until: WaitUntil, timeout: Duration) -> Result<SessionState> {

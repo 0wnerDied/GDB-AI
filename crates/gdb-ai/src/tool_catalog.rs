@@ -105,8 +105,10 @@ const INSPECTION_ACTIONS: &[ToolAction] = &[
     action!("signals", InspectionGet),
     action!("providers", InspectionGet),
     action!("crash", InspectionGet),
+    action!("tracked", InspectionGet),
     action!("snapshot", InspectionSnapshot),
-    advanced_action!("diff", InspectionDiff),
+    action!("observation", InspectionSnapshotGet),
+    action!("diff", InspectionDiff),
 ];
 const EVALUATE_ACTIONS: &[ToolAction] = &[action!("", ValueEvaluate)];
 const VALUE_ACTIONS: &[ToolAction] = &[
@@ -173,7 +175,7 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_run",
         // 2026-09-01: Blind Agents rebuilt probe workflows or selected an
         // exit-only wait even though one default turn already handles both.
-        description: "Run with exact input/output; restart relaunches directly to running, while continue and step wait for stop-or-exit and can return same-stop inspect views.",
+        description: "Run with exact input/output; restart relaunches directly to running, while continue and step wait for stop-or-exit. inspect combines bounded views, read-only evaluate, memory, disassembly, tracked samples, and historical diff at the resulting stop.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,
@@ -205,7 +207,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_inspect",
-        description: "Read one bounded view; threads with stack_depth returns thread identities and their stacks at one stop (limit/offset page threads). modules includes main-executable mappings. symbols takes query plus functions|types|variables kind and can include one exact type_layout with field offsets.",
+        description: "Read one bounded view; threads with stack_depth returns thread identities and their stacks at one stop (limit/offset page threads). modules includes main-executable mappings. symbols takes query plus functions|types|variables kind and optional type_layout with field offsets. tracked samples configured tracking; snapshot accepts inspect for extra reads. observation retrieves snapshot_id; diff compares before_snapshot_id and after_snapshot_id without rereading the target.",
         discriminator: Some("view"),
         actions: INSPECTION_ACTIONS,
         read_only: true,
@@ -291,7 +293,7 @@ const TOOLS: &[ToolProjection] = &[
     // token-saving primitive available without exposing unrelated tools.
     ToolProjection {
         name: "gdb_batch",
-        description: "Read bounded views at one stop.",
+        description: "Read bounded views, read-only evaluate, memory, disassembly, tracked samples, and historical diff together at one stop; name repeated views and retain successful items when an independent read fails.",
         discriminator: None,
         actions: BATCH_ACTIONS,
         read_only: true,
@@ -730,6 +732,18 @@ mod tests {
         assert_eq!(
             method_for_tool("gdb_session", Some("handoff"), false, false),
             Some(CanonicalMethod::SessionHandoff)
+        );
+        assert_eq!(
+            method_for_tool("gdb_inspect", Some("observation"), false, false),
+            Some(CanonicalMethod::InspectionSnapshotGet)
+        );
+        assert_eq!(
+            method_for_tool("gdb_inspect", Some("tracked"), false, false),
+            Some(CanonicalMethod::InspectionGet)
+        );
+        assert_eq!(
+            method_for_tool("gdb_inspect", Some("diff"), false, false),
+            Some(CanonicalMethod::InspectionDiff)
         );
         assert!(method_for_tool("gdb_memory", Some("write"), false, false).is_none());
         assert!(method_for_tool("gdb_memory", Some("write"), true, false).is_some());

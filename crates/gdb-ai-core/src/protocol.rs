@@ -1,11 +1,16 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, fmt, ops::Deref, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    ops::Deref,
+    str::FromStr,
+};
 
 use crate::{
     Error,
-    domain::{SessionState, ValueId},
+    domain::{FrameId, InferiorId, SessionState, StopId, ThreadId, ValueId},
 };
 
 pub const API_VERSION: &str = "gdb.ai/v1";
@@ -238,6 +243,34 @@ pub struct ApiResponse {
     pub error: Option<ApiError>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ObservationContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    pub stop_id: StopId,
+    pub captured_revision: u64,
+    pub execution_epoch: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inferior_id: Option<InferiorId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<FrameId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ObservationResult {
+    pub context: ObservationContext,
+    pub results: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub failures: BTreeMap<String, ApiError>,
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<Warning>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<Evidence>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValueStatus {
@@ -295,19 +328,19 @@ pub struct ValueChange {
     pub new_children: Vec<ValueChild>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Warning {
     pub code: String,
     pub message: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
     pub kind: String,
     pub uri: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApiError {
     pub code: crate::ErrorCode,
     pub message: String,
@@ -452,23 +485,30 @@ fn collect_result_metadata(
 }
 
 fn response_evidence(session_id: Option<&str>, source: Option<&Value>) -> Vec<Evidence> {
-    let mut sequences = BTreeSet::new();
-    if let Some(source) = source {
-        collect_evidence_sequences(source, 0, &mut sequences);
-    }
     // 2026-08-28: Falling back to the session's latest event attributed an
     // unrelated record to results that had no evidence. Empty is truthful.
     session_id
-        .map(|session_id| {
-            sequences
-                .into_iter()
-                .map(|sequence| Evidence {
-                    kind: "journal-entry".into(),
-                    uri: format!("gdbai://session/{session_id}/event/{sequence}"),
-                })
-                .collect()
-        })
+        .zip(source)
+        .map(|(session_id, source)| result_evidence(session_id, source))
         .unwrap_or_default()
+}
+
+pub fn result_evidence(session_id: &str, source: &Value) -> Vec<Evidence> {
+    let mut sequences = BTreeSet::new();
+    collect_evidence_sequences(source, 0, &mut sequences);
+    sequences
+        .into_iter()
+        .map(|sequence| Evidence {
+            kind: "journal-entry".into(),
+            uri: format!("gdbai://session/{session_id}/event/{sequence}"),
+        })
+        .collect()
+}
+
+pub fn is_command_reply(value: &Value) -> bool {
+    value.get("record").is_some_and(Value::is_object)
+        && value.get("stream_records").is_some_and(Value::is_array)
+        && value.get("evidence_seq").is_some_and(Value::is_u64)
 }
 
 fn collect_evidence_sequences(value: &Value, depth: usize, output: &mut BTreeSet<u64>) {
@@ -622,5 +662,36 @@ mod tests {
         assert_eq!(response.continuation, Some(json!({"offset": 16})));
         assert_eq!(response.artifacts, ["gdbai://artifact/sha256:test"]);
         assert_eq!(response.warnings.len(), 2);
+    }
+
+    #[test]
+    fn observation_context_records_capture_identity_without_mutable_freshness() {
+        let observation = ObservationResult {
+            context: ObservationContext {
+                observation_id: Some("obs_test".into()),
+                stop_id: StopId("stop_test".into()),
+                captured_revision: 7,
+                execution_epoch: 3,
+                inferior_id: Some(InferiorId("inf_test".into())),
+                thread_id: None,
+                frame_id: None,
+            },
+            results: BTreeMap::from([("stack".into(), json!({"frames": []}))]),
+            failures: BTreeMap::new(),
+            complete: true,
+            warnings: Vec::new(),
+            evidence: vec![Evidence {
+                kind: "journal-entry".into(),
+                uri: "gdbai://session/sess_test/event/9".into(),
+            }],
+        };
+
+        let serialized = serde_json::to_value(&observation).unwrap();
+        assert_eq!(serialized["context"]["captured_revision"], 7);
+        assert!(serialized["context"].get("historical").is_none());
+        assert_eq!(
+            serde_json::from_value::<ObservationResult>(serialized).unwrap(),
+            observation
+        );
     }
 }

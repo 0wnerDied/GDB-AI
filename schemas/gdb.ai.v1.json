@@ -1010,6 +1010,72 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "address_expression": {
+                      "type": "string"
+                    },
+                    "after_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "after_snapshot_id": {
+                      "type": "string"
+                    },
+                    "allow_partial": {
+                      "type": "boolean"
+                    },
+                    "around": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "after_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "before_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "expression": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "before_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "before_snapshot_id": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "expressions": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "frame_id": {
+                      "type": "string"
+                    },
+                    "frame_level": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_source": {
+                      "type": "boolean"
+                    },
+                    "inferior_id": {
+                      "type": "string"
+                    },
                     "kind": {
                       "enum": [
                         "functions",
@@ -1018,9 +1084,27 @@
                       ],
                       "type": "string"
                     },
+                    "length": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "limit": {
                       "minimum": 0,
                       "type": "integer"
+                    },
+                    "line": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "offset": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "path": {
+                      "type": "string"
                     },
                     "profile": {
                       "enum": [
@@ -1034,6 +1118,22 @@
                     "query": {
                       "type": "string"
                     },
+                    "range": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "end": {
+                          "type": "string"
+                        },
+                        "start": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    },
                     "roles": {
                       "items": {
                         "type": "string"
@@ -1043,6 +1143,9 @@
                     "stack_depth": {
                       "minimum": 1,
                       "type": "integer"
+                    },
+                    "thread_id": {
+                      "type": "string"
                     },
                     "type_layout": {
                       "type": "string"
@@ -1065,7 +1168,12 @@
                         "symbols",
                         "source",
                         "mappings",
-                        "signals"
+                        "signals",
+                        "evaluate",
+                        "memory",
+                        "disassembly",
+                        "tracked",
+                        "diff"
                       ],
                       "type": "string"
                     }
@@ -1170,6 +1278,72 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "address_expression": {
+                      "type": "string"
+                    },
+                    "after_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "after_snapshot_id": {
+                      "type": "string"
+                    },
+                    "allow_partial": {
+                      "type": "boolean"
+                    },
+                    "around": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "after_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "before_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "expression": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "before_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "before_snapshot_id": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "expressions": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "frame_id": {
+                      "type": "string"
+                    },
+                    "frame_level": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_source": {
+                      "type": "boolean"
+                    },
+                    "inferior_id": {
+                      "type": "string"
+                    },
                     "kind": {
                       "enum": [
                         "functions",
@@ -1178,9 +1352,27 @@
                       ],
                       "type": "string"
                     },
+                    "length": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "limit": {
                       "minimum": 0,
                       "type": "integer"
+                    },
+                    "line": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "offset": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "path": {
+                      "type": "string"
                     },
                     "profile": {
                       "enum": [
@@ -1194,6 +1386,22 @@
                     "query": {
                       "type": "string"
                     },
+                    "range": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "end": {
+                          "type": "string"
+                        },
+                        "start": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    },
                     "roles": {
                       "items": {
                         "type": "string"
@@ -1203,6 +1411,9 @@
                     "stack_depth": {
                       "minimum": 1,
                       "type": "integer"
+                    },
+                    "thread_id": {
+                      "type": "string"
                     },
                     "type_layout": {
                       "type": "string"
@@ -1225,7 +1436,12 @@
                         "symbols",
                         "source",
                         "mappings",
-                        "signals"
+                        "signals",
+                        "evaluate",
+                        "memory",
+                        "disassembly",
+                        "tracked",
+                        "diff"
                       ],
                       "type": "string"
                     }
@@ -1645,9 +1861,21 @@
               "accept_latest_revision": {
                 "type": "boolean"
               },
+              "address": {
+                "type": "string"
+              },
+              "address_expression": {
+                "type": "string"
+              },
               "after_lines": {
                 "minimum": 0,
                 "type": "integer"
+              },
+              "after_snapshot_id": {
+                "type": "string"
+              },
+              "allow_partial": {
+                "type": "boolean"
               },
               "around": {
                 "additionalProperties": false,
@@ -1670,6 +1898,18 @@
               "before_lines": {
                 "minimum": 0,
                 "type": "integer"
+              },
+              "before_snapshot_id": {
+                "type": "string"
+              },
+              "expression": {
+                "type": "string"
+              },
+              "expressions": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "frame_id": {
                 "type": "string"
@@ -1697,6 +1937,10 @@
               },
               "lease_id": {
                 "type": "string"
+              },
+              "length": {
+                "minimum": 1,
+                "type": "integer"
               },
               "limit": {
                 "minimum": 0,
@@ -1778,7 +2022,12 @@
                   "symbols",
                   "source",
                   "mappings",
-                  "signals"
+                  "signals",
+                  "evaluate",
+                  "memory",
+                  "disassembly",
+                  "tracked",
+                  "diff"
                 ],
                 "type": "string"
               }
@@ -1846,6 +2095,185 @@
               },
               "inferior_id": {
                 "type": "string"
+              },
+              "inspect": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "address_expression": {
+                      "type": "string"
+                    },
+                    "after_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "after_snapshot_id": {
+                      "type": "string"
+                    },
+                    "allow_partial": {
+                      "type": "boolean"
+                    },
+                    "around": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "after_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "before_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "expression": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "before_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "before_snapshot_id": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "expressions": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "frame_id": {
+                      "type": "string"
+                    },
+                    "frame_level": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_source": {
+                      "type": "boolean"
+                    },
+                    "inferior_id": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "enum": [
+                        "functions",
+                        "types",
+                        "variables"
+                      ],
+                      "type": "string"
+                    },
+                    "length": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "line": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "offset": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "profile": {
+                      "enum": [
+                        "minimal",
+                        "brief",
+                        "standard",
+                        "deep"
+                      ],
+                      "type": "string"
+                    },
+                    "query": {
+                      "type": "string"
+                    },
+                    "range": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "end": {
+                          "type": "string"
+                        },
+                        "start": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    },
+                    "roles": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "stack_depth": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "thread_id": {
+                      "type": "string"
+                    },
+                    "type_layout": {
+                      "type": "string"
+                    },
+                    "view": {
+                      "enum": [
+                        "stop_context",
+                        "target",
+                        "capabilities",
+                        "providers",
+                        "crash",
+                        "threads",
+                        "stack",
+                        "frame",
+                        "locals",
+                        "arguments",
+                        "registers",
+                        "modules",
+                        "breakpoints",
+                        "symbols",
+                        "source",
+                        "mappings",
+                        "signals",
+                        "evaluate",
+                        "memory",
+                        "disassembly",
+                        "tracked",
+                        "diff"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "view"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
               },
               "lease_id": {
                 "type": "string"
@@ -1975,9 +2403,21 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "address_expression": {
+                      "type": "string"
+                    },
                     "after_lines": {
                       "minimum": 0,
                       "type": "integer"
+                    },
+                    "after_snapshot_id": {
+                      "type": "string"
+                    },
+                    "allow_partial": {
+                      "type": "boolean"
                     },
                     "around": {
                       "additionalProperties": false,
@@ -2000,6 +2440,18 @@
                     "before_lines": {
                       "minimum": 0,
                       "type": "integer"
+                    },
+                    "before_snapshot_id": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "expressions": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
                     },
                     "frame_id": {
                       "type": "string"
@@ -2024,6 +2476,10 @@
                         "variables"
                       ],
                       "type": "string"
+                    },
+                    "length": {
+                      "minimum": 1,
+                      "type": "integer"
                     },
                     "limit": {
                       "minimum": 0,
@@ -2105,7 +2561,12 @@
                         "symbols",
                         "source",
                         "mappings",
-                        "signals"
+                        "signals",
+                        "evaluate",
+                        "memory",
+                        "disassembly",
+                        "tracked",
+                        "diff"
                       ],
                       "type": "string"
                     }
@@ -3807,6 +4268,72 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "address_expression": {
+                      "type": "string"
+                    },
+                    "after_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "after_snapshot_id": {
+                      "type": "string"
+                    },
+                    "allow_partial": {
+                      "type": "boolean"
+                    },
+                    "around": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "after_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "before_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "expression": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "before_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "before_snapshot_id": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "expressions": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "frame_id": {
+                      "type": "string"
+                    },
+                    "frame_level": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_source": {
+                      "type": "boolean"
+                    },
+                    "inferior_id": {
+                      "type": "string"
+                    },
                     "kind": {
                       "enum": [
                         "functions",
@@ -3815,9 +4342,27 @@
                       ],
                       "type": "string"
                     },
+                    "length": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "limit": {
                       "minimum": 0,
                       "type": "integer"
+                    },
+                    "line": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "offset": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "path": {
+                      "type": "string"
                     },
                     "profile": {
                       "enum": [
@@ -3831,6 +4376,22 @@
                     "query": {
                       "type": "string"
                     },
+                    "range": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "end": {
+                          "type": "string"
+                        },
+                        "start": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    },
                     "roles": {
                       "items": {
                         "type": "string"
@@ -3840,6 +4401,9 @@
                     "stack_depth": {
                       "minimum": 1,
                       "type": "integer"
+                    },
+                    "thread_id": {
+                      "type": "string"
                     },
                     "type_layout": {
                       "type": "string"
@@ -3862,7 +4426,12 @@
                         "symbols",
                         "source",
                         "mappings",
-                        "signals"
+                        "signals",
+                        "evaluate",
+                        "memory",
+                        "disassembly",
+                        "tracked",
+                        "diff"
                       ],
                       "type": "string"
                     }
@@ -4267,6 +4836,72 @@
                 "items": {
                   "additionalProperties": false,
                   "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "address_expression": {
+                      "type": "string"
+                    },
+                    "after_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "after_snapshot_id": {
+                      "type": "string"
+                    },
+                    "allow_partial": {
+                      "type": "boolean"
+                    },
+                    "around": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "after_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "before_instructions": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "expression": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [],
+                      "type": "object"
+                    },
+                    "before_lines": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "before_snapshot_id": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "expressions": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "frame_id": {
+                      "type": "string"
+                    },
+                    "frame_level": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "include_bytes": {
+                      "type": "boolean"
+                    },
+                    "include_source": {
+                      "type": "boolean"
+                    },
+                    "inferior_id": {
+                      "type": "string"
+                    },
                     "kind": {
                       "enum": [
                         "functions",
@@ -4275,9 +4910,27 @@
                       ],
                       "type": "string"
                     },
+                    "length": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
                     "limit": {
                       "minimum": 0,
                       "type": "integer"
+                    },
+                    "line": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "offset": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "path": {
+                      "type": "string"
                     },
                     "profile": {
                       "enum": [
@@ -4291,6 +4944,22 @@
                     "query": {
                       "type": "string"
                     },
+                    "range": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "end": {
+                          "type": "string"
+                        },
+                        "start": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "start",
+                        "end"
+                      ],
+                      "type": "object"
+                    },
                     "roles": {
                       "items": {
                         "type": "string"
@@ -4300,6 +4969,9 @@
                     "stack_depth": {
                       "minimum": 1,
                       "type": "integer"
+                    },
+                    "thread_id": {
+                      "type": "string"
                     },
                     "type_layout": {
                       "type": "string"
@@ -4322,7 +4994,12 @@
                         "symbols",
                         "source",
                         "mappings",
-                        "signals"
+                        "signals",
+                        "evaluate",
+                        "memory",
+                        "disassembly",
+                        "tracked",
+                        "diff"
                       ],
                       "type": "string"
                     }
