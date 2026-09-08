@@ -60,6 +60,16 @@ collection behavior, not an autonomous Agent or exploit-speed claim.
 
 ### Existing data-path gates
 
+- [x] Prefer native MI3 breakpoint-script correction and narrowly normalize
+  legacy command lists in both live parsing and replay.
+- [x] Verify saved transcript semantics against independent ASTs, cover all
+  byte values, and give parser/framer fuzz targets correctly sized input units.
+- [x] Deliver complete records before terminal framing errors, independent
+  of input partitioning, without continuing a failed stream.
+- [x] Measure native-shaped stack/register/child replies and output-copy costs
+  before changing ownership. Retain owned buffers unless profiling identifies
+  copying as a material cost in the complete read path.
+
 Keep framing and replay incremental as retained output grows, without changing
 the three-crate ownership boundaries, record limits, normalized sequence
 authority, checkpoint checks, or evidence-gap rules. Qualify these paths with
@@ -70,6 +80,8 @@ Run the focused release benchmarks explicitly:
 ```sh
 cargo test --locked --release -p gdb-ai-mi benchmark_fragmented_records -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-mi benchmark_c_string_parsing -- --ignored --nocapture
+cargo test --locked --release -p gdb-ai-mi --test structured benchmark_structured_records -- --ignored --nocapture --test-threads=1
+cargo test --locked --release -p gdb-ai-core --lib benchmark_stream_normalization -- --ignored --nocapture --test-threads=1
 cargo test --locked --release -p gdb-ai-core benchmark_output_replay -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-core benchmark_raw_output_replay -- --ignored --nocapture
 cargo test --locked --release -p gdb-ai-core benchmark_large_gdb_output -- --ignored --nocapture
@@ -87,6 +99,13 @@ capability and stop-context reads with empty and populated module registries.
 Output-read samples distinguish ring copying from copying plus lossless
 text-response construction; they do not include JSON serialization or
 transport dispatch.
+
+Structured MI samples use captured stack, register and variable-child replies
+from the fixed C fixture. They separate raw-record copying, owned-AST parsing,
+framing, and combined framing/parsing. Stream-normalization samples measure
+the existing decoded-output copy into domain events. Use the GDB output
+benchmark above to check whether those isolated costs matter to the complete
+command path before changing byte ownership or adding a parser dependency.
 
 ## Agent exploit speed
 

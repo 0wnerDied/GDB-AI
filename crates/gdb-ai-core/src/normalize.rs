@@ -314,4 +314,31 @@ mod tests {
             Some(DomainEvent::UnknownBackendEvent { .. })
         ));
     }
+
+    #[test]
+    #[ignore = "microbenchmark: run explicitly with an optimized build"]
+    fn benchmark_stream_normalization() {
+        for decoded_bytes in [64, 64 * 1024, 2 * 1024 * 1024] {
+            let record = MiRecord::ConsoleStream(vec![b'x'; decoded_bytes]);
+            let Some(DomainEvent::Output { source, bytes }) = normalize(&record) else {
+                panic!("expected console output");
+            };
+            assert_eq!(source, OutputSource::GdbConsoleStream);
+            assert_eq!(bytes, vec![b'x'; decoded_bytes]);
+            let records = (64 * 1024 * 1024 / decoded_bytes).min(500_000);
+            let started = std::time::Instant::now();
+            for _ in 0..records {
+                std::hint::black_box(normalize(std::hint::black_box(&record)));
+            }
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "benchmark": "mi_stream_normalization",
+                    "decoded_bytes": decoded_bytes,
+                    "records": records,
+                    "elapsed_ns": started.elapsed().as_nanos(),
+                })
+            );
+        }
+    }
 }
