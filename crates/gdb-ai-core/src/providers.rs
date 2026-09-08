@@ -139,7 +139,12 @@ pub fn crash_signature(state: &SessionState) -> String {
     format!("sha256:{:x}", Sha256::digest(evidence.as_bytes()))
 }
 
-pub(crate) fn mappings(state: &SessionState, offset: usize, limit: usize) -> Result<Value> {
+pub(crate) fn mappings(
+    state: &SessionState,
+    inferior_id: Option<&crate::domain::InferiorId>,
+    offset: usize,
+    limit: usize,
+) -> Result<Value> {
     // 2026-08-28: A remote PID can collide with an unrelated host PID. Never
     // consult host /proc unless the reducer recorded a local target origin.
     if !matches!(
@@ -156,7 +161,15 @@ pub(crate) fn mappings(state: &SessionState, offset: usize, limit: usize) -> Res
             "source": {"provider": "remote", "mechanism": "unavailable"}
         }));
     }
-    let Some(pid) = state.inferiors.values().find_map(|inferior| inferior.pid) else {
+    // 2026-09-08: Multi-inferior maps always used the first PID, even when
+    // command context selected another inferior. Keep maps and attribution
+    // on the same resolved selection; never substitute another process.
+    let Some(pid) = state
+        .inferiors
+        .values()
+        .filter(|inferior| inferior_id.is_none_or(|id| &inferior.id == id))
+        .find_map(|inferior| inferior.pid)
+    else {
         return Ok(json!({
             "mappings": [],
             "offset": offset,
@@ -284,6 +297,35 @@ fn module_offset_from_maps(maps: &str, module: &str, offset: u64) -> Result<Opti
 #[cfg(test)]
 mod mapping_tests {
     use super::*;
+
+    #[test]
+    fn process_maps_follow_the_selected_inferior() {
+        use crate::{
+            domain::{DomainEvent, JournaledEvent, SessionId},
+            reducer::StateReducer,
+        };
+        let mut reducer = StateReducer::new(SessionState::creating(SessionId("sess_maps".into())));
+        for (seq, pid) in [(1, u64::from(u32::MAX)), (2, u64::from(std::process::id()))] {
+            reducer
+                .apply(&JournaledEvent::for_replay(
+                    seq,
+                    DomainEvent::InferiorAdded {
+                        backend_id: format!("i{seq}"),
+                        pid: Some(pid),
+                    },
+                ))
+                .unwrap();
+        }
+        let mut state = reducer.state().clone();
+        state.target_origin = TargetOrigin::Local;
+        let selected = &state.inferiors["i2"].id;
+        let page = mappings(&state, Some(selected), 0, 1).unwrap();
+        assert_eq!(page["mappings"].as_array().unwrap().len(), 1);
+        let missing = crate::domain::InferiorId("missing".into());
+        let missing = mappings(&state, Some(&missing), 0, 1).unwrap();
+        assert_eq!(missing["partial"], true);
+        assert!(missing["mappings"].as_array().unwrap().is_empty());
+    }
 
     #[test]
     fn resolves_stripped_pie_module_offsets_from_proc_maps() {

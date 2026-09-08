@@ -33,6 +33,7 @@ use crate::{
     metrics::Metrics,
     persistence::Store,
     policy::Profile,
+    protocol::ObservationContext,
     ring::RingRead,
 };
 
@@ -45,6 +46,64 @@ tokio::task_local! {
 struct ObservationScope {
     session_id: String,
     register_names: Arc<OnceCell<CommandReply>>,
+    contexts: Arc<StdRwLock<BTreeMap<ContextKey, CommandContext>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CommandContext {
+    pub backend_thread: Option<String>,
+    pub default_thread: Option<String>,
+    pub frame_level: Option<u64>,
+    pub observation: Option<ObservationContext>,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct ContextKey {
+    revision: u64,
+    stop_id: Option<StopId>,
+    epoch: u64,
+    selectors: [Option<String>; 3],
+    frame_level: Option<u64>,
+}
+
+pub(crate) fn cached_command_context(
+    state: &SessionState,
+    parameters: &Value,
+    resolve: impl FnOnce() -> Result<CommandContext>,
+) -> Result<CommandContext> {
+    let scope = ACTIVE_OBSERVATION
+        .try_with(|scope| (scope.session_id == state.session_id.0).then(|| scope.contexts.clone()))
+        .ok()
+        .flatten();
+    let Some(scope) = scope else {
+        return resolve();
+    };
+    let key = ContextKey {
+        revision: state.revision,
+        stop_id: state.stop_id.clone(),
+        epoch: state.execution_epoch,
+        selectors: ["inferior_id", "thread_id", "frame_id"].map(|field| {
+            parameters
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }),
+        frame_level: parameters.get("frame_level").and_then(Value::as_u64),
+    };
+    // 2026-09-08: Every view rescanned thread/frame handles at the same
+    // fence. Reuse only successful selection resolution in this task's
+    // bounded observation scope, never across state changes or sessions.
+    let mut contexts = scope
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(context) = contexts.get(&key) {
+        return Ok(context.clone());
+    }
+    let context = resolve()?;
+    if contexts.len() < 16 {
+        contexts.insert(key, context.clone());
+    }
+    Ok(context)
 }
 
 #[derive(Clone)]
@@ -549,6 +608,7 @@ impl SessionHandle {
                 ObservationScope {
                     session_id: self.id.0.clone(),
                     register_names: Arc::new(OnceCell::new()),
+                    contexts: Arc::new(StdRwLock::new(BTreeMap::new())),
                 },
                 async {
                     let result = operation.await?;

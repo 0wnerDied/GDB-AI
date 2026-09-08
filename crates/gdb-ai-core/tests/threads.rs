@@ -134,6 +134,43 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
         other["frames"][0]["frame_id"],
         threads[0]["frames"][0]["frame_id"]
     );
+    let worker = threads
+        .iter()
+        .find(|thread| {
+            thread["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|frame| frame["function"] == "worker_left")
+        })
+        .unwrap();
+    let worker_frame = worker["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|frame| frame["function"] == "worker_left")
+        .unwrap();
+    let selected_stack = successful(
+        call(
+            "frame-selected-stack",
+            "inspection.get",
+            json!({
+                "view": "stack", "stop_id": stop, "frame_id": worker_frame["frame_id"], "limit": 2
+            }),
+        )
+        .await,
+    )
+    .result
+    .unwrap();
+    let frame_prefix = format!("f{}_{}_", worker["thread_id"].as_str().unwrap(), stop);
+    for frame in selected_stack["frames"].as_array().unwrap() {
+        assert!(
+            frame["frame_id"]
+                .as_str()
+                .unwrap()
+                .starts_with(&frame_prefix)
+        );
+    }
     let invalid = call(
         "invalid",
         "inspection.get",

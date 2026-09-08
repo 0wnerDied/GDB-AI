@@ -968,7 +968,7 @@ impl Gateway {
                 let reply = entry.handle.command(command).await?;
                 *calls += 1;
                 observations.push(json!({
-                    "stack": normalized_frames(&reply.record, state, &context),
+                    "stack": normalized_frames(&reply.record, state, &context)?,
                     "evidence_seq": reply.evidence_seq
                 }));
             } else if let Some(memory) = item.get("memory") {

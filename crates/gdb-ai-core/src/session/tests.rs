@@ -67,6 +67,54 @@ fn conditional_capability_is_not_unconditionally_supported() {
     assert!(!capabilities.supports("conditional"));
 }
 
+#[tokio::test]
+async fn observation_context_reuse_is_selection_and_revision_scoped() {
+    let mut state = SessionState::creating(SessionId("sess_context_cache".into()));
+    let contexts = Arc::new(StdRwLock::new(BTreeMap::new()));
+    ACTIVE_OBSERVATION
+        .scope(
+            ObservationScope {
+                session_id: state.session_id.0.clone(),
+                register_names: Arc::new(OnceCell::new()),
+                contexts: contexts.clone(),
+            },
+            async {
+                let calls = std::cell::Cell::new(0);
+                let resolve = || {
+                    calls.set(calls.get() + 1);
+                    Ok(CommandContext {
+                        backend_thread: None,
+                        default_thread: None,
+                        frame_level: None,
+                        observation: None,
+                    })
+                };
+                for view in ["stack", "registers"] {
+                    cached_command_context(&state, &serde_json::json!({"view": view}), resolve)
+                        .unwrap();
+                }
+                assert_eq!(calls.get(), 1);
+                for parameters in [
+                    serde_json::json!({"thread_id": "thread_other"}),
+                    serde_json::json!({"frame_level": 1}),
+                    serde_json::json!({"inferior_id": "inferior_other"}),
+                ] {
+                    cached_command_context(&state, &parameters, resolve).unwrap();
+                }
+                state.revision += 1;
+                cached_command_context(&state, &Value::Null, resolve).unwrap();
+                assert_eq!(calls.get(), 5);
+                state.session_id = SessionId("sess_other".into());
+                for _ in 0..2 {
+                    cached_command_context(&state, &Value::Null, resolve).unwrap();
+                }
+                assert_eq!(calls.get(), 7);
+                assert_eq!(contexts.read().unwrap().len(), 5);
+            },
+        )
+        .await;
+}
+
 #[test]
 fn exit_wait_tracks_terminal_inferior_generations() {
     let mut reducer = StateReducer::new(SessionState::creating(SessionId("sess_wait".into())));

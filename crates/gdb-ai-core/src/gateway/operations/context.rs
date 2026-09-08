@@ -219,65 +219,18 @@ pub(super) fn context_options(
     if let Some(stop) = parameters.get("stop_id").and_then(Value::as_str) {
         state.require_stop(&StopId(stop.to_owned()))?;
     }
-    let requested_thread = parameters
-        .get("thread_id")
-        .and_then(Value::as_str)
-        .map(|public_thread| current_backend_thread(state, public_thread))
-        .transpose()?;
-    let mut frame_level = parameters.get("frame_level").and_then(Value::as_u64);
-    let frame_thread = if let Some(frame) = parameters.get("frame_id").and_then(Value::as_str) {
-        let stop = state.stop_id.as_ref().ok_or_else(|| {
-            Error::new(ErrorCode::TargetRunning, "frame requires a stopped target")
-        })?;
-        let (backend_thread, level) = state
-            .inferiors
-            .values()
-            .flat_map(|inferior| inferior.threads.values())
-            .find_map(|thread| {
-                let prefix = if thread.id.0.starts_with("thr_") || stop.0.starts_with("stop_") {
-                    format!("frm_{}_{}_", thread.id.0, stop.0)
-                } else {
-                    format!("f{}_{}_", thread.id.0, stop.0)
-                };
-                frame
-                    .strip_prefix(&prefix)
-                    .and_then(|level| level.parse::<u64>().ok())
-                    .map(|level| (thread.backend_id.clone(), level))
-            })
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorCode::StaleContext,
-                    "frame handle is not current for this stop",
-                )
-            })?;
-        frame_level = Some(level);
-        Some(backend_thread)
-    } else {
-        None
-    };
-    if let (Some(requested), Some(frame)) = (&requested_thread, &frame_thread)
-        && requested != frame
-    {
-        return Err(Error::new(
-            ErrorCode::StaleContext,
-            "thread and frame handles refer to different threads",
-        ));
-    }
-    // 2026-08-28: Frame handles supplied only a frame level to GDB, leaving
-    // their owning thread implicit. On a multi-thread stop this could inspect
-    // a different selected thread. Encode the frame's thread and stop focus.
-    let backend_thread = requested_thread.or(frame_thread).or_else(|| {
+    let context = resolve_command_context(parameters, state)?;
+    let backend_thread = context.backend_thread.or_else(|| {
         command_uses_stop_focus(&command.name)
-            .then_some(state.stopped_thread_id.as_ref())
+            .then_some(context.default_thread)
             .flatten()
-            .and_then(|thread| current_backend_thread(state, &thread.0).ok())
     });
+    let frame_level = context
+        .frame_level
+        .or_else(|| command_uses_top_frame(&command.name).then_some(0));
     let mut contextual = MiCommand::new(command.name.clone())?;
     if let Some(backend_thread) = backend_thread {
         contextual = contextual.bare("--thread")?.bare(backend_thread)?;
-    }
-    if frame_level.is_none() && command_uses_top_frame(&command.name) {
-        frame_level = Some(0);
     }
     if let Some(level) = frame_level {
         contextual = contextual.bare("--frame")?.bare(level.to_string())?;
@@ -287,6 +240,148 @@ pub(super) fn context_options(
     // explicit context syntactically ineffective or invalid.
     contextual.arguments.append(&mut command.arguments);
     Ok(contextual)
+}
+
+pub(super) fn observation_context(
+    parameters: &Value,
+    state: &crate::domain::SessionState,
+) -> Result<Option<crate::protocol::ObservationContext>> {
+    Ok(resolve_command_context(parameters, state)?.observation)
+}
+
+fn resolve_command_context(
+    parameters: &Value,
+    state: &crate::domain::SessionState,
+) -> Result<crate::session::CommandContext> {
+    crate::session::cached_command_context(state, parameters, || {
+        let requested_thread = parameters
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .map(|thread| current_backend_thread(state, thread))
+            .transpose()?;
+        let mut frame_level = parameters.get("frame_level").and_then(Value::as_u64);
+        let frame_thread = if let Some(frame) = parameters.get("frame_id").and_then(Value::as_str) {
+            let stop = state.stop_id.as_ref().ok_or_else(|| {
+                Error::new(ErrorCode::TargetRunning, "frame requires a stopped target")
+            })?;
+            let (backend_thread, level) = state
+                .inferiors
+                .values()
+                .flat_map(|inferior| inferior.threads.values())
+                .find_map(|thread| {
+                    let prefix = crate::domain::FrameId::new(&thread.id, stop, 0).0;
+                    let prefix = prefix.strip_suffix('0').unwrap();
+                    frame
+                        .strip_prefix(prefix)
+                        .and_then(|level| level.parse::<u64>().ok())
+                        .map(|level| (thread.backend_id.clone(), level))
+                })
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::StaleContext,
+                        "frame handle is not current for this stop",
+                    )
+                })?;
+            if frame_level.is_some_and(|requested| requested != level) {
+                return Err(Error::new(
+                    ErrorCode::StaleContext,
+                    "frame_id and frame_level disagree",
+                ));
+            }
+            frame_level = Some(level);
+            Some(backend_thread)
+        } else {
+            None
+        };
+        if let (Some(requested), Some(frame)) = (&requested_thread, &frame_thread)
+            && requested != frame
+        {
+            return Err(Error::new(
+                ErrorCode::StaleContext,
+                "thread and frame handles refer to different threads",
+            ));
+        }
+        let mut backend_thread = requested_thread.or(frame_thread);
+        let default_thread = state
+            .stopped_thread_id
+            .as_ref()
+            .map(|thread| current_backend_thread(state, &thread.0))
+            .transpose()?;
+        // 2026-09-08: Inferior selectors were ignored, and response context
+        // always named the default frame. Resolve selection once for both MI
+        // and semantic attribution; contradictory handles must never alias.
+        if let Some(inferior_id) = parameters.get("inferior_id").and_then(Value::as_str) {
+            let inferior = state
+                .inferiors
+                .values()
+                .find(|inferior| inferior.id.0 == inferior_id)
+                .ok_or_else(|| {
+                    Error::new(ErrorCode::StaleContext, "inferior handle is not current")
+                })?;
+            if let Some(thread) = &backend_thread {
+                if !inferior
+                    .threads
+                    .values()
+                    .any(|candidate| candidate.backend_id == *thread)
+                {
+                    return Err(Error::new(
+                        ErrorCode::StaleContext,
+                        "inferior and thread handles disagree",
+                    ));
+                }
+            } else if default_thread.as_ref().is_some_and(|thread| {
+                inferior
+                    .threads
+                    .values()
+                    .any(|candidate| candidate.backend_id == *thread)
+            }) {
+                backend_thread = default_thread.clone();
+            } else if inferior.threads.len() == 1 {
+                backend_thread = inferior
+                    .threads
+                    .values()
+                    .next()
+                    .map(|thread| thread.backend_id.clone());
+            } else {
+                return Err(Error::new(
+                    ErrorCode::StaleContext,
+                    "inferior selection requires an explicit thread",
+                ));
+            }
+        }
+        let selected = backend_thread.as_ref().or(default_thread.as_ref());
+        let selected = selected.and_then(|backend_thread| {
+            state.inferiors.values().find_map(|inferior| {
+                inferior
+                    .threads
+                    .values()
+                    .find(|thread| thread.backend_id == *backend_thread)
+                    .map(|thread| (inferior, thread))
+            })
+        });
+        let mut observation = crate::protocol::ObservationContext::from_state(state);
+        let level = u32::try_from(frame_level.unwrap_or(0)).map_err(|_| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "frame_level exceeds the supported frame range",
+            )
+        })?;
+        if let (Some(context), Some((inferior, thread))) = (&mut observation, selected) {
+            context.inferior_id = Some(inferior.id.clone());
+            context.thread_id = Some(thread.id.clone());
+            context.frame_id = Some(crate::domain::FrameId::new(
+                &thread.id,
+                &context.stop_id,
+                level,
+            ));
+        }
+        Ok(crate::session::CommandContext {
+            backend_thread,
+            default_thread,
+            frame_level,
+            observation,
+        })
+    })
 }
 
 pub(super) fn current_backend_thread(
@@ -481,5 +576,29 @@ mod tests {
             focused.encoded(2),
             b"2-data-evaluate-expression --thread 2 --frame 0 \"$pc\"\n"
         );
+        let selection = json!({"stop_id": stop, "frame_id": frame});
+        let context = observation_context(&selection, state).unwrap().unwrap();
+        assert_eq!(context.thread_id.as_ref(), Some(stopped_thread));
+        assert_eq!(context.frame_id.as_ref(), Some(&frame));
+        assert_eq!(
+            context.inferior_id.as_ref(),
+            Some(&state.inferiors["i1"].id)
+        );
+        for invalid in [
+            json!({"frame_id": frame, "frame_level": 0}),
+            json!({"inferior_id": "missing"}),
+            json!({"frame_level": u64::MAX}),
+        ] {
+            assert!(observation_context(&invalid, state).is_err());
+        }
+
+        let other = observation_context(
+            &json!({"inferior_id": state.inferiors["i1"].id, "thread_id": other_thread}),
+            state,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(other.thread_id.as_ref(), Some(other_thread));
+        assert_eq!(other.frame_id, Some(FrameId::new(other_thread, stop, 0)));
     }
 }

@@ -258,6 +258,26 @@ pub struct ObservationContext {
     pub frame_id: Option<FrameId>,
 }
 
+impl ObservationContext {
+    pub(crate) fn from_state(state: &SessionState) -> Option<Self> {
+        let stop_id = state.stop_id.clone()?;
+        let frame_id = state
+            .stopped_thread_id
+            .as_ref()
+            .zip(state.stopped_frame())
+            .map(|(thread, frame)| FrameId::new(thread, &stop_id, frame.level));
+        Some(Self {
+            observation_id: None,
+            stop_id,
+            captured_revision: state.revision,
+            execution_epoch: state.execution_epoch,
+            inferior_id: state.stopped_inferior_id.clone(),
+            thread_id: state.stopped_thread_id.clone(),
+            frame_id,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ObservationResult {
     pub context: ObservationContext,

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{
-    context::{context_options, require_stopped_context},
+    context::{context_options, observation_context, require_stopped_context},
     encoding::{hex_encode, parse_address},
     evaluation::safe_evaluate_command,
     memory::read_memory_bytes,
@@ -102,7 +102,7 @@ impl Gateway {
                         vec![("bare", offset.to_string()), ("bare", end.to_string())],
                     )
                     .await?;
-                let frames = normalized_frames(&reply.record, &state, &request.parameters);
+                let frames = normalized_frames(&reply.record, &state, &request.parameters)?;
                 let continuation = (frames.len() == limit).then(|| {
                     format!(
                         "stack:{}:{}",
@@ -187,7 +187,15 @@ impl Gateway {
                 // executable, forcing Agents to request mappings before they
                 // can use a target module offset. Include the bounded local
                 // mapping page in the same view.
-                let mapped_files = mappings(&state, 0, 64.min(self.config.limits.value_children))?;
+                let context = observation_context(&request.parameters, &state)?;
+                let mapped_files = mappings(
+                    &state,
+                    context
+                        .as_ref()
+                        .and_then(|context| context.inferior_id.as_ref()),
+                    0,
+                    64.min(self.config.limits.value_children),
+                )?;
                 Ok(json!({
                     "modules": normalized_modules(&reply.record),
                     "mapped_files": mapped_files,
@@ -233,7 +241,15 @@ impl Gateway {
                     .map_err(|_| {
                         Error::new(ErrorCode::OutputLimit, "mapping offset is too large")
                     })?;
-                mappings(&state, offset, limit)
+                let context = observation_context(&request.parameters, &state)?;
+                mappings(
+                    &state,
+                    context
+                        .as_ref()
+                        .and_then(|context| context.inferior_id.as_ref()),
+                    offset,
+                    limit,
+                )
             }
             "signals" => Ok(serde_json::to_value(
                 entry
@@ -311,7 +327,7 @@ impl Gateway {
                             match entry.handle.command(command).await {
                                 Ok(reply) => {
                                     let frames =
-                                        normalized_frames(&reply.record, &state, &parameters);
+                                        normalized_frames(&reply.record, &state, &parameters)?;
                                     if frames.len() == depth as usize {
                                         thread["next_frame_offset"] = Value::from(depth);
                                     }
@@ -540,6 +556,7 @@ impl Gateway {
         )
         .await
         .map(|reply| normalized_frames(&reply.record, state, &request.parameters))
+        .transpose()?
         .map(serde_json::to_value)
         .transpose()?
         .unwrap_or(Value::Null);

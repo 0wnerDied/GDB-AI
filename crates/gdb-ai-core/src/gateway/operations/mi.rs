@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use gdb_ai_mi::{MiRecord, MiResult, MiValue};
 use serde_json::{Value, json};
 
-use super::encoding::parse_address;
+use super::{context::observation_context, encoding::parse_address};
 use crate::{
     Error, ErrorCode, Result,
     domain::{FrameId, FrameSummary},
@@ -71,39 +71,22 @@ pub(super) fn normalized_frames(
     record: &MiRecord,
     state: &crate::domain::SessionState,
     parameters: &Value,
-) -> Vec<Value> {
+) -> Result<Vec<Value>> {
     let Some(stack) = MiResult::find(record.results(), "stack") else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    // 2026-08-28: Assigning frames to the first non-running thread could
-    // mint handles for a different thread than the explicit MI stop focus.
-    let thread = parameters
-        .get("thread_id")
-        .and_then(Value::as_str)
-        .and_then(|thread_id| {
-            state
-                .inferiors
-                .values()
-                .flat_map(|inferior| inferior.threads.values())
-                .find(|thread| thread.id.0 == thread_id)
-        })
-        .or_else(|| {
-            let stopped = state.stopped_thread_id.as_ref()?;
-            state
-                .inferiors
-                .values()
-                .flat_map(|inferior| inferior.threads.values())
-                .find(|thread| &thread.id == stopped)
-        });
-    aggregate_items(stack, "frame")
+    // 2026-09-08: Frame-only and inferior-only selection minted stack handles
+    // for the default thread. Use the same resolved selection as MI commands.
+    let context = observation_context(parameters, state)?;
+    Ok(aggregate_items(stack, "frame")
         .into_iter()
         .map(|fields| {
             let frame = frame_summary_fields(fields);
-            let frame_id = thread.and_then(|thread| {
-                state
-                    .stop_id
+            let frame_id = context.as_ref().and_then(|context| {
+                context
+                    .thread_id
                     .as_ref()
-                    .map(|stop| FrameId::new(&thread.id, stop, frame.level))
+                    .map(|thread| FrameId::new(thread, &context.stop_id, frame.level))
             });
             json!({
                 "frame_id": frame_id,
@@ -113,7 +96,7 @@ pub(super) fn normalized_frames(
                 "source": frame.source.map(|path| json!({"path": path, "line": frame.line}))
             })
         })
-        .collect()
+        .collect())
 }
 
 pub(super) fn normalized_variables(record: &MiRecord, name: &str) -> Vec<Value> {
