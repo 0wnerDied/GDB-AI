@@ -135,6 +135,19 @@ assert.deepEqual(calls.at(-1).parameters, {
   lease_id: "lease_new",
 });
 assert.equal(calls.at(-1).options.expectedRevision, 9);
+await session.launch({ program: "/workspace/app", argv: ["a b"] }, { idempotencyKey: "launch-once" });
+assert.equal(calls.at(-1).method, "target.launch");
+assert.deepEqual(calls.at(-1).parameters, {
+  program: "/workspace/app", argv: ["a b"], lease_id: "lease_new",
+});
+assert.equal(calls.at(-1).options.idempotencyKey, "launch-once");
+await session.inspect({ view: "stack", stop_id: "stop_1", limit: 8 });
+assert.equal(calls.at(-1).method, "inspection.get");
+assert.equal(calls.at(-1).parameters.stop_id, "stop_1");
+await session.control({ action: "interrupt" });
+assert.equal(calls.at(-1).method, "execution.control");
+assert.equal(calls.at(-1).parameters.accept_latest_revision, true);
+assert.equal(calls.at(-1).options.expectedRevision, undefined);
 
 let killAttempts = 0;
 const retryCalls = [];

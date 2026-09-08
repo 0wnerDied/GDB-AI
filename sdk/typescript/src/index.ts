@@ -19,6 +19,73 @@ export interface CallOptions {
   idempotencyKey?: string;
 }
 
+export interface WaitSpec {
+  until: "accepted" | "running" | "stopped" | "settled" | "snapshot" | "exited";
+  timeout_ms?: number;
+}
+
+export type MutationParameters = {
+  lease_id?: string;
+  accept_latest_revision?: boolean;
+};
+
+export type TargetSelection = {
+  inferior_id?: string;
+  thread_id?: string;
+  frame_id?: string;
+  frame_level?: number;
+};
+
+export type StopContext =
+  | { stop_id: string; accept_current_stop?: boolean }
+  | { stop_id?: string; accept_current_stop: true };
+
+export type LaunchParameters = MutationParameters & {
+  program: string;
+  argv?: string[];
+  cwd?: string;
+  environment?: Record<string, string>;
+  environment_mode?: "clean" | "inherited";
+  aslr?: "preserve" | "disable";
+  stop?: "first_instruction" | "main" | "none" | "entry";
+  follow_fork?: "parent" | "child";
+  detach_on_fork?: boolean;
+  follow_exec?: "same-inferior";
+  wait?: WaitSpec;
+};
+
+// The typed helpers cover common native diagnosis views. Other views and
+// provider-specific parameters remain available through the canonical call.
+export type InspectionView = TargetSelection & (
+  | { view: "stack"; limit?: number; offset?: number }
+  | { view: "threads"; limit?: number; offset?: number; stack_depth?: number }
+  | { view: "frame" | "locals" | "arguments" }
+  | { view: "registers"; roles?: string[]; limit?: number; offset?: number }
+  | { view: "crash"; profile?: "minimal" | "brief" | "standard" | "deep";
+      limit?: number; roles?: string[] }
+);
+
+export type InspectionParameters = MutationParameters & StopContext & InspectionView;
+
+export type InferiorInput =
+  | { text: string; data_base64?: never }
+  | { text?: never; data_base64: string };
+
+export type ExecutionControlParameters = MutationParameters & TargetSelection & {
+  stop_id?: string;
+  accept_current_stop?: boolean;
+} & (
+  | { action: "until"; location: string; input?: InferiorInput }
+  | { action: "continue" | "step" | "next" | "finish" | "step_instruction" | "next_instruction";
+      location?: never; input?: InferiorInput }
+  | { action: "interrupt"; location?: never; input?: never }
+) & (
+  | { wait?: WaitSpec; inspect?: never }
+  // Canonical post-run inspection requires an explicit stop-producing wait.
+  | { wait: WaitSpec & { until: "stopped" | "settled" | "snapshot" };
+      inspect: Array<InspectionView & { name?: string }> }
+);
+
 export interface ApiResponse<T = unknown> {
   api_version: "gdb.ai/v1";
   request_id: string;
@@ -380,6 +447,24 @@ export class Session {
     }>("session.create", { profile });
     const result = response.result!;
     return new Session(client, result.session_id, response.revision!, result.write_lease.lease_id);
+  }
+
+  launch<T = unknown>(
+    parameters: LaunchParameters,
+    options: { idempotencyKey?: string } = {},
+  ): Promise<ApiResponse<T>> {
+    return this.call<T>("target.launch", parameters, options);
+  }
+
+  control<T = unknown>(
+    parameters: ExecutionControlParameters,
+    options: { idempotencyKey?: string } = {},
+  ): Promise<ApiResponse<T>> {
+    return this.call<T>("execution.control", parameters, options);
+  }
+
+  inspect<T = unknown>(parameters: InspectionParameters): Promise<ApiResponse<T>> {
+    return this.call<T>("inspection.get", parameters);
   }
 
   async call<T = unknown>(

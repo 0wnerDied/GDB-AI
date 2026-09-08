@@ -42,25 +42,25 @@ async function canonical(client, program) {
   let closed;
   try {
     await session.renew();
-    const launched = await session.call("target.launch", {
+    const launched = await session.launch({
       program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
       wait: { until: "snapshot", timeout_ms: 5000 },
     });
     const stopId = launched.state.stop_id;
     const context = await session.call("inspection.get", { view: "stop_context" });
     assert.equal(context.result.stop_id, stopId);
-    const stack = await session.call("inspection.get", { view: "stack", stop_id: stopId, limit: 4 });
+    const stack = await session.inspect({ view: "stack", stop_id: stopId, limit: 4 });
     assert.ok(stack.result.frames.length);
     assert.equal(stack.semantics.projection, "detailed");
     assert.equal(stack.semantics.context.stop_id, stopId);
-    await assert.rejects(session.call("inspection.get", { view: "stack", stop_id: "stale" }),
+    await assert.rejects(session.inspect({ view: "stack", stop_id: "stale" }),
       (error) => error instanceof ApiError && error.code === "STALE_CONTEXT" && error.response.revision !== undefined);
     // I/O accepts the latest revision, so this keyed replay does not change
     // the server fingerprint after Session updates its cached revision.
     const written = await session.call("inferior_io.write", { text: "Q\n" }, { idempotencyKey: "input-once" });
     const replayed = await session.call("inferior_io.write", { text: "Q\n" }, { idempotencyKey: "input-once" });
     assert.deepEqual(replayed.result, written.result);
-    const exited = await session.call("execution.control", {
+    const exited = await session.control({
       action: "continue", wait: { until: "exited", timeout_ms: 5000 },
     });
     assert.ok(Object.values(exited.state.inferiors).some(

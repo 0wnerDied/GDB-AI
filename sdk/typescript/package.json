@@ -7,6 +7,9 @@
   "exports": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "engines": {"node": ">=22"},
-  "scripts": {"build": "tsc -p tsconfig.json", "test": "node test.mjs"},
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc --noEmit --strict --target ES2022 --module NodeNext typecheck.mts && node test.mjs"
+  },
   "devDependencies": {"typescript": "^5.7.0"}
 }

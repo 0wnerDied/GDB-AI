@@ -51,6 +51,28 @@ their method-specific contracts. TypeScript `call<T>` and `callTool<T>` let
 applications describe their method-specific result without converting or
 copying the response.
 
+For common native debugging operations, TypeScript `Session.launch`,
+`Session.control`, and `Session.inspect` provide typed parameters and delegate
+to the same canonical call path. They retain revision tracking, lease renewal,
+and error handling. Launch/control accept the same `idempotencyKey` option.
+`inspect` covers stack, threads, frame, locals, arguments, registers, and crash
+views; other operations remain available through `call`.
+
+```typescript
+await session.launch({ program: "/workspace/app", stop: "main",
+  wait: { until: "snapshot", timeout_ms: 5000 } });
+const stack = await session.inspect({ view: "stack", accept_current_stop: true, limit: 8 });
+await session.control({ action: "continue", wait: { until: "settled", timeout_ms: 5000 },
+  inspect: [{ view: "crash", profile: "brief" }] });
+```
+
+These types reject missing executables, unknown actions/waits, an `until`
+action without a location, inspection without a stop selection, and post-run
+inspection without a stop-producing wait. They also exclude input on interrupt
+and require exactly one text/base64 input encoding. The server still validates
+runtime values, limits, permissions, and stale contexts. Results retain
+`ApiResponse<T>`; the helpers do not decode unknown target-specific facts.
+
 Use `Session` only for canonical sessions created by `Session.create`.
 It manages the session ID, revision, and expiring write lease. Projected
 sessions created with `gdb_session` use fixed caller control and do not return
@@ -240,7 +262,8 @@ npm --prefix sdk/typescript test
 python3 sdk/verify.py target/debug/gdb-ai
 ```
 
-The real-server check compiles the existing C fixture in a temporary
+`npm test` also checks accepted and rejected TypeScript helper calls at compile
+time. The real-server check compiles the existing C fixture in a temporary
 workspace. Both languages run canonical and projected debugging over both
 HTTP versions, under performance and durable history modes. It verifies
 launch, stop-bound inspection, immutable observation sharing, controller
