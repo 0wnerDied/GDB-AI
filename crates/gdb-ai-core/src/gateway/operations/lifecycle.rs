@@ -106,6 +106,8 @@ impl Gateway {
                 None => Controller::Agent(caller.identity.clone()),
             })),
             lease_generation: std::sync::atomic::AtomicU64::new(u64::from(lease.is_some())),
+            shared_reads: tokio::sync::Mutex::new(Default::default()),
+            mutation_generation: std::sync::atomic::AtomicU64::new(0),
         });
         self.sessions
             .write()

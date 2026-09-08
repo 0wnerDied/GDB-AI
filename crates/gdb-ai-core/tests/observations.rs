@@ -335,6 +335,10 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     let separate_commands =
         metric_value(&gateway.metrics(), "gdbai_commands_total") - separate_before;
     assert_eq!(separate_a["roles"], separate_b["roles"]);
+    assert_eq!(
+        separate_commands, 2,
+        "separate requests share one register capture"
+    );
 
     let batch_before = metric_value(&gateway.metrics(), "gdbai_commands_total");
     let deduplicated = successful(
@@ -362,10 +366,50 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     let batch_commands = metric_value(&gateway.metrics(), "gdbai_commands_total") - batch_before;
     assert_eq!(deduplicated["results"]["a"], deduplicated["results"]["b"]);
     assert_eq!(deduplicated["results"]["a"]["roles"], separate_a["roles"]);
-    assert!(batch_commands < separate_commands);
+    assert_eq!(batch_commands, separate_commands);
     eprintln!(
         "register reads used {separate_commands} separate MI commands and {batch_commands} batched MI commands"
     );
+
+    for concurrency in [1, 4, 8] {
+        let commands_before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+        let mut observers = JoinSet::new();
+        for observer in 0..concurrency {
+            let gateway = gateway.clone();
+            let session_id = session_id.clone();
+            let stop_id = second_stop.clone();
+            observers.spawn(async move {
+                gateway
+                    .dispatch(
+                        request(
+                            format!("coalesced-{concurrency}-{observer}"),
+                            Some(&session_id),
+                            "inspection.batch",
+                            None,
+                            json!({
+                                "stop_id": stop_id,
+                                "requests": [{"name": format!("registers-{concurrency}"), "view": "registers", "roles": ["pc", "sp"]}]
+                            }),
+                        ),
+                        &Caller::local(format!("observation-test/mcp:observer-{observer}")),
+                    )
+                    .await
+            });
+        }
+        let mut observation_id = None;
+        while let Some(response) = observers.join_next().await {
+            let result = successful(response.unwrap()).result.unwrap();
+            let id = result["observation_id"].clone();
+            assert_eq!(observation_id.get_or_insert(id.clone()), &id);
+            assert_eq!(
+                result["results"][format!("registers-{concurrency}")]["roles"],
+                separate_a["roles"]
+            );
+        }
+        let commands = metric_value(&gateway.metrics(), "gdbai_commands_total") - commands_before;
+        assert_eq!(commands, 2, "all observers must share one backend capture");
+        eprintln!("qualified read coalescing: observers={concurrency}, mi_commands={commands}");
+    }
 
     let batch = successful(
         gateway
@@ -594,6 +638,42 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
         snapshot["observation_id"]
     );
 
+    let register_request = request(
+        "before-same-stop-write",
+        Some(&session_id),
+        "register.read",
+        None,
+        json!({"stop_id": second_stop, "roles": ["pc"]}),
+    );
+    let before_write = successful(gateway.dispatch(register_request.clone(), &caller).await);
+    let denied = gateway
+        .dispatch(
+            register_request.clone(),
+            &Caller::local("other-principal/mcp:reader"),
+        )
+        .await;
+    assert_eq!(denied.error.unwrap().code, ErrorCode::PolicyDenied);
+
+    let register_write = successful(gateway.dispatch(request(
+        "same-stop-register-assignment", Some(&session_id), "value.evaluate", before_write.revision,
+        json!({"lease_id": lease_id, "stop_id": second_stop, "expression": "$pc = $pc", "side_effects": "allow"})
+    ), &caller).await);
+    assert_eq!(
+        register_write.revision, before_write.revision,
+        "register assignment emits no revision event"
+    );
+    let after_write_commands = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let after_write = successful(gateway.dispatch(register_request, &caller).await);
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total") - after_write_commands,
+        2,
+        "same-stop writes invalidate even when revision is unchanged"
+    );
+    assert_eq!(
+        after_write.result.unwrap()["roles"],
+        before_write.result.unwrap()["roles"]
+    );
+
     let written = successful(
         gateway
             .dispatch(
@@ -617,6 +697,34 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
         written.state.as_ref().unwrap().stop_id.as_ref().unwrap().0,
         second_stop
     );
+    for view in ["memory", "evaluate"] {
+        let uncached_before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+        for repeat in 0..2 {
+            let item = if view == "memory" {
+                json!({"view": view, "address_expression": "&observed", "length": 4})
+            } else {
+                json!({"view": view, "expression": "observed"})
+            };
+            successful(
+                gateway
+                    .dispatch(
+                        request(
+                            format!("uncached-{view}-{repeat}"),
+                            Some(&session_id),
+                            "inspection.batch",
+                            None,
+                            json!({"stop_id": second_stop, "requests": [item]}),
+                        ),
+                        &caller,
+                    )
+                    .await,
+            );
+        }
+        assert!(
+            metric_value(&gateway.metrics(), "gdbai_commands_total") - uncached_before >= 2,
+            "potentially volatile reads must be sampled for each request"
+        );
+    }
     let refreshed = successful(
         gateway
             .dispatch(

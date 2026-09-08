@@ -182,10 +182,7 @@ impl ObservationRequest {
         // 2026-09-08: Full target state was cached on stop/epoch alone even
         // though output and snapshot events can advance it within that fence.
         // Cache only bounded metadata or register reads proven stable here.
-        let cacheable = matches!(
-            view.as_str(),
-            "capabilities" | "providers" | "registers" | "mappings" | "signals"
-        );
+        let cacheable = crate::gateway::shareable_view(&parameters);
         Ok(Self {
             name,
             kind,

@@ -64,6 +64,15 @@ struct SessionEntry {
     out_of_band_mutation: Mutex<()>,
     controller: Mutex<Option<Controller>>,
     lease_generation: AtomicU64,
+    shared_reads: Mutex<SharedReads>,
+    mutation_generation: AtomicU64,
+}
+
+#[derive(Default)]
+struct SharedReads {
+    fence: Option<(u64, u64)>,
+    results: BTreeMap<String, OperationResult>,
+    bytes: usize,
 }
 
 pub struct Gateway {
@@ -645,6 +654,15 @@ impl Gateway {
             }
         }
 
+        if effect != Effect::Read
+            && let Some(entry) = &entry
+        {
+            // 2026-09-08: Some same-stop MI writes emit no state event, so
+            // revision alone cannot invalidate shared facts. Advance this
+            // fence after authorization, without waiting on a read cache
+            // that preemptive cancellation or close may need to interrupt.
+            entry.mutation_generation.fetch_add(1, Ordering::AcqRel);
+        }
         // 2026-08-30: Ordinary reads only need one journal representation.
         // Move it into the worker instead of cloning the complete request;
         // mutations retain one copy for durable audit.
@@ -681,7 +699,8 @@ impl Gateway {
 
         // 2026-09-05: Inlining the operation future throughout dispatch
         // overflowed default thread stacks. Heap-pin it at the shared boundary.
-        let mut result = Box::pin(self.execute_method(request, caller, mode)).await;
+        let mut result =
+            Box::pin(self.execute_shared_read(request, caller, mode, entry.as_deref())).await;
         if result.is_ok()
             && let (Some(entry), Some((stop_id, execution_epoch))) = (&entry, observation_baseline)
         {
@@ -787,6 +806,87 @@ impl Gateway {
             None => None,
         };
         Ok((state, result, warnings))
+    }
+
+    async fn execute_shared_read(
+        &self,
+        request: &ApiRequest,
+        caller: &Caller,
+        mode: RequestMode,
+        entry: Option<&SessionEntry>,
+    ) -> Result<OperationResult> {
+        let Some(entry) = entry.filter(|entry| {
+            // 2026-09-08: A running target can change mappings within one
+            // revision/epoch. Only stopped captures qualify for reuse.
+            shareable_read(request) && entry.handle.with_state(|state| state.stop_id.is_some())
+        }) else {
+            return self.execute_method(request, caller, mode).await;
+        };
+        // 2026-09-08: Concurrent identical readers each collected the same
+        // facts. Recheck under this bounded per-session gate, after every
+        // caller's authorization and target guard. Revision and mutation
+        // generation fence same-stop writes and out-of-band control.
+        // ponytail: One gate matches the serialized GDB; split it only if
+        // independent qualified reads gain a genuinely parallel backend.
+        let mut shared = tokio::time::timeout(
+            self.config.server.command_timeout(),
+            entry.shared_reads.lock(),
+        )
+        .await
+        .map_err(|_| {
+            Error::new(ErrorCode::Timeout, "shared read admission timed out").retryable()
+        })?;
+        entry.handle.require_active_operation()?;
+        let (revision, stop_id, epoch) = entry
+            .handle
+            .with_state(|state| (state.revision, state.stop_id.clone(), state.execution_epoch));
+        let generation = entry.mutation_generation.load(Ordering::Acquire);
+        if shared.fence != Some((revision, generation)) {
+            *shared = SharedReads::default();
+        }
+        let key = format!(
+            "{}:{}",
+            request.method,
+            serde_json::to_string(&request.parameters)?
+        );
+        if let Some(result) = shared.results.get(&key) {
+            return Ok(result.clone());
+        }
+        let result = self.execute_method(request, caller, mode).await?;
+        entry.handle.require_active_operation()?;
+        let revision = entry.handle.with_state(|state| {
+            if state.stop_id != stop_id || state.execution_epoch != epoch {
+                return Err(Error::new(
+                    ErrorCode::StaleContext,
+                    "target stop changed during shared read",
+                ));
+            }
+            Ok(state.revision)
+        })?;
+        if result.facts().get("partial") == Some(&Value::Bool(true))
+            || result.facts().get("complete") == Some(&Value::Bool(false))
+            || matches!(&result, OperationResult::Semantic(result) if !result.metadata.semantics.complete)
+        {
+            return Ok(result);
+        }
+        let bytes = serde_json::to_vec(result.facts())?
+            .len()
+            .saturating_add(key.len());
+        let maximum = self.config.limits.tool_response_bytes;
+        if bytes <= maximum {
+            // Snapshot commits advance revision without changing the captured
+            // facts. Save the completed revision, never a pre-commit alias.
+            if shared.fence != Some((revision, generation))
+                || shared.results.len() >= 16
+                || shared.bytes.saturating_add(bytes) > maximum
+            {
+                *shared = SharedReads::default();
+            }
+            shared.fence = Some((revision, generation));
+            shared.bytes += bytes;
+            shared.results.insert(key, result.clone());
+        }
+        Ok(result)
     }
 
     #[expect(
@@ -1311,6 +1411,46 @@ fn self_attributed_observation(request: &ApiRequest, result: &Value) -> bool {
             request.method,
             CanonicalMethod::ExecutionControl | CanonicalMethod::ExecutionWait
         ) && result.get("observation_context").is_some()
+}
+
+fn direct_register_context(parameters: &Value) -> bool {
+    // 2026-09-08: Unwound register reuse could memoize saved stack memory.
+    // Only the live top-frame register selection is safe to share here.
+    parameters
+        .get("frame_level")
+        .and_then(Value::as_u64)
+        .is_none_or(|level| level == 0)
+        && parameters
+            .get("frame_id")
+            .and_then(Value::as_str)
+            .is_none_or(|frame| frame.ends_with("_0"))
+}
+
+fn shareable_view(parameters: &Value) -> bool {
+    matches!(
+        parameters.get("view").and_then(Value::as_str),
+        Some("capabilities" | "providers" | "mappings" | "signals")
+    ) || (parameters.get("view").and_then(Value::as_str) == Some("registers")
+        && direct_register_context(parameters))
+}
+
+fn shareable_read(request: &ApiRequest) -> bool {
+    // Qualification is an allowlist, not a caller's assertion that memory is
+    // ordinary. Expressions, unwinding, disassembly, volatile/MMIO reads,
+    // source files, and stateful tracking never enter this cache.
+    match request.method {
+        CanonicalMethod::RegisterRead => direct_register_context(&request.parameters),
+        CanonicalMethod::InspectionGet => shareable_view(&request.parameters),
+        CanonicalMethod::InspectionBatch => {
+            direct_register_context(&request.parameters)
+                && request
+                    .parameters
+                    .get("requests")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| !items.is_empty() && items.iter().all(shareable_view))
+        }
+        _ => false,
+    }
 }
 
 // 2026-09-01: Waiting and then observing without one target-state guard let a

@@ -8,6 +8,117 @@ use crate::{
 };
 
 #[tokio::test]
+async fn shared_read_admission_preserves_waiter_cancellation_and_deadlines() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    let mut gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("shared-read-test");
+    let mut request = ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: "shared".into(),
+        session_id: None,
+        method: CanonicalMethod::SessionCreate,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let created = gateway.dispatch_agent(request.clone(), &caller).await;
+    assert!(created.error.is_none(), "{:?}", created.error);
+    request.session_id = created.session_id;
+    request.method = CanonicalMethod::InspectionGet;
+    request.parameters = json!({"view": "capabilities"});
+    let entry = gateway
+        .entry(request.session_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    gateway
+        .execute_shared_read(&request, &caller, RequestMode::Agent, Some(&entry))
+        .await
+        .unwrap();
+    assert!(entry.shared_reads.lock().await.results.is_empty());
+    entry
+        .handle
+        .record_event(crate::domain::DomainEvent::TargetStopped {
+            backend_inferior: None,
+            backend_thread: None,
+            reason: "cache-test".into(),
+            reason_detail: None,
+            frame: None,
+        })
+        .await
+        .unwrap();
+    let gate = entry.shared_reads.lock().await;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut waiter = Box::pin(crate::session::scope_operation(
+        crate::session::ActiveOperation::new(crate::domain::OperationId::new(), cancelled.clone()),
+        gateway.execute_shared_read(&request, &caller, RequestMode::Agent, Some(&entry)),
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(1), waiter.as_mut())
+            .await
+            .is_err()
+    );
+    cancelled.store(true, Ordering::Release);
+    drop(gate);
+    assert_eq!(waiter.await.unwrap_err().code, ErrorCode::Cancelled);
+    assert!(entry.shared_reads.lock().await.results.is_empty());
+
+    let mut limited = gateway.config.as_ref().clone();
+    limited.server.command_timeout_ms = 10;
+    gateway.config = Arc::new(limited);
+    let gate = entry.shared_reads.lock().await;
+    let expired = gateway
+        .execute_shared_read(&request, &caller, RequestMode::Agent, Some(&entry))
+        .await;
+    assert_eq!(expired.unwrap_err().code, ErrorCode::Timeout);
+    drop(gate);
+    let fresh = gateway
+        .execute_shared_read(&request, &caller, RequestMode::Agent, Some(&entry))
+        .await
+        .unwrap();
+    let reused = gateway
+        .execute_shared_read(&request, &caller, RequestMode::Canonical, Some(&entry))
+        .await
+        .unwrap();
+    assert_eq!(fresh.facts(), reused.facts());
+    assert_eq!(entry.shared_reads.lock().await.results.len(), 1);
+    gateway.shutdown().await;
+}
+
+#[test]
+fn shared_reads_exclude_memory_expressions_and_unwound_registers() {
+    for (parameters, expected) in [
+        (json!({"view": "registers", "frame_level": 0}), true),
+        (json!({"view": "registers", "frame_level": 1}), false),
+        (
+            json!({"view": "registers", "frame_id": "frame_stop_2"}),
+            false,
+        ),
+        (
+            json!({"view": "memory", "address": "0x1000", "length": 1}),
+            false,
+        ),
+        (json!({"view": "evaluate", "expression": "1"}), false),
+        (json!({"view": "disassembly"}), false),
+        (json!({"view": "tracked"}), false),
+    ] {
+        assert_eq!(shareable_view(&parameters), expected, "{parameters}");
+    }
+}
+
+#[tokio::test]
 #[ignore = "benchmark: run explicitly with real GDB and an optimized build"]
 async fn benchmark_gateway_admission() {
     assert!(crate::test_support::require_commands(&["gdb"]));
