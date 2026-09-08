@@ -124,6 +124,15 @@ async fn cancellation_stays_scoped_and_close_releases_the_session() {
         .await
         .unwrap();
     wait_running(&gateway, &caller, &session_id).await;
+    // A failed checkpoint must not hold cancellation behind the running wait
+    // or prevent the closed session from releasing its only capacity slot.
+    rusqlite::Connection::open(directory.path().join("state.sqlite"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_state BEFORE UPDATE ON sessions
+             BEGIN SELECT RAISE(FAIL, 'storage fault during cancellation'); END;",
+        )
+        .unwrap();
     let cancelled = gateway
         .dispatch(
             request(
@@ -149,14 +158,36 @@ async fn cancellation_stays_scoped_and_close_releases_the_session() {
         RequestOperationStatus::Aborted
     );
 
-    let revision = gateway
+    let transcript = gateway
+        .dispatch(
+            request(
+                "flush",
+                Some(&session_id),
+                "session.transcript",
+                None,
+                json!({"max_bytes": 128}),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(transcript.error.is_none(), "{:?}", transcript.error);
+    let stopped = gateway
         .dispatch(
             request("stopped", Some(&session_id), "session.get", None, json!({})),
             &caller,
         )
-        .await
-        .revision
-        .unwrap();
+        .await;
+    let state = stopped.state.as_ref().unwrap();
+    assert!(
+        state
+            .limitations
+            .iter()
+            .any(|reason| reason.starts_with("evidence gap: SQLite "))
+    );
+    assert!(state.stop_id.is_some());
+    assert_ne!(state.stop_id, launched.state.as_ref().unwrap().stop_id);
+    assert!(state.outcome_unknown_tokens.is_empty());
+    let revision = stopped.revision.unwrap();
     let second = gateway
         .admit_operation(run("second", revision), caller.clone(), None)
         .await
@@ -217,6 +248,20 @@ async fn cancellation_stays_scoped_and_close_releases_the_session() {
         )
         .await;
     assert_eq!(already_closed.error.unwrap().code, ErrorCode::NotFound);
+    let retained = gateway
+        .dispatch(
+            request(
+                "retained",
+                Some(&session_id),
+                "session.get",
+                None,
+                json!({}),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(retained.error.is_none(), "{:?}", retained.error);
+    assert_eq!(retained.result.unwrap()["lifecycle"], "CLOSED");
     let replacement = gateway
         .dispatch(
             request("replacement", None, "session.create", None, json!({})),
