@@ -311,10 +311,16 @@ resume. Control transfer and cancellation semantics are documented in
 
 For a hang or suspected thread race, `gdb_inspect` with `view: "threads"`
 and `stack_depth: 8` returns thread identities, including available Linux
-LWP IDs, and their stacks at one stop. The same view can be included in a
+LWP IDs, and their stacks with available frame arguments at one stop. Ordinary
+`stack` views also include arguments, using the same scalar-value rules as
+the `arguments` view. The same thread view can be included in a
 `gdb_run` interrupt request. Use `limit` and `offset` to page threads;
 returned frame offsets allow deeper stack inspection. Per-thread unwind
-failures are reported explicitly.
+failures are reported explicitly. If argument collection fails, valid frames
+remain available with `arguments_error` and the observation is incomplete.
+Argument values require matching debug information; optimized-out values stay
+explicitly unavailable. Standard and deep snapshots retain their separate
+`arguments` field without collecting or presenting those values twice.
 
 These observations support diagnosis of the captured state. All-stop
 debugging changes scheduling, and a captured stop does not establish

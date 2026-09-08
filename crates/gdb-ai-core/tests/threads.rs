@@ -115,13 +115,21 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
         }
     }
     for worker in ["worker_left", "worker_right"] {
-        assert!(threads.iter().any(|thread| {
-            thread["frames"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|frame| frame["function"] == worker)
-        }));
+        let frame = threads
+            .iter()
+            .flat_map(|thread| thread["frames"].as_array().unwrap())
+            .find(|frame| frame["function"] == worker)
+            .unwrap();
+        assert!(
+            frame["arguments"].as_array().is_some_and(|arguments| {
+                arguments.iter().any(|argument| {
+                    argument["name"] == "argument"
+                        && argument["value"] == "0x0"
+                        && argument["status"] == "available"
+                })
+            }),
+            "worker stack must retain its argument: {frame}"
+        );
     }
     let (page, other) = tokio::join!(
         call(
@@ -182,6 +190,45 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
                 .starts_with(&frame_prefix)
         );
     }
+    let worker_page = successful(
+        call(
+            "worker-stack-page",
+            "inspection.get",
+            json!({
+                "view": "stack", "stop_id": stop, "frame_id": worker_frame["frame_id"],
+                "offset": worker_frame["level"], "limit": 1
+            }),
+        )
+        .await,
+    )
+    .result
+    .unwrap();
+    assert_eq!(worker_page["frames"], json!([worker_frame]));
+    let snapshot = successful(
+        call(
+            "worker-snapshot",
+            "inspection.snapshot",
+            json!({"profile": "standard", "stop_id": stop, "frame_id": worker_frame["frame_id"]}),
+        )
+        .await,
+    )
+    .result
+    .unwrap();
+    assert_eq!(snapshot["availability"]["arguments"], "captured");
+    assert!(
+        snapshot["stack"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|frame| frame.get("arguments").is_none())
+    );
+    let captured_arguments = snapshot["arguments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|frame| frame["level"] == worker_frame["level"])
+        .unwrap();
+    assert_eq!(captured_arguments["arguments"], worker_frame["arguments"]);
     let value = successful(
         call(
             "bound-value",

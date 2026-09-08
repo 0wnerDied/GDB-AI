@@ -320,9 +320,6 @@ pub(super) fn snapshot_requests(parameters: &Value, profile: &str, frames: usize
         requests.push(serde_json::json!({"view": "stack", "limit": frames}));
         if profile != "minimal" {
             requests.push(serde_json::json!({"view": "locals"}));
-            if profile != "brief" {
-                requests.push(serde_json::json!({"view": "arguments", "limit": frames}));
-            }
             let mut registers = serde_json::json!({"view": "registers", "profile": profile});
             if let Some(roles) = parameters.get("roles") {
                 registers["roles"] = roles.clone();

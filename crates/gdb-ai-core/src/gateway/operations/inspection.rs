@@ -63,13 +63,59 @@ fn disassembly_architecture(reply: Result<CommandReply>) -> Result<&'static str>
 fn thread_facts(stop_id: Option<&StopId>, threads: Vec<Value>, evidence_seq: u64) -> Value {
     // 2026-09-08: Per-thread stack errors retained valid siblings but left
     // direct and composed reads marked complete. Carry the gap with the facts.
-    let partial = threads.iter().any(|thread| thread.get("error").is_some());
+    let partial = threads
+        .iter()
+        .any(|thread| thread.get("error").is_some() || thread.get("arguments_error").is_some());
     json!({
         "stop_id": stop_id,
         "threads": threads,
         "partial": partial,
         "evidence_seq": evidence_seq
     })
+}
+
+fn stack_facts(
+    mut frames: Vec<Value>,
+    mut evidence_seq: u64,
+    arguments: Result<(Vec<Value>, u64)>,
+) -> Result<Value> {
+    let error = match arguments {
+        Ok((arguments, sequence)) => {
+            evidence_seq = sequence;
+            let mut arguments: BTreeMap<_, _> = arguments
+                .into_iter()
+                .filter_map(|mut frame| {
+                    Some((
+                        frame["level"].as_u64()?,
+                        frame.as_object_mut()?.remove("arguments")?,
+                    ))
+                })
+                .collect();
+            let mut missing = false;
+            for frame in &mut frames {
+                let values = arguments.remove(&frame["level"].as_u64().unwrap());
+                missing |= values.is_none();
+                frame["arguments"] = values.unwrap_or(Value::Null);
+            }
+            missing.then(|| {
+                Error::new(
+                    ErrorCode::GdbError,
+                    "GDB omitted arguments for a captured frame",
+                )
+            })
+        }
+        Err(error) if independent_failure(error.code) => Some(error),
+        Err(error) => return Err(error),
+    };
+    let mut facts = json!({
+        "frames": frames,
+        "partial": error.is_some(),
+        "evidence_seq": evidence_seq
+    });
+    if let Some(error) = error {
+        facts["arguments_error"] = serde_json::to_value(ApiError::from(error))?;
+    }
+    Ok(facts)
 }
 
 impl Gateway {
@@ -152,31 +198,21 @@ impl Gateway {
                     .and_then(Value::as_u64)
                     .unwrap_or(0)
                     .min(u32::MAX as u64) as usize;
-                let end = offset.saturating_add(limit - 1);
-                let reply = self
-                    .inspection_command(
-                        &entry,
-                        request,
-                        "-stack-list-frames",
-                        vec![("bare", offset.to_string()), ("bare", end.to_string())],
-                    )
+                let mut facts = self
+                    .inspection_stack(&entry, &state, request, offset, limit)
                     .await?;
-                let frames = normalized_frames(&reply.record, &state, &request.parameters)?;
+                let frames = facts["frames"].as_array().unwrap();
                 let continuation = (frames.len() == limit).then(|| {
                     format!(
                         "stack:{}:{}",
-                        state.stop_id.as_ref().unwrap(),
+                        facts["stop_id"].as_str().unwrap(),
                         offset + frames.len()
                     )
                 });
-                Ok(json!({
-                    "stop_id": state.stop_id,
-                    "offset": offset,
-                    "limit": limit,
-                    "frames": frames,
-                    "continuation": continuation,
-                    "evidence_seq": reply.evidence_seq
-                }))
+                facts["offset"] = json!(offset);
+                facts["limit"] = json!(limit);
+                facts["continuation"] = json!(continuation);
+                Ok(facts)
             }
             "frame" => {
                 let stop_id = entry.handle.with_state(|state| state.stop_id.clone());
@@ -326,6 +362,54 @@ impl Gateway {
         }
     }
 
+    async fn inspection_stack(
+        &self,
+        entry: &SessionEntry,
+        state: &crate::domain::SessionState,
+        request: &ApiRequest,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Value> {
+        require_stopped_context(&request.parameters, state)?;
+        let end = offset.saturating_add(limit - 1);
+        // 2026-09-09: MI frame listings omit arguments, hiding values such as
+        // blocked mutex addresses. Pair the bounded reads at one stop for
+        // ordinary and thread stacks; independent argument failures keep frames.
+        entry
+            .handle
+            .stable_observation(
+                state,
+                Box::pin(async {
+                    let reply = self
+                        .inspection_command(
+                            entry,
+                            request,
+                            "-stack-list-frames",
+                            vec![("bare", offset.to_string()), ("bare", end.to_string())],
+                        )
+                        .await?;
+                    let frames = normalized_frames(&reply.record, state, &request.parameters)?;
+                    let arguments = self
+                        .inspection_command(
+                            entry,
+                            request,
+                            "-stack-list-arguments",
+                            vec![
+                                ("bare", "--simple-values".into()),
+                                ("bare", offset.to_string()),
+                                ("bare", end.to_string()),
+                            ],
+                        )
+                        .await
+                        .map(|reply| (normalized_arguments(&reply.record), reply.evidence_seq));
+                    let mut facts = stack_facts(frames, reply.evidence_seq, arguments)?;
+                    facts["stop_id"] = json!(state.stop_id);
+                    Ok(facts)
+                }),
+            )
+            .await
+    }
+
     async fn inspection_threads(
         &self,
         entry: &SessionEntry,
@@ -373,25 +457,27 @@ impl Gateway {
                             let thread_id = thread["thread_id"].as_str().ok_or_else(|| {
                                 Error::new(ErrorCode::StaleContext, "thread has no current handle")
                             })?;
-                            let parameters =
+                            let mut stack_request = request.clone();
+                            stack_request.parameters =
                                 json!({"stop_id": state.stop_id, "thread_id": thread_id});
-                            let command = context_options(
-                                MiCommand::new("-stack-list-frames")?,
-                                &parameters,
-                                &state,
-                            )?
-                            .bare("0")?
-                            .bare((depth - 1).to_string())?;
-                            match entry.handle.command(command).await {
-                                Ok(reply) => {
+                            match self
+                                .inspection_stack(entry, &state, &stack_request, 0, depth as usize)
+                                .await
+                            {
+                                Ok(mut stack) => {
                                     let frames =
-                                        normalized_frames(&reply.record, &state, &parameters)?;
-                                    if frames.len() == depth as usize {
+                                        stack.as_object_mut().unwrap().remove("frames").unwrap();
+                                    if frames.as_array().unwrap().len() == depth as usize {
                                         thread["next_frame_offset"] = Value::from(depth);
                                     }
-                                    thread["frames"] = json!(frames);
+                                    thread["frames"] = frames;
                                     thread.as_object_mut().unwrap().remove("frame");
-                                    evidence_seq = reply.evidence_seq;
+                                    if let Some(error) =
+                                        stack.as_object_mut().unwrap().remove("arguments_error")
+                                    {
+                                        thread["arguments_error"] = error;
+                                    }
+                                    evidence_seq = stack["evidence_seq"].as_u64().unwrap();
                                 }
                                 Err(error) if error.code == ErrorCode::GdbError => {
                                     thread["error"] =
@@ -609,6 +695,43 @@ impl Gateway {
         let mut observation = self
             .capture_observations(request, entry, state, requests, false)
             .await?;
+        if let Some(error) = observation
+            .results
+            .get_mut("@snapshot.stack")
+            .and_then(Value::as_object_mut)
+            .and_then(|stack| stack.remove("arguments_error"))
+        {
+            observation
+                .availability
+                .insert("@snapshot.arguments".into(), FactAvailability::Failed);
+            observation
+                .failures
+                .insert("@snapshot.arguments".into(), serde_json::from_value(error)?);
+        }
+        if matches!(profile, "standard" | "deep") {
+            if let Some(stack) = observation.results.get_mut("@snapshot.stack") {
+                // Keep the established profile layout without querying or
+                // presenting arguments a second time beside the same stack.
+                let arguments = stack["frames"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .map(|frame| {
+                        let level = frame["level"].clone();
+                        let arguments = frame.as_object_mut().unwrap().remove("arguments");
+                        json!({"level": level, "arguments": arguments})
+                    })
+                    .collect::<Vec<_>>();
+                observation
+                    .availability
+                    .entry("@snapshot.arguments".into())
+                    .or_insert(FactAvailability::Captured);
+                observation.results.insert(
+                    "@snapshot.arguments".into(),
+                    json!({"arguments": arguments}),
+                );
+            }
+        }
         let mut snapshot = json!({
             "stop_id": observation.context.stop_id,
             "revision": observation.context.captured_revision,
@@ -1560,6 +1683,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stack_arguments_keep_absolute_levels_and_partial_failures() {
+        let frames = vec![json!({"level": 2}), json!({"level": 4})];
+        let record = gdb_ai_mi::parse_record(
+            br#"1^done,stack-args=[frame={level="4",args=[{name="b",value="<optimized out>"}]},frame={level="2",args=[{name="a",value="\377"}]}]"#,
+            gdb_ai_mi::MiLimits::default(),
+        ).unwrap();
+        let captured =
+            stack_facts(frames.clone(), 1, Ok((normalized_arguments(&record), 2))).unwrap();
+        assert_eq!(
+            captured["frames"][0]["arguments"][0]["value"]["data_base64"],
+            "/w=="
+        );
+        assert_eq!(
+            captured["frames"][1]["arguments"][0]["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            captured["frames"][1]["arguments"][0]["value"],
+            "<optimized out>"
+        );
+        assert_eq!(captured["partial"], false);
+        assert_eq!(captured["evidence_seq"], 2);
+
+        for arguments in [
+            Err(Error::new(ErrorCode::GdbError, "arguments unavailable")),
+            Ok((vec![], 2)),
+        ] {
+            let facts = stack_facts(frames.clone(), 1, arguments).unwrap();
+            assert_eq!(facts["frames"].as_array().unwrap().len(), 2);
+            assert!(facts["arguments_error"].is_object());
+            assert!(
+                !SemanticResult::read(facts, None, "session_test")
+                    .metadata
+                    .semantics
+                    .complete
+            );
+        }
+        for code in [
+            ErrorCode::Timeout,
+            ErrorCode::Cancelled,
+            ErrorCode::StaleContext,
+            ErrorCode::GdbExited,
+            ErrorCode::GdbUnresponsive,
+        ] {
+            assert_eq!(
+                stack_facts(
+                    frames.clone(),
+                    1,
+                    Err(Error::new(code, "capture interrupted"))
+                )
+                .unwrap_err()
+                .code,
+                code
+            );
+        }
+    }
+
+    #[test]
     fn disassembly_metadata_preserves_control_failures() {
         for code in [
             ErrorCode::Timeout,
@@ -1595,5 +1776,17 @@ mod tests {
         );
         assert!(!partial.metadata.semantics.complete);
         assert_eq!(partial.facts["threads"], json!([captured, failed]));
+        let mut arguments_failed = captured;
+        arguments_failed["arguments_error"] = json!({"code": "GDB_ERROR"});
+        assert!(
+            !SemanticResult::read(
+                thread_facts(None, vec![arguments_failed], 1),
+                None,
+                "session_test"
+            )
+            .metadata
+            .semantics
+            .complete
+        );
     }
 }
