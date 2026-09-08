@@ -1228,19 +1228,8 @@ where
                 return;
             }
         };
-        let records = match framer.push(&buffer[..length]) {
-            Ok(records) => records,
-            Err(error) => {
-                let preview = framer.preview(64);
-                let error = Error::from(error).with_details(serde_json::json!({
-                    "preview_hex": hex_preview(&preview),
-                    "preview_bytes": preview.len()
-                }));
-                let _ = sender.send(BackendInput::ProtocolError(error)).await;
-                return;
-            }
-        };
-        for raw in records {
+        let frames = framer.push(&buffer[..length]);
+        for raw in frames.records {
             match parse_record(&raw, limits) {
                 Ok(record) => {
                     if sender.send(BackendInput::Mi { raw, record }).await.is_err() {
@@ -1258,6 +1247,15 @@ where
                     return;
                 }
             }
+        }
+        if let Some(error) = frames.error {
+            let preview = framer.preview(64);
+            let error = Error::from(error).with_details(serde_json::json!({
+                "preview_hex": hex_preview(&preview),
+                "preview_bytes": preview.len()
+            }));
+            let _ = sender.send(BackendInput::ProtocolError(error)).await;
+            return;
         }
     }
     if let Ok(Some(raw)) = framer.finish()
@@ -1306,6 +1304,32 @@ mod tests {
     struct CountingEof(Arc<AtomicUsize>);
 
     struct FailingReader;
+
+    #[tokio::test]
+    async fn delivers_complete_mi_records_before_a_framing_error() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        let input = b"1^done\n2^done\n~\"a normal but longer console line\"\n";
+        read_mi(
+            input.as_slice(),
+            sender,
+            MiLimits {
+                max_record_bytes: 16,
+                ..MiLimits::default()
+            },
+        )
+        .await;
+        for token in [1, 2] {
+            let Some(BackendInput::Mi { record, .. }) = receiver.recv().await else {
+                panic!("complete MI records must precede the protocol error");
+            };
+            assert_eq!(record.token(), Some(token));
+        }
+        let Some(BackendInput::ProtocolError(error)) = receiver.recv().await else {
+            panic!("expected a terminal framing error");
+        };
+        assert_eq!(error.code, ErrorCode::MiProtocolLimit);
+        assert!(receiver.recv().await.is_none());
+    }
 
     impl AsyncRead for CountingEof {
         fn poll_read(

@@ -130,10 +130,11 @@ fn parses_saved_transcripts_at_every_chunk_boundary() {
             let mut framer = MiFramer::new(MiLimits::default());
             let mut actual = Vec::new();
             for chunk in fixture.chunks(chunk_size) {
+                let frames = framer.push(chunk);
+                assert_eq!(frames.error, None);
                 actual.extend(
-                    framer
-                        .push(chunk)
-                        .unwrap()
+                    frames
+                        .records
                         .into_iter()
                         .map(|line| parse_record(&line, MiLimits::default()).unwrap()),
                 );

@@ -5,5 +5,5 @@ mod parser;
 
 pub use ast::{MiRecord, MiResult, MiValue};
 pub use encoder::{encode_command, quote_c_string};
-pub use framer::MiFramer;
+pub use framer::{MiFramer, MiFrames};
 pub use parser::{MiError, MiLimits, parse_record};

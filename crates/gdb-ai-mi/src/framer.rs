@@ -2,6 +2,15 @@ use bytes::{Buf, BytesMut};
 
 use crate::{MiError, MiLimits};
 
+/// Complete records preceding an optional terminal framing error.
+/// Consume the records in order before handling the error.
+#[derive(Debug)]
+#[must_use]
+pub struct MiFrames {
+    pub records: Vec<Vec<u8>>,
+    pub error: Option<MiError>,
+}
+
 /// Frames arbitrary byte chunks before parsing and enforces the untrusted
 /// record-size boundary even when GDB never emits a newline.
 #[derive(Debug)]
@@ -20,7 +29,17 @@ impl MiFramer {
         }
     }
 
-    pub fn push(&mut self, input: &[u8]) -> Result<Vec<Vec<u8>>, MiError> {
+    /// Frames a chunk, preserving complete records even if a later record
+    /// exceeds the limit. Discard the framer after a framing error.
+    pub fn push(&mut self, input: &[u8]) -> MiFrames {
+        // 2026-09-08: Returning only Err discarded complete prefix records
+        // from the same chunk. Keep their delivery independent of chunking.
+        let mut records = Vec::new();
+        let error = self.push_into(input, &mut records).err();
+        MiFrames { records, error }
+    }
+
+    fn push_into(&mut self, input: &[u8], records: &mut Vec<Vec<u8>>) -> Result<(), MiError> {
         if self.buffer.len().saturating_add(input.len()) > self.max_record_bytes
             && !input.contains(&b'\n')
         {
@@ -31,7 +50,6 @@ impl MiFramer {
         }
 
         self.buffer.extend_from_slice(input);
-        let mut records = Vec::new();
         // 2026-09-06: Rescanning a fragmented record's entire prefix made
         // framing quadratic. Bytes before scanned are already newline-free.
         while let Some(relative) = self.buffer[self.scanned..]
@@ -63,7 +81,7 @@ impl MiFramer {
                 limit: self.max_record_bytes,
             });
         }
-        Ok(records)
+        Ok(())
     }
 
     pub fn finish(&mut self) -> Result<Option<Vec<u8>>, MiError> {
@@ -108,11 +126,15 @@ mod tests {
             let mut framer = MiFramer::new(MiLimits::default());
             let mut actual = Vec::new();
             for chunk in input.chunks(chunk_size) {
-                actual.extend(framer.push(chunk).unwrap());
+                let frames = framer.push(chunk);
+                assert_eq!(frames.error, None);
+                actual.extend(frames.records);
             }
             assert_eq!(actual, expected, "chunk size {chunk_size}");
             assert_eq!(framer.finish().unwrap(), Some(b"last".to_vec()));
-            assert_eq!(framer.push(b"new\n").unwrap(), [b"new".to_vec()]);
+            let frames = framer.push(b"new\n");
+            assert_eq!(frames.error, None);
+            assert_eq!(frames.records, [b"new".to_vec()]);
         }
     }
 
@@ -123,20 +145,20 @@ mod tests {
             ..MiLimits::default()
         };
         let mut framer = MiFramer::new(limits);
-        assert!(framer.push(b"1234").unwrap().is_empty());
+        assert!(framer.push(b"1234").error.is_none());
         assert_eq!(
-            framer.push(b"5").unwrap_err(),
+            framer.push(b"5").error.unwrap(),
             MiError::Limit {
                 kind: "unterminated record",
                 limit: 4,
             }
         );
         assert_eq!(framer.preview(64), b"1234");
-        assert_eq!(framer.push(b"\n").unwrap(), [b"1234".to_vec()]);
 
-        assert!(framer.push(b"1234").unwrap().is_empty());
+        let mut framer = MiFramer::new(limits);
+        assert!(framer.push(b"1234").error.is_none());
         assert_eq!(
-            framer.push(b"\r\n").unwrap_err(),
+            framer.push(b"\r\n").error.unwrap(),
             MiError::Limit {
                 kind: "record bytes",
                 limit: 4,
@@ -145,9 +167,43 @@ mod tests {
         assert_eq!(framer.preview(64), b"1234\r\n");
 
         let mut framer = MiFramer::new(limits);
-        assert!(framer.push(b"ok\n12345").is_err());
+        let frames = framer.push(b"ok\n12345");
+        assert_eq!(frames.records, [b"ok".to_vec()]);
+        assert!(frames.error.is_some());
         assert_eq!(framer.preview(64), b"12345");
         assert!(framer.finish().is_err());
+    }
+
+    #[test]
+    fn preserves_complete_records_before_a_later_limit_error() {
+        let limits = MiLimits {
+            max_record_bytes: 16,
+            ..MiLimits::default()
+        };
+        let input = b"1^done\n2^done\n~\"a normal but longer console line\"\n";
+        for end in [input.len() - 1, input.len()] {
+            let input = &input[..end];
+            for chunk_size in 1..=input.len() {
+                let mut framer = MiFramer::new(limits);
+                let mut records = Vec::new();
+                let mut failed = false;
+                for chunk in input.chunks(chunk_size) {
+                    let frames = framer.push(chunk);
+                    records.extend(frames.records);
+                    if let Some(error) = frames.error {
+                        assert!(matches!(error, MiError::Limit { limit: 16, .. }));
+                        failed = true;
+                        break;
+                    }
+                }
+                assert!(failed);
+                assert_eq!(
+                    records,
+                    [b"1^done".to_vec(), b"2^done".to_vec()],
+                    "chunk size {chunk_size}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -168,8 +224,9 @@ mod tests {
             let started = std::time::Instant::now();
             for _ in 0..batches {
                 for chunk in input.chunks(chunk_bytes) {
-                    let records = std::hint::black_box(framer.push(chunk).unwrap());
-                    framed += records.len();
+                    let frames = std::hint::black_box(framer.push(chunk));
+                    assert_eq!(frames.error, None);
+                    framed += frames.records.len();
                 }
             }
             let elapsed = started.elapsed();

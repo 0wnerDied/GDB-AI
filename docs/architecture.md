@@ -96,6 +96,9 @@ GDB stdout bytes
 MI framing scans newly received bytes without rescanning an unfinished
 record's retained prefix. It retains the complete record for lossless parsing
 and applies the record-size limit before publishing it to the session actor.
+Valid complete records preceding a framing failure are delivered in order
+before the terminal protocol error, including when they share one input
+chunk. The failed stream is not used to infer further target state.
 
 The PTY reader writes target output directly into its bounded ring or
 configured evidence spool. It emits coalesced high-water metadata instead of
