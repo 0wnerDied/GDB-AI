@@ -61,39 +61,40 @@ pub(super) async fn reconcile_threads(handle: &SessionHandle, record: &MiRecord)
     let Some(threads) = MiResult::find(record.results(), "threads") else {
         return Ok(());
     };
-    let fallback_group = handle.with_state(|state| {
-        state
+    let (fallback_group, existing) = handle.with_state(|state| {
+        let fallback = state
             .inferiors
             .keys()
             .next()
             .cloned()
-            .unwrap_or_else(|| "i1".into())
-    });
-    let observed = aggregate_items(threads, "thread")
-        .into_iter()
-        .filter_map(|fields| {
-            Some((
-                MiResult::find_str(fields, "id")?.to_owned(),
-                MiResult::find_str(fields, "group-id")
-                    .unwrap_or(&fallback_group)
-                    .to_owned(),
-            ))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let existing = handle.with_state(|state| {
-        state
+            .unwrap_or_else(|| "i1".into());
+        let threads = state
             .inferiors
             .values()
             .flat_map(|inferior| {
                 inferior
                     .threads
                     .keys()
-                    .cloned()
-                    .map(|thread| (thread, inferior.backend_id.clone()))
-                    .collect::<Vec<_>>()
+                    .map(move |thread| (thread.clone(), inferior.backend_id.clone()))
             })
-            .collect::<Vec<_>>()
+            .collect::<BTreeMap<_, _>>();
+        (fallback, threads)
     });
+    // 2026-09-08: MI thread lists omit group-id. Preserve known ownership so
+    // reconciliation cannot duplicate child threads under the first inferior.
+    let observed = aggregate_items(threads, "thread")
+        .into_iter()
+        .filter_map(|fields| {
+            let thread = MiResult::find_str(fields, "id")?;
+            Some((
+                thread.to_owned(),
+                MiResult::find_str(fields, "group-id")
+                    .or_else(|| existing.get(thread).map(String::as_str))
+                    .unwrap_or(&fallback_group)
+                    .to_owned(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
     for (backend_thread, backend_inferior) in &observed {
         handle
             .record_event(DomainEvent::ThreadCreated {
@@ -275,4 +276,64 @@ pub(super) async fn reconcile_libraries(handle: &SessionHandle, record: &MiRecor
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use gdb_ai_mi::{MiLimits, parse_record};
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::{config::Config, metrics::Metrics, persistence::Store, policy::Profile};
+
+    #[tokio::test]
+    async fn thread_reconciliation_preserves_known_inferior_ownership() {
+        if !crate::test_support::require_commands(&["gdb"]) {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let mut config = Config::default();
+        config.persistence.sqlite = directory.path().join("state.sqlite");
+        config.persistence.sessions = directory.path().join("sessions");
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let handle = SessionHandle::start(
+            Arc::new(config),
+            Profile::DebugControl,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+        for (inferior, thread) in [("i1", "1"), ("i2", "2"), ("i2", "4")] {
+            handle
+                .record_event(DomainEvent::ThreadCreated {
+                    backend_inferior: inferior.into(),
+                    backend_thread: thread.into(),
+                })
+                .await
+                .unwrap();
+        }
+        let before = handle.state();
+        let record = parse_record(
+            br#"1^done,threads=[{id="1"},{id="2"},{id="3",group-id="i2"}]"#,
+            MiLimits::default(),
+        )
+        .unwrap();
+        reconcile_threads(&handle, &record).await.unwrap();
+        let after = handle.state();
+        handle.close().await.unwrap();
+
+        assert_eq!(after.inferiors["i1"].threads.len(), 1);
+        assert_eq!(after.inferiors["i2"].threads.len(), 2);
+        for (inferior, thread) in [("i1", "1"), ("i2", "2")] {
+            assert_eq!(
+                after.inferiors[inferior].threads[thread].id,
+                before.inferiors[inferior].threads[thread].id
+            );
+        }
+        assert!(after.inferiors["i2"].threads.contains_key("3"));
+        assert!(!after.inferiors["i2"].threads.contains_key("4"));
+    }
 }
