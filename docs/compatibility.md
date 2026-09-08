@@ -9,7 +9,8 @@ unknown state-changing event taints consistency instead of being guessed.
 
 - Required CI builds checksum-pinned GDB 9.2, 10.2, 11.2, and 12.1 for MI3 and
   GDB 13.2, 14.2, 15.2, 16.3, and 17.2 for MI4. Every lane runs the same
-  local-launch vertical test.
+  local-launch vertical test and a forced-MI3 breakpoint-script and journal
+  replay regression, covering both native correction and legacy parsing.
 - The locked workspace suite covers native launch, attach, core, gdbserver,
   raw reconciliation, tracked state, Agent operations, public session
   lifecycle, delayed-result, disconnect, storage-failure, and noisy-PTY paths.

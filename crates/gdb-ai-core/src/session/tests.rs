@@ -1533,7 +1533,10 @@ async fn loads_hash_pinned_python_extension() {
 async fn starts_compatible_mi3_backend() {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
-    if !crate::test_support::require_commands(&["gdb"]) {
+    // 2026-09-08: Compatibility jobs build GDB outside PATH. An explicit
+    // binary must be tested without requiring an unrelated system debugger.
+    let configured_gdb = std::env::var_os("GDB_AI_GDB_PATH");
+    if configured_gdb.is_none() && !crate::test_support::require_commands(&["gdb"]) {
         return;
     }
     let directory = tempdir().unwrap();
@@ -1549,7 +1552,7 @@ async fn starts_compatible_mi3_backend() {
     };
     config.gdb.preferred_mi = "mi99".into();
     config.gdb.fallback_mi = "mi3".into();
-    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+    if let Some(path) = configured_gdb {
         config.gdb.path = path.into();
     }
     let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
