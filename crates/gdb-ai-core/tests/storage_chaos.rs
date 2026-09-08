@@ -148,18 +148,28 @@ async fn persistence_failures_preserve_debugging_unless_durability_is_required()
         )
         .await;
         assert!(continued.error.is_none(), "{:?}", continued.error);
+        let operation_id = continued.result.as_ref().unwrap()["operation_id"]
+            .as_str()
+            .expect("asynchronous Agent execution must retain its wait handle");
         let waited = call(
             session,
             "execution.wait",
             json!({
-                "operation_id": continued.result.unwrap()["operation_id"],
+                "operation_id": operation_id,
                 "wait": {"until": "settled", "timeout_ms": 5000}
             }),
         )
         .await;
         assert!(waited.error.is_none(), "{:?}", waited.error);
         assert_eq!(waited.result.unwrap()["settled_by"], "exited");
-        let final_seq = waited.state.unwrap().event_seq;
+        assert_eq!(waited.semantics.unwrap().state.unwrap()["exit_code"], 0);
+        // 2026-09-08: Native Agent waits omit full diagnostic registries.
+        // Read the journal cursor from explicit status, not that old envelope.
+        let final_seq = call(session, "session.get", json!({}))
+            .await
+            .state
+            .unwrap()
+            .event_seq;
         assert!(final_seq > current.event_seq);
         let closed = call(session, "session.close", json!({})).await;
         assert!(closed.error.is_none(), "{:?}", closed.error);

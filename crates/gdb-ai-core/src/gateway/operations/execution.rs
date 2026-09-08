@@ -314,6 +314,7 @@ impl Gateway {
         .await?;
         if let Some(wait) = wait {
             let report_settled_by = wait.until == "settled";
+            let asynchronous_wait = matches!(wait.until.as_str(), "accepted" | "running");
             operation.status = OperationStatus::WaitingForState;
             entry.handle.record_operation(&operation).await?;
             match apply_wait(&entry.handle, wait, Some(&state)).await {
@@ -322,6 +323,12 @@ impl Gateway {
                     operation.completed_event_seq = Some(state.event_seq);
                     entry.handle.record_operation(&operation).await?;
                     let mut result = json!({});
+                    // 2026-09-08: Compact projection hid the handle after an
+                    // accepted/running wait. Execution can still need a later
+                    // attributed wait, so keep its operation ID inline.
+                    if asynchronous_wait {
+                        result["operation_id"] = json!(operation.operation_id);
+                    }
                     if report_settled_by {
                         result["settled_by"] = Value::String(
                             settled_by(&state, operation.wait_baseline.as_ref())
