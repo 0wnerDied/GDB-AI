@@ -87,11 +87,14 @@ def canonical(client, program):
 
 
 def projected(client, program):
-    created = client.call_tool("gdb_session", {"action": "create"})
-    assert "api_version" not in created and "revision" not in created, created
-    assert "write_lease" not in created["result"], created
-    session_id = created["result"]["session_id"]
-    assert created["result"]["controller"] == created["result"]["caller_identity"], created
+    launched = client.call_tool("gdb_session", {
+        "action": "launch", "program": program, "stop": "first_instruction",
+        "environment": {"GDB_AI_TEST_ENV": "sdk-世界"}})
+    assert "api_version" not in launched and "revision" not in launched, launched
+    created = launched["result"]["session"]
+    assert "write_lease" not in created, created
+    session_id = created["session_id"]
+    assert created["controller"] == created["caller_identity"], created
     expected = "environment: sdk-世界\nmarker reached\ninput received: \0\n".encode()
     observer = Client(client.endpoint, protocol_version=client.protocol_version,
                       client_name="python-observer")
@@ -102,8 +105,6 @@ def projected(client, program):
 
     try:
         observer.connect()
-        launched = call("gdb_session", action="launch", program=program,
-                        environment={"GDB_AI_TEST_ENV": "sdk-世界"}, stop="first_instruction")
         assert launched["state"]["stop_id"], launched
         assert "backend" not in launched["state"], launched
         stack = call("gdb_inspect", view="stack", limit=4)
@@ -143,7 +144,7 @@ def projected(client, program):
         assert shared["failures"] == captured["failures"], shared
         peer_status = observer.call_tool("gdb_session", {"action": "status", "session_id": session_id})
         peer_identity = peer_status["result"]["caller_identity"]
-        assert peer_identity != created["result"]["controller"], peer_status
+        assert peer_identity != created["controller"], peer_status
         transferred = call("gdb_session", action="handoff", to=peer_identity)
         assert transferred["result"]["controller"] == peer_identity, transferred
         controller = observer

@@ -154,6 +154,28 @@ impl OperationRegistry {
 }
 
 impl Gateway {
+    pub(super) async fn bind_operation_session(
+        &self,
+        session: &super::SessionEntry,
+        caller: &Caller,
+    ) -> Result<()> {
+        let Some(operation) = crate::session::active_operation() else {
+            return Ok(());
+        };
+        let entry = self.operations.entry(&operation.id().0, caller).await?;
+        // Creation can finish after cancellation. Publish the session under
+        // the same transition lock before any target command can resume it.
+        let _transition = entry.transition.lock().await;
+        entry.state.send_modify(|record| {
+            record.session_id = Some(session.handle.id().0.clone());
+            session.handle.with_state(|state| {
+                record.admitted_revision = Some(state.revision);
+                record.admitted_execution_epoch = Some(state.execution_epoch);
+            });
+        });
+        operation.require_active()
+    }
+
     pub async fn admit_operation(
         self: &Arc<Self>,
         request: ApiRequest,
@@ -338,9 +360,12 @@ impl Gateway {
             entry
                 .state
                 .send_modify(|record| record.status = RequestOperationStatus::CancelRequested);
-            record.session_id.ok_or_else(|| {
-                Error::new(ErrorCode::InvalidState, "operation has no target session")
-            })?
+            let Some(session_id) = record.session_id else {
+                // A fresh launch may still be creating GDB. Its shared flag
+                // prevents target commands; binding retires a late session.
+                return Ok(entry.state.borrow().clone());
+            };
+            session_id
         };
         let session = self.entry(&session_id).await?;
         let operation_id = OperationId::parse(operation_id)?;
@@ -471,6 +496,261 @@ mod tests {
         config.persistence.sessions = directory.join("sessions");
         config.artifacts.path = directory.join("artifacts");
         config
+    }
+
+    #[tokio::test]
+    async fn fresh_launch_validates_and_authorizes_before_creation() {
+        let mut config = config();
+        config.security.default_profile = crate::policy::Profile::LiveObserver;
+        let gateway = Gateway::new(config).unwrap();
+        for (parameters, expected) in [
+            (
+                json!({"program": "/bin/true", "lease_id": "lease_old"}),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                json!({"program": "/bin/true", "inspect": "stack"}),
+                ErrorCode::InvalidArgument,
+            ),
+            (json!({"program": "/bin/true"}), ErrorCode::PolicyDenied),
+        ] {
+            let response = gateway
+                .dispatch_agent(
+                    ApiRequest {
+                        api_version: API_VERSION.into(),
+                        request_id: "launch".into(),
+                        session_id: None,
+                        method: CanonicalMethod::TargetLaunch,
+                        expected_revision: None,
+                        idempotency_key: None,
+                        parameters,
+                    },
+                    &Caller::local("observer"),
+                )
+                .await;
+            assert_eq!(response.error.unwrap().code, expected);
+            assert!(response.session_id.is_none());
+            assert!(gateway.sessions.read().await.is_empty());
+            assert!(gateway.store.list_session_id_owners().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_launch_retires_creation_that_finishes_after_cancellation() {
+        if !crate::test_support::require_commands(&["gdb"]) {
+            return;
+        }
+        let mut config = config();
+        config.server.max_sessions = 1;
+        let gateway = Arc::new(Gateway::new(config).unwrap());
+        let caller = Caller::local("cancel-bootstrap");
+        let creation = gateway.session_creation.write().await;
+        let ticket = gateway
+            .admit_operation_with_mode(
+                ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "launch".into(),
+                    session_id: None,
+                    method: CanonicalMethod::TargetLaunch,
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters: json!({"program": "/bin/true"}),
+                },
+                caller.clone(),
+                None,
+                RequestMode::Agent,
+            )
+            .await
+            .unwrap();
+        let operation = gateway
+            .operations
+            .entry(&ticket.operation_id.0, &caller)
+            .await
+            .unwrap();
+        let mut state = operation.state.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.borrow().status == RequestOperationStatus::Accepted {
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let transition = operation.transition.lock().await;
+        let cancel = gateway.cancel_request_operation(
+            &ticket.operation_id.0,
+            &caller,
+            crate::session::OperationCancelMode::CloseSession,
+        );
+        tokio::pin!(cancel);
+        // Queue cancellation before binding on the FIFO transition mutex;
+        // the creation gate makes this race independent of scheduler timing.
+        tokio::select! {
+            biased;
+            result = &mut cancel => panic!("cancellation bypassed transition lock: {result:?}"),
+            () = std::future::ready(()) => {}
+        }
+        drop(creation);
+        let session = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(session) = gateway.sessions.read().await.values().next().cloned() {
+                    break session;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(session.handle.with_state(|state| state.execution_epoch), 0);
+        drop(transition);
+        assert!(cancel.await.unwrap().session_id.is_none());
+        let record = gateway
+            .wait_operation(&ticket.operation_id.0, &caller)
+            .await
+            .unwrap();
+        assert_eq!(record.status, RequestOperationStatus::Aborted);
+        let response = record.result.unwrap();
+        assert_eq!(response.error.unwrap().code, ErrorCode::Cancelled);
+        let state = response.state.unwrap();
+        assert_eq!(state.lifecycle, crate::domain::SessionLifecycle::Closed);
+        assert_eq!(state.execution_epoch, 0);
+        assert!(gateway.sessions.read().await.is_empty());
+        assert_eq!(gateway.session_slots.available_permits(), 1);
+        gateway.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn fresh_launch_can_be_cancelled_before_session_creation() {
+        let gateway = Arc::new(Gateway::new(config()).unwrap());
+        let caller = Caller::local("cancel-create");
+        let creation = gateway.session_creation.write().await;
+        let ticket = gateway
+            .admit_operation(
+                ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "launch".into(),
+                    session_id: None,
+                    method: CanonicalMethod::TargetLaunch,
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters: json!({"program": "/bin/true"}),
+                },
+                caller.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        let cancelled = gateway
+            .cancel_request_operation(
+                &ticket.operation_id.0,
+                &caller,
+                crate::session::OperationCancelMode::CloseSession,
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status, RequestOperationStatus::CancelRequested);
+        assert!(cancelled.session_id.is_none());
+        drop(creation);
+        let record = gateway
+            .wait_operation(&ticket.operation_id.0, &caller)
+            .await
+            .unwrap();
+        assert_eq!(record.status, RequestOperationStatus::Aborted);
+        assert_eq!(
+            record.result.unwrap().error.unwrap().code,
+            ErrorCode::Cancelled
+        );
+        assert!(gateway.sessions.read().await.is_empty());
+        gateway.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn fresh_launch_binds_cancellation_before_resuming_the_target() {
+        if !crate::test_support::require_commands(&["gdb"]) {
+            return;
+        }
+        let mut config = config();
+        config.security.workspace_roots = vec![std::fs::canonicalize("/bin").unwrap()];
+        config.server.max_sessions = 1;
+        let gateway = Arc::new(Gateway::new(config).unwrap());
+        let caller = Caller::local("cancel-launch");
+        let ticket = gateway
+            .admit_operation_with_mode(
+                ApiRequest {
+                    api_version: API_VERSION.into(),
+                    request_id: "launch".into(),
+                    session_id: None,
+                    method: CanonicalMethod::TargetLaunch,
+                    expected_revision: None,
+                    idempotency_key: None,
+                    parameters: json!({"program": "/bin/sh", "argv": ["-c", "read gdb_ai_input"], "stop": "none",
+                                   "wait": {"until": "exited", "timeout_ms": 5000}}),
+                },
+                caller.clone(),
+                None,
+                RequestMode::Agent,
+            )
+            .await
+            .unwrap();
+        let operation = gateway
+            .operations
+            .entry(&ticket.operation_id.0, &caller)
+            .await
+            .unwrap();
+        let session_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert!(
+                    !operation.state.borrow().status.terminal(),
+                    "{:?}",
+                    operation.state.borrow().result
+                );
+                let session_id = operation.state.borrow().session_id.clone();
+                if let Some(id) = session_id
+                    && let Ok(session) = gateway.entry(&id).await
+                    && session.handle.with_state(|state| {
+                        state.inferiors.values().any(|inferior| {
+                            inferior.status == crate::domain::InferiorStatus::Running
+                        })
+                    })
+                {
+                    break id;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        gateway
+            .detach_operation_waiter(&ticket.operation_id.0, &caller)
+            .await
+            .unwrap();
+        gateway
+            .cancel_request_operation(
+                &ticket.operation_id.0,
+                &caller,
+                crate::session::OperationCancelMode::CloseSession,
+            )
+            .await
+            .unwrap();
+        let record = gateway
+            .wait_operation(&ticket.operation_id.0, &caller)
+            .await
+            .unwrap();
+        assert_eq!(record.status, RequestOperationStatus::Aborted);
+        assert!(record.waiter_detached);
+        assert_eq!(record.session_id.as_deref(), Some(session_id.as_str()));
+        let response = record.result.unwrap();
+        assert_eq!(response.session_id.as_deref(), Some(session_id.as_str()));
+        assert_eq!(
+            response.state.as_ref().unwrap().lifecycle,
+            crate::domain::SessionLifecycle::Closed
+        );
+        assert_eq!(
+            response.error.unwrap().details.unwrap()["session"]["session_id"],
+            session_id
+        );
+        assert!(gateway.sessions.read().await.is_empty());
+        assert_eq!(gateway.session_slots.available_permits(), 1);
+        gateway.shutdown().await;
     }
 
     #[tokio::test]

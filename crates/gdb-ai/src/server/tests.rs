@@ -46,6 +46,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
     let instructions = result["instructions"].as_str().unwrap();
     for required in [
         "tools/list",
+        "launch without session_id creates a session",
         "argv",
         "first_instruction only for pre-run setup",
         "MCP keeps caller control without lease renewal",

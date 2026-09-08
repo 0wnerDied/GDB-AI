@@ -984,6 +984,7 @@ impl CanonicalMethod {
             self,
             Self::SessionCreate
                 | Self::SessionList
+                | Self::TargetLaunch
                 | Self::OperationGet
                 | Self::OperationCancel
                 | Self::ArtifactGet

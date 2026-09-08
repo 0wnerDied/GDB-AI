@@ -99,7 +99,8 @@ impl RpcFault {
 // 2026-09-05: A later trace stopped every stripped-target restart in the
 // loader and immediately continued. Distinguish one-time setup from a direct
 // exploit-trial relaunch in the Agent instructions.
-const AGENT_INSTRUCTIONS: &str = "Use tools/list. Create once; keep session_id; launch; argv \
+// 2026-09-09: Teach optional creation so startup does not cost a separate turn.
+const AGENT_INSTRUCTIONS: &str = "Use tools/list. launch without session_id creates a session; keep result.session.session_id and reuse it; create separately only for pre-launch setup. argv \
 excludes program; patch the interpreter/library path before launch when needed; launch uses the program unchanged; use first_instruction only for pre-run setup. MCP keeps caller control without lease renewal. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
 stop/exit after continue or step when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
 accepted/running only for later I/O. Use gdb_io write steps with wait_for for prompt-driven \
@@ -611,7 +612,8 @@ fn map_tool(
         })?;
     // 2026-08-31: Global MCP actions advertised and accepted a session ID,
     // allowing session.create responses to be labeled with an invented ID.
-    if session_id.is_some() && !method.requires_session() {
+    if session_id.is_some() && !method.requires_session() && method != CanonicalMethod::TargetLaunch
+    {
         return Err(RpcFault::invalid(
             "global action does not accept session_id",
         ));

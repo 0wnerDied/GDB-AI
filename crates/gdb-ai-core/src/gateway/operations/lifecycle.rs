@@ -28,12 +28,12 @@ use crate::{
 };
 
 impl Gateway {
-    pub(super) async fn session_create(
+    pub(in crate::gateway) async fn session_create(
         &self,
         request: &ApiRequest,
         caller: &Caller,
         mode: RequestMode,
-    ) -> Result<Value> {
+    ) -> Result<(Arc<SessionEntry>, Value)> {
         // 2026-08-30: A global mutex covered the complete GDB handshake and
         // serialized independent Agent sessions. A read gate only coordinates
         // shutdown; the owned permit reserves capacity through session close.
@@ -43,6 +43,9 @@ impl Gateway {
                 ErrorCode::InvalidState,
                 "gateway is shutting down",
             ));
+        }
+        if let Some(operation) = crate::session::active_operation() {
+            operation.require_active()?;
         }
         #[derive(Deserialize)]
         struct Parameters {
@@ -114,10 +117,17 @@ impl Gateway {
             .write()
             .await
             .insert(id.0.clone(), entry.clone());
-        entry
+        if let Err(error) = entry
             .handle
             .record_api(serde_json::to_value(request)?)
-            .await?;
+            .await
+        {
+            // 2026-09-09: Failed creation journaling left an unreturned live
+            // session holding capacity. Retire it before reporting failure.
+            let _ = entry.handle.close().await;
+            self.retire_session(&id.0, &entry).await;
+            return Err(error);
+        }
         let mut result = json!({
             "session_id": id,
             "caller_identity": caller.identity,
@@ -131,7 +141,7 @@ impl Gateway {
         if let Some(lease) = lease {
             result["write_lease"] = serde_json::to_value(lease)?;
         }
-        Ok(result)
+        Ok((entry, result))
     }
 
     pub(super) async fn session_acquire_write_lease(

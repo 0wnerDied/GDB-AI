@@ -157,14 +157,14 @@ const RAW_ACTIONS: &[ToolAction] = &[action!("mi", RawMi), action!("console", Ra
 const TOOLS: &[ToolProjection] = &[
     ToolProjection {
         name: "gdb_session",
-        // 2026-09-04: Agents combined create with target fields and guessed
-        // remote parameter names. State the lifecycle split beside the schema.
+        // 2026-09-09: A mandatory create added a turn before native launch.
+        // Advertise optional creation where Agents choose the lifecycle call.
         // 2026-09-05: Runtime auto-detection changed the binary under test.
         // Make caller-owned patching explicit without adding a launch mode.
         // 2026-09-05: Advertising a profile that ordinary projected callers
         // cannot select caused a guaranteed create retry. The default already
         // permits exploit debugging, so expose only the actionable lifecycle.
-        description: "Create a session with action only, then launch a program unchanged with argument-only argv; patch its runtime first when needed. launch with inspect waits and returns those views at the resulting stop. Relative paths use workspace roots; use first_instruction only for pre-run setup. Remote uses connect_remote with endpoint and optional executable.",
+        description: "launch without session_id creates a session; keep result.session.session_id. With inspect it waits and returns those views at the resulting stop. Use create only for pre-launch setup, or pass an existing session_id. Programs run unchanged with argument-only argv; patch their runtime first when needed. Relative paths use workspace roots; use first_instruction only for pre-run setup. Remote uses connect_remote with endpoint and optional executable.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,
@@ -518,8 +518,10 @@ fn projected_method_schema(method: CanonicalMethod, admin: bool) -> Value {
     // one inspection into two calls. MCP binds an omitted stop_id internally;
     // an explicit stop_id remains available for cross-call attribution.
     properties.remove("accept_current_stop");
-    if method.requires_session() {
+    if method.requires_session() || method == CanonicalMethod::TargetLaunch {
         properties.insert("session_id".into(), json!({"type": "string"}));
+    }
+    if method.requires_session() {
         required.insert("session_id".into());
     }
     if method == CanonicalMethod::InferiorIoRead {
@@ -776,6 +778,14 @@ mod tests {
 
     #[test]
     fn projects_current_stop_as_an_optional_pin() {
+        let launch = projected_method_schema(CanonicalMethod::TargetLaunch, false);
+        assert!(launch["properties"].get("session_id").is_some());
+        assert!(
+            !launch["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("session_id"))
+        );
         assert!(
             projected_method_schema(CanonicalMethod::SessionCreate, false)["properties"]
                 .get("profile")

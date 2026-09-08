@@ -114,15 +114,18 @@ on the configured mode.
 | --- | --- |
 | Process ownership | One GDB child per session; an actor correlates MI command tokens and owns live session state. |
 | Execution context | Stop IDs and execution epochs bind observations. Resuming invalidates previous frame and value handles. |
-| Compound operations | Run, wait, input, and requested inspection can share one Agent call. Probes combine a temporary breakpoint, bounded capture, and cleanup. |
+| Compound operations | Session creation, launch, wait, and requested inspection can share one Agent call. Run calls can also supply input. Probes combine a temporary breakpoint, bounded capture, and cleanup. |
 | Output | Structured replies omit MI envelopes and debugger prompts. Inferior PTY bytes and GDB console, target, and log streams remain separately accessible. |
 | Large results | Pagination and artifact references bound responses. Continuation, truncation, and evidence-gap metadata identify incomplete data. |
 | Persistence | Live state belongs to the actor. Journal durability and output retention are explicit configuration choices. |
 
 ## Agent operations
 
-Create a session with `gdb_session` action `create`, then use `launch` with
-the returned `session_id`. `program` names the executable; `argv` contains
+Use `gdb_session` action `launch` without `session_id` to create a session
+and launch in one call. Retain `result.session.session_id` for later calls.
+Pass an existing `session_id` to reuse a session, or use `create` separately
+when setup such as pending breakpoints must precede launch.
+`program` names the executable; `argv` contains
 only its arguments. Empty arguments, whitespace, quotes, and shell characters
 in `argv` are preserved literally. Use `stop: "main"` when the target has an
 appropriate main symbol, or `first_instruction` when setup must precede
@@ -131,14 +134,13 @@ libraries, symbols, and runtime helpers.
 
 ### Run and inspect
 
-After creating a session, launch and collect crash evidence in one request:
+Create a session, launch, and collect crash evidence in one request:
 
 ```json
 {
   "name": "gdb_session",
   "arguments": {
     "action": "launch",
-    "session_id": "<session-id>",
     "program": "/workspace/app",
     "stop": "none",
     "inspect": [{"view": "crash", "profile": "brief"}]
@@ -150,6 +152,8 @@ With `inspect`, launch and restart wait for a stop or exit when `stop` is
 `none`; other start policies collect at their selected startup stop. The
 response includes bounded target output and observations from that stop.
 A normal exit returns no stop observations and is not an inspection failure.
+If a new session was created before launch failed, its ID and control metadata
+remain in `error.details.session`; reuse or close it instead of creating another.
 
 For an existing stopped session with a breakpoint configured, the following
 `tools/call` parameters supply input, continue, wait, and inspect the resulting

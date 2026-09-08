@@ -1018,6 +1018,114 @@ async fn failed_lease_release_keeps_the_live_lease() {
 }
 
 #[tokio::test]
+async fn launch_creates_one_owned_session_and_preserves_failure_handles() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![std::fs::canonicalize("/bin").unwrap()];
+    config.server.max_sessions = 1;
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("launch/mcp:controller");
+    for mode in [RequestMode::Canonical, RequestMode::Agent] {
+        let request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "launch".into(),
+            session_id: None,
+            method: CanonicalMethod::TargetLaunch,
+            expected_revision: None,
+            idempotency_key: Some(format!("launch-{mode:?}")),
+            parameters: json!({
+                "program": "/bin/true", "stop": "first_instruction",
+                "inspect": [{"name": "stack", "view": "stack", "limit": 1}]
+            }),
+        };
+        let (launched, retry) = tokio::join!(
+            gateway.dispatch_inner(request.clone(), &caller, false, mode),
+            gateway.dispatch_inner(request.clone(), &caller, false, mode)
+        );
+        assert!(launched.error.is_none(), "{:?}", launched.error);
+        assert_eq!(launched.session_id, retry.session_id);
+        assert_eq!(gateway.sessions.read().await.len(), 1);
+        let session = &launched.result.as_ref().unwrap()["session"];
+        assert_eq!(session["controller"], caller.identity);
+        assert_eq!(session["caller_identity"], caller.identity);
+        assert_eq!(
+            session.get("write_lease").is_some(),
+            mode == RequestMode::Canonical
+        );
+        assert_eq!(
+            launched.result.as_ref().unwrap()["observations"]["stack"]["frames"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut close = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "close".into(),
+            session_id: launched.session_id,
+            method: CanonicalMethod::SessionClose,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: json!({"accept_latest_revision": true}),
+        };
+        if let Some(lease) = session.get("write_lease") {
+            close.parameters["lease_id"] = lease["lease_id"].clone();
+        }
+        let denied = gateway
+            .dispatch_inner(
+                close.clone(),
+                &Caller::local("launch/mcp:observer"),
+                false,
+                mode,
+            )
+            .await;
+        assert_eq!(denied.error.unwrap().code, ErrorCode::WriteLeaseRequired);
+        assert!(
+            gateway
+                .dispatch_inner(close.clone(), &caller, false, mode)
+                .await
+                .error
+                .is_none()
+        );
+
+        let mut invalid = request;
+        invalid.idempotency_key = None;
+        invalid.parameters["program"] = json!("/bin/gdb-ai-nonexistent-test-program");
+        let failed = gateway.dispatch_inner(invalid, &caller, false, mode).await;
+        let error = failed.error.unwrap();
+        assert!(failed.session_id.is_some());
+        assert_eq!(gateway.sessions.read().await.len(), 1);
+        let session = &error.details.as_ref().unwrap()["session"];
+        assert_eq!(session["controller"], caller.identity);
+        close.session_id = failed.session_id;
+        if let Some(lease) = session.get("write_lease") {
+            close.parameters["lease_id"] = lease["lease_id"].clone();
+        }
+        assert!(
+            gateway
+                .dispatch_inner(close, &caller, false, mode)
+                .await
+                .error
+                .is_none()
+        );
+        assert_eq!(gateway.session_slots.available_permits(), 1);
+    }
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
 async fn concurrent_idempotent_create_runs_once() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;

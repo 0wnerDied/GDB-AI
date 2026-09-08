@@ -80,12 +80,16 @@ async function canonical(client, program) {
 }
 
 async function projected(client, program) {
-  const created = await client.callTool("gdb_session", { action: "create" });
-  assert.equal(created.api_version, undefined);
-  assert.equal(created.revision, undefined);
-  assert.equal(created.result.write_lease, undefined);
-  assert.equal(created.result.controller, created.result.caller_identity);
-  const sessionId = created.result.session_id;
+  const launched = await client.callTool("gdb_session", {
+    action: "launch", program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
+    inspect: [{ view: "stack", limit: 4 }],
+  });
+  assert.equal(launched.api_version, undefined);
+  assert.equal(launched.revision, undefined);
+  const created = launched.result.session;
+  assert.equal(created.write_lease, undefined);
+  assert.equal(created.controller, created.caller_identity);
+  const sessionId = created.session_id;
   const expected = Buffer.from("environment: sdk-世界\nmarker reached\ninput received: \0\n");
   const observer = new Client(endpoint, { protocolVersion, clientName: "typescript-observer" });
   let controller = client;
@@ -95,10 +99,6 @@ async function projected(client, program) {
   let shared;
   try {
     await observer.connect();
-    const launched = await call("gdb_session", {
-      action: "launch", program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
-      inspect: [{ view: "stack", limit: 4 }],
-    });
     assert.ok(launched.state.stop_id);
     assert.equal(launched.state.backend, undefined);
     assert.ok(launched.result.observations.stack.frames.length);
@@ -142,7 +142,7 @@ async function projected(client, program) {
     assert.deepEqual(shared.failures, captured.failures);
     const peerStatus = await observer.callTool("gdb_session", { action: "status", session_id: sessionId });
     const peerIdentity = peerStatus.result.caller_identity;
-    assert.notEqual(peerIdentity, created.result.controller);
+    assert.notEqual(peerIdentity, created.controller);
     const transferred = await call("gdb_session", { action: "handoff", to: peerIdentity });
     assert.equal(transferred.result.controller, peerIdentity);
     controller = observer;

@@ -32,7 +32,10 @@ impl Gateway {
         mode: RequestMode,
     ) -> Result<OperationResult> {
         let result = match request.method {
-            CanonicalMethod::SessionCreate => self.session_create(request, caller, mode).await,
+            CanonicalMethod::SessionCreate => self
+                .session_create(request, caller, mode)
+                .await
+                .map(|(_, result)| result),
             CanonicalMethod::SessionGet => self.session_get(request, caller).await,
             CanonicalMethod::SessionList => self.session_list(caller).await,
             CanonicalMethod::SessionClose => self.session_close(request).await,

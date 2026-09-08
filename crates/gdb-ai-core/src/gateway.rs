@@ -207,7 +207,7 @@ impl Gateway {
 
     async fn dispatch_inner(
         &self,
-        request: ApiRequest,
+        mut request: ApiRequest,
         caller: &Caller,
         admitted: bool,
         mode: RequestMode,
@@ -284,8 +284,9 @@ impl Gateway {
         // state. Retain the cheap session entry and clone state only on error
         // instead of copying growing registries before every Agent request.
         let initial_entry = self.entry_for_request(&request).await;
+        let mut created_session = None;
         let result = self
-            .dispatch_checked(&request, caller, admitted, mode)
+            .dispatch_checked(&mut request, caller, admitted, mode, &mut created_session)
             .await;
         let mut response = match result {
             Ok((state, result, warnings)) => {
@@ -311,10 +312,30 @@ impl Gateway {
                     .entry_for_request(&request)
                     .await
                     .map(|entry| entry.handle.state())
-                    .or_else(|| initial_entry.map(|entry| entry.handle.state()));
+                    .or_else(|| initial_entry.map(|entry| entry.handle.state()))
+                    .or_else(|| {
+                        created_session
+                            .as_ref()
+                            .map(|(entry, _)| entry.handle.state())
+                    });
                 ApiResponse::failure(&request, error, state)
             }
         };
+        if let Some((_, session)) = created_session {
+            if let Some(error) = response.error.as_mut() {
+                // Keep timeout outcome markers at their existing root so
+                // operation recovery still recognizes an unknown MI effect.
+                let mut details = match error.details.take() {
+                    Some(Value::Object(details)) => details,
+                    Some(cause) => serde_json::Map::from_iter([("cause".into(), cause)]),
+                    None => serde_json::Map::new(),
+                };
+                details.insert("session".into(), session);
+                error.details = Some(Value::Object(details));
+            } else if let Some(result) = response.result.as_mut() {
+                result["session"] = session;
+            }
+        }
         // 2026-09-05: Bounding the full canonical envelope turned small Agent
         // observations into artifacts before projection removed its registries.
         if mode == RequestMode::Canonical {
@@ -366,10 +387,11 @@ impl Gateway {
 
     async fn dispatch_checked(
         &self,
-        request: &ApiRequest,
+        request: &mut ApiRequest,
         caller: &Caller,
         admitted: bool,
         mode: RequestMode,
+        created_session: &mut Option<(Arc<SessionEntry>, Value)>,
     ) -> Result<(
         Option<crate::domain::SessionState>,
         OperationResult,
@@ -384,7 +406,7 @@ impl Gateway {
         self.check_rate(&caller.identity).await?;
 
         let mut effect = effect_for_request(request);
-        let entry = self.entry_for_request(request).await;
+        let mut entry = self.entry_for_request(request).await;
         if let Some(session_id) = request
             .session_id
             .as_deref()
@@ -414,7 +436,7 @@ impl Gateway {
                     entry
                         .as_ref()
                         .map(|entry| entry.handle.with_state(|state| state.revision)),
-                    &serde_json::to_value(request)?,
+                    &serde_json::to_value(&*request)?,
                     "denied",
                 )?;
                 return Err(Error::new(
@@ -426,7 +448,16 @@ impl Gateway {
         let profile = entry
             .as_ref()
             .map(|entry| entry.handle.profile())
-            .unwrap_or(self.config.security.default_profile);
+            .unwrap_or_else(|| {
+                if request.method == CanonicalMethod::TargetLaunch
+                    && request.session_id.is_none()
+                    && caller.admin
+                {
+                    Profile::RawAdmin
+                } else {
+                    self.config.security.default_profile
+                }
+            });
         if let Some(entry) = &entry
             && matches!(
                 request.method,
@@ -493,10 +524,50 @@ impl Gateway {
                 entry
                     .as_ref()
                     .map(|entry| entry.handle.with_state(|state| state.revision)),
-                &serde_json::to_value(request)?,
+                &serde_json::to_value(&*request)?,
                 "denied",
             )?;
             return Err(error);
+        }
+
+        // 2026-09-09: Requiring a separate create split a native launch into
+        // two Agent turns. Bind a fresh session before the existing admission
+        // locks, and retain its identity and final state through failure/close.
+        if request.method == CanonicalMethod::TargetLaunch && request.session_id.is_none() {
+            let (created_entry, mut created) = self
+                .session_create(
+                    &ApiRequest {
+                        api_version: request.api_version.clone(),
+                        request_id: request.request_id.clone(),
+                        session_id: None,
+                        method: CanonicalMethod::SessionCreate,
+                        expected_revision: None,
+                        idempotency_key: None,
+                        parameters: serde_json::json!({}),
+                    },
+                    caller,
+                    mode,
+                )
+                .await?;
+            request.session_id = Some(created_entry.handle.id().0.clone());
+            if mode == RequestMode::Canonical {
+                request.expected_revision = created["state"]["revision"].as_u64();
+                request.parameters["lease_id"] = created["write_lease"]["lease_id"].clone();
+            }
+            created.as_object_mut().unwrap().retain(|field, _| {
+                matches!(
+                    field.as_str(),
+                    "session_id" | "profile" | "caller_identity" | "controller" | "write_lease"
+                )
+            });
+            *created_session = Some((created_entry.clone(), created));
+            if let Err(error) = self.bind_operation_session(&created_entry, caller).await {
+                let _ = created_entry.handle.close().await;
+                self.retire_session(&created_entry.handle.id().0, &created_entry)
+                    .await;
+                return Err(error);
+            }
+            entry = Some(created_entry);
         }
 
         // 2026-08-28: A continue-and-wait request holds the mutation guard.
@@ -593,7 +664,7 @@ impl Gateway {
                     effect,
                     false,
                     Some(revision),
-                    &serde_json::to_value(request)?,
+                    &serde_json::to_value(&*request)?,
                     "rejected",
                 )?;
                 return Err(error);
@@ -633,7 +704,7 @@ impl Gateway {
         // mutations retain one copy for durable audit.
         let journal_through_actor = entry.is_some() && !reads_retained_observations(request.method);
         let mut request_value = (journal_through_actor || durable_audit)
-            .then(|| serde_json::to_value(request))
+            .then(|| serde_json::to_value(&*request))
             .transpose()?;
         if journal_through_actor && let Some(entry) = &entry {
             let journal_request = if durable_audit {
@@ -917,6 +988,15 @@ impl Gateway {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
                 "method requires session_id",
+            ));
+        }
+        if request.method == CanonicalMethod::TargetLaunch
+            && request.session_id.is_none()
+            && (request.expected_revision.is_some() || request.parameters.get("lease_id").is_some())
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "new-session launch cannot reference an existing revision or lease",
             ));
         }
         // 2026-08-28: The envelope schema accepted arbitrary method

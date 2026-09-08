@@ -125,7 +125,7 @@ impl ActiveOperation {
         self.cancelled.load(Ordering::Acquire)
     }
 
-    fn require_active(&self) -> Result<()> {
+    pub(crate) fn require_active(&self) -> Result<()> {
         if self.is_cancelled() {
             Err(Error::new(ErrorCode::Cancelled, "operation was cancelled"))
         } else {
@@ -141,7 +141,7 @@ pub(crate) async fn scope_operation<T>(
     ACTIVE_OPERATION.scope(operation, future).await
 }
 
-fn active_operation() -> Option<ActiveOperation> {
+pub(crate) fn active_operation() -> Option<ActiveOperation> {
     ACTIVE_OPERATION.try_with(Clone::clone).ok()
 }
 

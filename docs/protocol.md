@@ -5,12 +5,25 @@ release qualification are separate: the schema follows the version-1
 compatibility rules, while [`compatibility.md`](compatibility.md) records
 which target matrices have actually run. Requests carry a request ID,
 optional session ID, method, expected revision, idempotency key, and
-parameters. Mutations require the current revision and write lease.
+parameters. Mutations of existing canonical sessions require the current
+revision and write lease.
 Stop-sensitive canonical reads require the current `stop_id` or an explicit
 `accept_current_stop` binding.
 MCP-created sessions use fixed caller control without write-lease renewal.
 Projected tools omit canonical revision and lease fields. An omitted projected
 `stop_id` binds the current stop; a supplied ID remains a stale-stop pin.
+
+`target.launch` without `session_id` creates and controls a new session using
+the same profile selection as `session.create`. Do not supply an existing
+revision or lease in that form. `result.session` contains the new `session_id`,
+`profile`, `caller_identity`, and `controller`; canonical callers also receive
+`write_lease` there. A failure after creation keeps this metadata in
+`error.details.session` and preserves the session for inspection or explicit
+close. Cancellation during session creation prevents target startup and cleans
+up a session returned after cancellation. Once bound, operation status and
+cancellation use the new session normally, including after waiter detachment.
+Requests with an existing `session_id` keep their previous behavior. Use a
+separate create for pre-launch setup or an explicit administrative profile choice.
 
 Session recovery authority is separate from a business write lease. The owner
 or an administrator may call `session.attempt_recovery` or

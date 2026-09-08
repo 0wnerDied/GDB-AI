@@ -139,15 +139,14 @@ const client = new Client("http://127.0.0.1:8080/mcp", {
 });
 try {
   await client.connect();
-  const created = await client.callTool<{ session_id: string }>(
-    "gdb_session", { action: "create" },
-  );
-  const session_id = created.result!.session_id;
-  try {
-    const launched = await client.callTool("gdb_session", {
-      action: "launch", session_id, program: "/workspace/app", stop: "main",
+  const launched = await client.callTool<{ session: { session_id: string } }>(
+    "gdb_session", {
+      action: "launch", program: "/workspace/app", stop: "main",
       inspect: [{ view: "stack", limit: 8 }],
-    });
+    },
+  );
+  const session_id = launched.result!.session.session_id;
+  try {
     console.log(launched.result);
     await client.callTool("gdb_run", { session_id, action: "continue" });
   } finally {
@@ -160,7 +159,11 @@ try {
 ```
 
 The Python equivalent uses `Client(..., protocol_version="2026-07-28")`
-and `call_tool`. TypeScript also provides `Session.create(client)` and
+and `call_tool`. If launch creates a session but then raises `ApiError`, its
+`response.error.details.session` retains the ID and control metadata; close
+or reuse that session. Passing an existing `session_id` still launches in it;
+use a separate create when pre-launch setup is required.
+TypeScript also provides `Session.create(client)` and
 `session.call`, with the same canonical semantics as Python. The existing
 TypeScript constructor `new Client(endpoint, token, allowRaw)` remains
 supported.

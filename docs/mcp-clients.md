@@ -161,22 +161,20 @@ gdb_batch         gdb_events
 ```
 
 The initialization response also teaches the Agent the stateful workflow:
-create a session, retain its `session_id`, launch a target, use the current
+launch with optional session creation, retain its `session_id`, use the current
 stop for inspection, reuse the session across attempts, and close it when
 finished. Supply `stop_id` only when a later read must reject a newer stop.
 
 ## Native crash and thread diagnosis
 
-Create a session with `gdb_session` action `create` and retain its `session_id`.
-Then launch a native program and collect its initial crash evidence in one
-`tools/call` request:
+Launch a native program and collect its initial crash evidence in one
+`tools/call` request. Omitting `session_id` creates the session too:
 
 ```json
 {
   "name": "gdb_session",
   "arguments": {
     "action": "launch",
-    "session_id": "<session-id>",
     "program": "/workspace/app",
     "stop": "none",
     "inspect": [{"view": "crash", "profile": "brief"}]
@@ -185,7 +183,11 @@ Then launch a native program and collect its initial crash evidence in one
 ```
 
 With this inspection plan, launch waits for a stop or exit and returns bounded
-target output with the collected observations. A normal exit has no stopped
+target output with the collected observations. Keep `result.session.session_id`
+for later calls. A failure after creation retains that metadata under
+`error.details.session`, so the session can still be inspected or closed.
+Use `create` separately only when setup must precede launch.
+A normal exit has no stopped
 observations. Inspection failure preserves the execution outcome; do not repeat
 execution merely to recover a failed read. Use `gdb_run` action `restart` with
 the same `inspect` plan for another run in the existing session.
