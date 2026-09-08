@@ -36,4 +36,16 @@ mod tests {
     fn quotes_binary_as_c_string() {
         assert_eq!(quote_c_string(b"a\n\"\\\xff"), "\"a\\n\\\"\\\\\\377\"");
     }
+
+    #[test]
+    fn every_byte_round_trips_individually_and_together() {
+        let bytes = (0..=u8::MAX).collect::<Vec<_>>();
+        for value in std::iter::once(bytes.as_slice()).chain(bytes.chunks(1)) {
+            let record = format!("~{}", quote_c_string(value));
+            assert_eq!(
+                crate::parse_record(record.as_bytes(), crate::MiLimits::default()).unwrap(),
+                crate::MiRecord::ConsoleStream(value.to_vec())
+            );
+        }
+    }
 }

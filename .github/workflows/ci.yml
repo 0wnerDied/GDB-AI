@@ -70,14 +70,25 @@ jobs:
             --version 0.13.2 --locked
       - name: Run fuzz campaigns
         run: |
-          mkdir -p "$RUNNER_TEMP/mi-corpus" "$RUNNER_TEMP/reducer-corpus"
-          cp tests/mi-fixtures/*.mi "$RUNNER_TEMP/mi-corpus/"
-          cp fuzz/corpus/state_reducer/*.json "$RUNNER_TEMP/reducer-corpus/"
+          mkdir -p "$RUNNER_TEMP/mi_parser-corpus" \
+            "$RUNNER_TEMP/mi_framer-corpus" "$RUNNER_TEMP/state_reducer-corpus"
+          cp tests/mi-fixtures/*.mi "$RUNNER_TEMP/mi_framer-corpus/"
+          cp fuzz/corpus/state_reducer/*.json "$RUNNER_TEMP/state_reducer-corpus/"
+          # 2026-09-08: Multi-record seeds made the single-record parser stop
+          # at trailing input. Keep transcripts only for the framing target.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          corpus = Path(os.environ["RUNNER_TEMP"]) / "mi_parser-corpus"
+          for fixture in Path("tests/mi-fixtures").glob("*.mi"):
+              for index, record in enumerate(fixture.read_bytes().split(b"\n")):
+                  record = record.removesuffix(b"\r")
+                  if record:
+                      (corpus / f"{fixture.stem}-{index}.mi").write_bytes(record)
+          PY
           for target in mi_parser mi_framer state_reducer; do
-            corpus="$RUNNER_TEMP/mi-corpus"
-            if [ "$target" = state_reducer ]; then
-              corpus="$RUNNER_TEMP/reducer-corpus"
-            fi
+            corpus="$RUNNER_TEMP/$target-corpus"
             log="$RUNNER_TEMP/$target.log"
             if cargo +nightly-2026-08-01 fuzz run "$target" "$corpus" -- \
               -max_total_time=60 -max_len=65536 -timeout=5 \

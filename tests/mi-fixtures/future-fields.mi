@@ -2,4 +2,5 @@
 =future-notification,new-field=[item={value="x"}]
 ~"console\n"
 @"\377binary"
+8^done,bkpt={number="1",script={"silent","echo \"ready\"\n"}}
 (gdb)
