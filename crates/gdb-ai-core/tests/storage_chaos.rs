@@ -70,7 +70,8 @@ async fn persistence_failures_preserve_debugging_unless_durability_is_required()
         )
         .await;
         assert!(launched.error.is_none(), "{:?}", launched.error);
-        let stopped = launched.state.unwrap();
+        assert!(launched.state.is_none());
+        let stopped = launched.semantics.unwrap().state.unwrap();
         let connection = rusqlite::Connection::open(directory.path().join("state.sqlite")).unwrap();
         if !fill_journal {
             connection.execute_batch(
@@ -97,7 +98,7 @@ async fn persistence_failures_preserve_debugging_unless_durability_is_required()
         }
         assert!(recorded.error.is_none(), "{:?}", recorded.error);
         let current = call(session, "session.get", json!({})).await.state.unwrap();
-        assert_eq!(current.stop_id, stopped.stop_id);
+        assert_eq!(json!(current.stop_id), stopped["stop_id"]);
         assert!(
             current
                 .limitations

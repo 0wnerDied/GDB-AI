@@ -4,6 +4,9 @@ import { Session, type ApiResponse } from "./dist/index.js";
 
 function check(session: Session) {
   session.launch({ program: "/workspace/app", argv: ["a b"], stop: "main" });
+  session.launch({ program: "/workspace/app", stop: "main", inspect: [{ view: "stack" }] });
+  session.launch({ program: "/workspace/app", stop: "none", wait: { until: "settled" },
+    inspect: [{ view: "crash", profile: "brief" }] });
   session.control({ action: "until", location: "main", wait: { until: "stopped" } });
   session.control({ action: "continue", input: { text: "1\n" },
     wait: { until: "snapshot" }, inspect: [{ view: "threads", stack_depth: 8 }] });
@@ -17,6 +20,8 @@ function check(session: Session) {
 
   // @ts-expect-error Launch requires the executable.
   session.launch({ argv: ["/workspace/app"] });
+  // @ts-expect-error Launch inspection cannot follow an accepted-only wait.
+  session.launch({ program: "/workspace/app", wait: { until: "accepted" }, inspect: [{ view: "stack" }] });
   // @ts-expect-error Unknown wait policy.
   session.control({ action: "continue", wait: { until: "stop" } });
   // @ts-expect-error Run-until requires a location.

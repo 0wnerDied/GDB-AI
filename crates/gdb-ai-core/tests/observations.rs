@@ -34,7 +34,7 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     let executable = directory.path().join("observations");
     std::fs::write(
         &source,
-        "volatile int observed = 7;\nint main(void) {\n  observed += 1;\n  observed += 2;\n  return observed != 10;\n}\n",
+        "#include <stdio.h>\nvolatile int observed = 7;\nint main(void) {\n  observed += 1;\n  observed += 2;\n  puts(\"observations done\");\n  return observed != 10;\n}\n",
     )
     .unwrap();
     assert!(
@@ -83,6 +83,38 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
         .as_str()
         .unwrap()
         .to_owned();
+    let before_launch = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    for (inspect, until) in [
+        (json!([{"view": "stack"}]), "accepted"),
+        (
+            json!([
+                {"name": "a", "view": "memory", "address": "0x1000", "length": 5},
+                {"name": "b", "view": "memory", "address": "0x2000", "length": 4}
+            ]),
+            "snapshot",
+        ),
+    ] {
+        let rejected = gateway
+            .dispatch(
+                request(
+                    "invalid-launch-inspection",
+                    Some(&session_id),
+                    "target.launch",
+                    created.revision,
+                    json!({
+                        "program": executable, "lease_id": lease_id,
+                        "wait": {"until": until}, "inspect": inspect
+                    }),
+                ),
+                &caller,
+            )
+            .await;
+        assert_eq!(rejected.error.unwrap().code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            metric_value(&gateway.metrics(), "gdbai_commands_total"),
+            before_launch
+        );
+    }
     let launched = successful(
         gateway
             .dispatch(
@@ -96,7 +128,11 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
                         "cwd": directory.path(),
                         "lease_id": lease_id,
                         "stop": "main",
-                        "wait": {"until": "snapshot", "timeout_ms": 5000}
+                        "wait": {"until": "snapshot", "timeout_ms": 5000},
+                        "inspect": [
+                            {"view": "stack", "limit": 1},
+                            {"name": "missing", "view": "evaluate", "expression": "missing_symbol"}
+                        ]
                     }),
                 ),
                 &caller,
@@ -112,6 +148,19 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
         .unwrap()
         .0
         .clone();
+    assert!(!launched.semantics.as_ref().unwrap().complete);
+    let launch_result = launched.result.as_ref().unwrap();
+    assert_eq!(launch_result["observation_context"]["stop_id"], first_stop);
+    assert_eq!(
+        launch_result["observations"]["stack"]["frames"][0]["function"],
+        "main"
+    );
+    assert_eq!(
+        launch_result["observation_failures"]["missing"]["code"],
+        "GDB_ERROR"
+    );
+    assert!(launch_result["command"]["record"].is_object());
+    assert!(launch_result["capabilities"].is_object());
     let tracked = successful(
         gateway
             .dispatch(
@@ -873,6 +922,83 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     assert_eq!(
         exited.result.as_ref().unwrap()["observation_status"],
         "not_collected"
+    );
+    let before_restart = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let rejected = gateway
+        .dispatch_agent(
+            request(
+                "invalid-restart-inspection",
+                Some(&session_id),
+                "target.restart",
+                None,
+                json!({"wait": {"until": "running"}, "inspect": [{"view": "stack"}]}),
+            ),
+            &next_controller,
+        )
+        .await;
+    assert_eq!(rejected.error.unwrap().code, ErrorCode::InvalidArgument);
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total"),
+        before_restart
+    );
+    let restarted = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "restart-and-inspect",
+                    Some(&session_id),
+                    "target.restart",
+                    None,
+                    json!({"stop": "main", "inspect": [{"view": "stack", "limit": 1}]}),
+                ),
+                &next_controller,
+            )
+            .await,
+    );
+    let restart_context = restarted
+        .semantics
+        .as_ref()
+        .unwrap()
+        .context
+        .as_ref()
+        .unwrap();
+    assert!(restarted.semantics.as_ref().unwrap().complete);
+    assert_ne!(restart_context.stop_id.0, second_stop);
+    let restart_result = restarted.result.as_ref().unwrap();
+    assert_eq!(
+        restart_result["observation_context"]["stop_id"],
+        restart_context.stop_id.0
+    );
+    assert_eq!(
+        restart_result["observations"]["stack"]["frames"][0]["function"],
+        "main"
+    );
+    assert!(restart_result.get("command").is_none());
+    assert!(restart_result.get("capabilities").is_none());
+    let rerun = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "restart-to-exit",
+                    Some(&session_id),
+                    "target.restart",
+                    None,
+                    json!({"stop": "none", "inspect": [{"view": "stack"}]}),
+                ),
+                &next_controller,
+            )
+            .await,
+    );
+    assert!(!rerun.semantics.as_ref().unwrap().complete);
+    assert_eq!(
+        rerun.result.as_ref().unwrap()["observation_status"],
+        "not_collected"
+    );
+    assert!(
+        rerun.result.as_ref().unwrap()["output"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("observations done")
     );
     successful(
         gateway

@@ -36,10 +36,10 @@ the canonical API.
 Mapping records retain start and end addresses, file offset, permissions,
 and path. Provider-specific provenance may accompany those facts.
 
-Ordinary reads, values, snapshots, batches, and execution turns use a core
-semantic result. Canonical responses add `semantics` with capture `context`,
-`complete`, `historical`, and `projection: "detailed"`; execution may also
-include the compact matched `state`. MCP projects these as top-level
+Ordinary reads, values, snapshots, batches, launch/restart, and execution turns
+use a core semantic result. Canonical responses add `semantics` with capture
+`context`, `complete`, `historical`, and `projection: "detailed"`; execution may
+also include the compact matched `state`. MCP projects these as top-level
 `context`, `complete`, `historical` (when true), and `state`, alongside
 `result`, warnings, pagination, artifacts, and evidence. Facts stay inline
 within the response limit. Canonical diagnostics retain legacy MI replies;
@@ -47,7 +47,10 @@ the compact projection does not construct or serialize those replies.
 Root-level per-read journal sequence markers remain in detailed diagnostics
 and promoted evidence, not in newly captured item facts. Item comparisons do
 not treat these transport markers as target-state changes.
-Legacy lifecycle, raw, and specialized provider responses remain compatible.
+Launch/restart keep full state, command replies, and capabilities in canonical
+diagnostics; their compact projection retains startup policy, coordination
+state, requested observations, bounded output, and evidence. Other lifecycle, raw,
+and specialized provider responses remain compatible.
 
 Stdio and Unix stream clients may attach `_meta.progressToken` to a request.
 GDB/AI emits ordered `notifications/progress` records before and after the
@@ -58,21 +61,26 @@ waiter detachment and target control are distinct operations.
 
 Wait objects accept `accepted`, `running`, `stopped`, `settled`, `snapshot`,
 and `exited`. `settled` completes at the first attributable stop or terminal
-inferior state and reports that branch in `settled_by`. An omitted launch or
-restart wait observes `running` for `stop: "none"`, and the selected stop plus
-its snapshot for other start policies; an explicit `accepted` remains
-non-blocking. Canonical execution control without a wait is accepted
-immediately; projected `gdb_run` control waits until settled by default.
+inferior state; execution control/wait reports that branch in `settled_by`.
+An omitted launch or restart wait observes `running` for `stop: "none"`
+without inspection, and the selected stop plus its snapshot for other start
+policies. With `inspect`, `stop: "none"` instead defaults to `settled`.
+An explicit `accepted` remains non-blocking and cannot include inspection.
+Canonical execution control without a wait is accepted immediately; projected
+`gdb_run` control waits until settled by default.
 Execution control and wait requests may include one bounded byte-exact `input`
 and bounded `inspect` views. Input is fed before the wait, and the result
 reports only a partial write or error; success adds no redundant input echo. A
 stopped result returns views from that same stop; an exited result returns no
-observations. Run/wait `inspect`, `inspection.batch.requests`, and
+observations. `target.launch` and `target.restart` also accept `inspect`, so
+starting, waiting, and collecting the initial diagnosis need one request.
+An explicit wait with inspection must be `stopped`, `settled`, or `snapshot`.
+Launch/restart and run/wait `inspect`, `inspection.batch.requests`, and
 `inspection.snapshot.inspect` use the same item contract. Each turn accepts
 1–16 uniquely named items (`name` defaults to `view`), at most 16 total
 expressions, and at most `limits.memory_read_bytes` total bytes across
-explicit memory reads. The whole plan is validated before run control or
-input delivery.
+explicit memory reads. The whole plan is validated before target startup,
+run control, or input delivery.
 For snapshots, `inspect` without `profile` selects only those items and
 reports `profile: "custom"`. An explicit profile expands into standard read
 items in the same plan; its items also count toward the sixteen-item limit.

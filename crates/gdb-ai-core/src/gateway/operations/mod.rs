@@ -65,12 +65,16 @@ impl Gateway {
             CanonicalMethod::SessionEvent => self.session_event(request).await,
             CanonicalMethod::OperationGet => self.operation_get(request, caller).await,
             CanonicalMethod::OperationCancel => self.operation_cancel(request, caller).await,
-            CanonicalMethod::TargetLaunch => self.target_launch(request).await,
+            CanonicalMethod::TargetLaunch => {
+                return self.target_launch(request).await.map(Into::into);
+            }
             CanonicalMethod::TargetAttach => self.target_attach(request).await,
             CanonicalMethod::TargetConnectRemote => self.target_connect_remote(request).await,
             CanonicalMethod::TargetOpenCore => self.target_open_core(request).await,
             CanonicalMethod::TargetDetach => self.target_detach(request).await,
-            CanonicalMethod::TargetRestart => self.target_restart(request).await,
+            CanonicalMethod::TargetRestart => {
+                return self.target_restart(request).await.map(Into::into);
+            }
             CanonicalMethod::TargetKill => self.target_kill(request).await,
             CanonicalMethod::ExecutionControl => {
                 return self.execution_control(request).await.map(Into::into);

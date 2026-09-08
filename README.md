@@ -131,6 +131,26 @@ libraries, symbols, and runtime helpers.
 
 ### Run and inspect
 
+After creating a session, launch and collect crash evidence in one request:
+
+```json
+{
+  "name": "gdb_session",
+  "arguments": {
+    "action": "launch",
+    "session_id": "<session-id>",
+    "program": "/workspace/app",
+    "stop": "none",
+    "inspect": [{"view": "crash", "profile": "brief"}]
+  }
+}
+```
+
+With `inspect`, launch and restart wait for a stop or exit when `stop` is
+`none`; other start policies collect at their selected startup stop. The
+response includes bounded target output and observations from that stop.
+A normal exit returns no stop observations and is not an inspection failure.
+
 For an existing stopped session with a breakpoint configured, the following
 `tools/call` parameters supply input, continue, wait, and inspect the resulting
 stop in one request:

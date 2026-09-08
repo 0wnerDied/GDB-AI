@@ -182,11 +182,15 @@ pub(super) fn breakpoint_scope(
     Ok(command)
 }
 
-fn validate_inspection_wait(parameters: &Value, wait: Option<&WaitSpec>) -> Result<()> {
-    if parameters.get("inspect").is_some()
-        && wait
-            .is_none_or(|wait| !matches!(wait.until.as_str(), "stopped" | "settled" | "snapshot"))
-    {
+pub(super) fn validate_turn_inspection(
+    parameters: &Value,
+    wait: Option<&WaitSpec>,
+    maximum_memory_bytes: usize,
+) -> Result<()> {
+    let Some(inspect) = parameters.get("inspect") else {
+        return Ok(());
+    };
+    if wait.is_none_or(|wait| !matches!(wait.until.as_str(), "stopped" | "settled" | "snapshot")) {
         // 2026-09-01: Observing after an accepted/running fence raced the
         // inferior and could not describe the stop caused by this action.
         // Reject before execution; stop-producing waits remain one turn.
@@ -195,7 +199,7 @@ fn validate_inspection_wait(parameters: &Value, wait: Option<&WaitSpec>) -> Resu
             "inspect requires a stopped, settled, or snapshot wait",
         ));
     }
-    Ok(())
+    validate_observation_requests(inspect, maximum_memory_bytes)
 }
 
 fn catchpoint_command(kind: &str) -> Result<MiCommand> {
@@ -236,10 +240,11 @@ impl Gateway {
     pub(super) async fn execution_control(&self, request: &ApiRequest) -> Result<SemanticResult> {
         let action = string(&request.parameters, "action")?;
         let wait = wait_spec(&request.parameters)?;
-        validate_inspection_wait(&request.parameters, wait.as_ref())?;
-        if let Some(inspect) = request.parameters.get("inspect") {
-            validate_observation_requests(inspect, self.config.limits.memory_read_bytes)?;
-        }
+        validate_turn_inspection(
+            &request.parameters,
+            wait.as_ref(),
+            self.config.limits.memory_read_bytes,
+        )?;
         let input = turn_input(&request.parameters)?;
         if action == "interrupt" && input.is_some() {
             return Err(Error::new(
@@ -416,10 +421,11 @@ impl Gateway {
         let wait = wait_spec(&request.parameters)?.ok_or_else(|| {
             Error::new(ErrorCode::InvalidArgument, "wait parameters are required")
         })?;
-        validate_inspection_wait(&request.parameters, Some(&wait))?;
-        if let Some(inspect) = request.parameters.get("inspect") {
-            validate_observation_requests(inspect, self.config.limits.memory_read_bytes)?;
-        }
+        validate_turn_inspection(
+            &request.parameters,
+            Some(&wait),
+            self.config.limits.memory_read_bytes,
+        )?;
         let report_settled_by = wait.until == "settled";
         let input = feed_inferior(&entry, input, Duration::from_millis(wait.timeout_ms)).await?;
         // 2026-08-28: Waiting without the operation's creation baseline let

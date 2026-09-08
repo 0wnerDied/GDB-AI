@@ -643,6 +643,7 @@ impl CanonicalMethod {
                 optional("detach_on_fork", Boolean),
                 optional("follow_exec", Enum(&["same-inferior"])),
                 optional("wait", WAIT_KIND),
+                optional("inspect", TURN_INSPECTION_KIND),
             ]),
             TargetAttach => MethodContract::plain(vec![
                 required("pid", Unsigned),
@@ -666,6 +667,7 @@ impl CanonicalMethod {
                 ),
                 optional("stop_at_entry", Boolean),
                 optional("wait", WAIT_KIND),
+                optional("inspect", TURN_INSPECTION_KIND),
             ]),
             TargetKill => MethodContract::plain(vec![optional("wait", WAIT_KIND)]),
             ExecutionControl => MethodContract::contextual(vec![

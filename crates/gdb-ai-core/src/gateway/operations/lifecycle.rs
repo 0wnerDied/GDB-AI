@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use super::{
     context::{WaitSpec, apply_wait, apply_wait_baseline, wait_if_requested, wait_spec},
     encoding::byte_content,
+    execution::{append_turn_output, validate_turn_inspection},
     mi::frame_summary,
     request::{parameters, required_session, string, unsigned},
 };
@@ -22,7 +23,7 @@ use crate::{
         Caller, Controller, Gateway, RequestMode, SessionEntry, now_unix_ms, same_principal,
     },
     policy::Profile,
-    protocol::ApiRequest,
+    protocol::{ApiRequest, SemanticResult},
     session::SessionHandle,
 };
 
@@ -564,7 +565,7 @@ impl Gateway {
         }))
     }
 
-    pub(super) async fn target_launch(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn target_launch(&self, request: &ApiRequest) -> Result<SemanticResult> {
         #[derive(Deserialize)]
         #[serde(default)]
         struct Parameters {
@@ -659,12 +660,19 @@ impl Gateway {
             wait.validate()?;
         }
         let wait = parameters.wait.unwrap_or_else(|| {
-            parameters
-                .stop
-                .default_wait(self.config.server.wait_timeout_ms)
+            parameters.stop.default_wait(
+                self.config.server.wait_timeout_ms,
+                request.parameters.get("inspect").is_some(),
+            )
         });
+        validate_turn_inspection(
+            &request.parameters,
+            Some(&wait),
+            self.config.limits.memory_read_bytes,
+        )?;
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
+        let output_offset = entry.handle.inferior_output_position();
         let aslr = parameters.aslr.clone();
         let disable_randomization = match aslr.as_str() {
             "preserve" => "off",
@@ -766,13 +774,17 @@ impl Gateway {
             .await?;
         let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
-        Ok(json!({
-            "command": reply,
-            "state": state,
-            "capabilities": capabilities,
+        let mut result = json!({
             "start_policy": start_policy.as_str(),
             "aslr": {"requested": aslr, "backend_managed": aslr_managed}
-        }))
+        });
+        append_turn_output(&entry, output_offset, &mut result).await?;
+        Ok(self
+            .append_stop_observations(request, &state, result)
+            .await
+            .state("state", state)
+            .command(&entry.handle.id().0, "command", reply)
+            .capabilities(capabilities))
     }
 
     pub(super) async fn target_attach(&self, request: &ApiRequest) -> Result<Value> {
@@ -977,7 +989,7 @@ impl Gateway {
         Ok(json!({ "command": reply, "state": entry.handle.state() }))
     }
 
-    pub(super) async fn target_restart(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn target_restart(&self, request: &ApiRequest) -> Result<SemanticResult> {
         #[derive(Default, Deserialize)]
         #[serde(default)]
         struct Parameters {
@@ -998,11 +1010,20 @@ impl Gateway {
                 }
             })
         });
-        let wait = parameters
-            .wait
-            .unwrap_or_else(|| start_policy.default_wait(self.config.server.wait_timeout_ms));
+        let wait = parameters.wait.unwrap_or_else(|| {
+            start_policy.default_wait(
+                self.config.server.wait_timeout_ms,
+                request.parameters.get("inspect").is_some(),
+            )
+        });
+        validate_turn_inspection(
+            &request.parameters,
+            Some(&wait),
+            self.config.limits.memory_read_bytes,
+        )?;
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
+        let output_offset = entry.handle.inferior_output_position();
         let wait_baseline = WaitBaseline::from(&baseline);
         let reply = entry.handle.command(start_policy.command()?).await?;
         let state = apply_wait_baseline(
@@ -1013,12 +1034,14 @@ impl Gateway {
         )
         .await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
-        Ok(json!({
-            "command": reply,
-            "state": state,
-            "capabilities": capabilities,
-            "start_policy": start_policy.as_str()
-        }))
+        let mut result = json!({"start_policy": start_policy.as_str()});
+        append_turn_output(&entry, output_offset, &mut result).await?;
+        Ok(self
+            .append_stop_observations(request, &state, result)
+            .await
+            .state("state", state)
+            .command(&entry.handle.id().0, "command", reply)
+            .capabilities(capabilities))
     }
 
     pub(super) async fn target_kill(&self, request: &ApiRequest) -> Result<Value> {
@@ -1071,15 +1094,18 @@ impl StartPolicy {
         }
     }
 
-    fn default_wait(self, timeout_ms: u64) -> WaitSpec {
+    fn default_wait(self, timeout_ms: u64, inspect: bool) -> WaitSpec {
         // 2026-08-31: Omitted launch and restart waits raced their async state
         // updates. Return an observed run or complete stop; `accepted` remains
         // the explicit non-blocking policy.
         WaitSpec {
-            until: if matches!(self, Self::None) {
-                "running"
-            } else {
-                "snapshot"
+            // 2026-09-08: Launch/restart inspection needs an attributable
+            // stop, not just MI acceptance. Starting without an initial stop
+            // waits for stop-or-exit with inspect; async starts stay unchanged.
+            until: match (self, inspect) {
+                (Self::None, true) => "settled",
+                (Self::None, false) => "running",
+                _ => "snapshot",
             }
             .into(),
             timeout_ms,
@@ -1309,8 +1335,9 @@ mod tests {
             StartPolicy::None.command().unwrap().encoded(3),
             b"3-exec-run\n"
         );
-        assert_eq!(first.default_wait(123).until, "snapshot");
-        assert_eq!(StartPolicy::None.default_wait(123).until, "running");
+        assert_eq!(first.default_wait(123, false).until, "snapshot");
+        assert_eq!(StartPolicy::None.default_wait(123, false).until, "running");
+        assert_eq!(StartPolicy::None.default_wait(123, true).until, "settled");
     }
 
     #[test]

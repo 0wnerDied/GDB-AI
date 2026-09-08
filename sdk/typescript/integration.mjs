@@ -45,8 +45,12 @@ async function canonical(client, program) {
     const launched = await session.launch({
       program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
       wait: { until: "snapshot", timeout_ms: 5000 },
+      inspect: [{ view: "stack", limit: 4 }],
     });
     const stopId = launched.state.stop_id;
+    assert.ok(launched.result.observations.stack.frames.length);
+    assert.equal(launched.semantics.context.stop_id, stopId);
+    assert.ok(launched.result.command.record && launched.result.capabilities);
     const context = await session.call("inspection.get", { view: "stop_context" });
     assert.equal(context.result.stop_id, stopId);
     const stack = await session.inspect({ view: "stack", stop_id: stopId, limit: 4 });
@@ -93,17 +97,28 @@ async function projected(client, program) {
     await observer.connect();
     const launched = await call("gdb_session", {
       action: "launch", program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
+      inspect: [{ view: "stack", limit: 4 }],
     });
     assert.ok(launched.state.stop_id);
     assert.equal(launched.state.backend, undefined);
-    const stack = await call("gdb_inspect", { view: "stack", limit: 4 });
-    assert.ok(stack.result.frames.length);
-    assert.equal(stack.context.stop_id, launched.state.stop_id);
-    assert.ok(stack.complete && stack.evidence.length);
+    assert.ok(launched.result.observations.stack.frames.length);
+    assert.equal(launched.context.stop_id, launched.state.stop_id);
+    assert.ok(launched.complete && launched.evidence.length);
+    assert.equal(launched.result.command, undefined);
+    assert.equal(launched.result.capabilities, undefined);
+    const restarted = await call("gdb_run", {
+      action: "restart", stop: "first_instruction", inspect: [{ view: "stack", limit: 4 }],
+    });
+    assert.ok(restarted.result.observations.stack.frames.length);
+    assert.notEqual(restarted.context.stop_id, launched.context.stop_id);
+    assert.equal(restarted.context.stop_id, restarted.state.stop_id);
+    assert.ok(restarted.complete && restarted.evidence.length);
+    assert.equal(restarted.result.command, undefined);
+    assert.equal(restarted.result.capabilities, undefined);
     const statusUri = `gdbai://session/${sessionId}/status`;
     assert.ok((await client.listResources()).some((resource) => resource.uri === statusUri));
     const status = JSON.parse((await client.readResource(statusUri))[0].text);
-    assert.equal(status.stop_id, launched.state.stop_id);
+    assert.equal(status.stop_id, restarted.state.stop_id);
     await assert.rejects(call("gdb_inspect", { view: "stack", stop_id: "stale" }),
       (error) => error instanceof ApiError && error.code === "STALE_CONTEXT" && error.response.revision === undefined);
     const captured = (await call("gdb_batch", { requests: [

@@ -60,17 +60,18 @@ views; other operations remain available through `call`.
 
 ```typescript
 await session.launch({ program: "/workspace/app", stop: "main",
-  wait: { until: "snapshot", timeout_ms: 5000 } });
-const stack = await session.inspect({ view: "stack", accept_current_stop: true, limit: 8 });
+  inspect: [{ view: "stack", limit: 8 }] });
 await session.control({ action: "continue", wait: { until: "settled", timeout_ms: 5000 },
   inspect: [{ view: "crash", profile: "brief" }] });
 ```
 
 These types reject missing executables, unknown actions/waits, an `until`
-action without a location, inspection without a stop selection, and post-run
-inspection without a stop-producing wait. They also exclude input on interrupt
-and require exactly one text/base64 input encoding. The server still validates
-runtime values, limits, permissions, and stale contexts. Results retain
+action without a location, standalone inspection without a stop selection,
+and incompatible inspection/wait combinations. Launch with `inspect` chooses
+a stop-producing wait by default; canonical `control` requires it explicitly.
+They also exclude input on interrupt and require exactly one text/base64 input
+encoding. The server still validates runtime values, limits, permissions, and
+stale contexts. Results retain
 `ApiResponse<T>`; the helpers do not decode unknown target-specific facts.
 
 Use `Session` only for canonical sessions created by `Session.create`.

@@ -51,8 +51,11 @@ export type LaunchParameters = MutationParameters & {
   follow_fork?: "parent" | "child";
   detach_on_fork?: boolean;
   follow_exec?: "same-inferior";
-  wait?: WaitSpec;
-};
+} & (
+  | { wait?: WaitSpec; inspect?: never }
+  | { wait?: WaitSpec & { until: "stopped" | "settled" | "snapshot" };
+      inspect: Array<InspectionView & { name?: string }> }
+);
 
 // The typed helpers cover common native diagnosis views. Other views and
 // provider-specific parameters remain available through the canonical call.

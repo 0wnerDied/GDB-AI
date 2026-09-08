@@ -14,7 +14,7 @@ use crate::{
         BackendHealth, Consistency, FrameId, InferiorId, SessionLifecycle, SessionState,
         SnapshotStatus, StopId, TargetOrigin, ThreadId, ValueId,
     },
-    session::CommandReply,
+    session::{CommandReply, SessionCapabilities},
 };
 
 pub const API_VERSION: &str = "gdb.ai/v1";
@@ -311,6 +311,7 @@ enum Diagnostic {
     Command(CommandReply),
     Commands(Vec<CommandReply>),
     State(Box<SessionState>),
+    Capabilities(SessionCapabilities),
     Value(Value),
     Failures(BTreeMap<String, ApiError>),
     Error(ApiError),
@@ -411,6 +412,12 @@ impl SemanticResult {
 
     pub(crate) fn detail(mut self, key: &'static str, value: Value) -> Self {
         self.diagnostics.insert(key, Diagnostic::Value(value));
+        self
+    }
+
+    pub(crate) fn capabilities(mut self, capabilities: SessionCapabilities) -> Self {
+        self.diagnostics
+            .insert("capabilities", Diagnostic::Capabilities(capabilities));
         self
     }
 

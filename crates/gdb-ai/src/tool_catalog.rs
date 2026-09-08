@@ -164,7 +164,7 @@ const TOOLS: &[ToolProjection] = &[
         // 2026-09-05: Advertising a profile that ordinary projected callers
         // cannot select caused a guaranteed create retry. The default already
         // permits exploit debugging, so expose only the actionable lifecycle.
-        description: "Create a session with action only, then launch a program unchanged with argument-only argv; patch its runtime first when needed. Relative paths use workspace roots; use first_instruction only for pre-run setup. Remote uses connect_remote with endpoint and optional executable.",
+        description: "Create a session with action only, then launch a program unchanged with argument-only argv; patch its runtime first when needed. launch with inspect waits and returns those views at the resulting stop. Relative paths use workspace roots; use first_instruction only for pre-run setup. Remote uses connect_remote with endpoint and optional executable.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,
@@ -175,7 +175,7 @@ const TOOLS: &[ToolProjection] = &[
         name: "gdb_run",
         // 2026-09-01: Blind Agents rebuilt probe workflows or selected an
         // exit-only wait even though one default turn already handles both.
-        description: "Run with exact input/output; restart relaunches directly to running, while continue and step wait for stop-or-exit. inspect combines bounded views, read-only evaluate, memory, disassembly, tracked samples, and historical diff at the resulting stop.",
+        description: "Run with exact input/output; continue and step wait for stop-or-exit. restart relaunches directly; add inspect to await and inspect its stop. inspect combines bounded views, read-only evaluate, memory, disassembly, tracked samples, and historical diff at the resulting stop.",
         discriminator: Some("action"),
         actions: RUN_ACTIONS,
         read_only: false,
