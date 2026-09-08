@@ -65,6 +65,12 @@ fn require_complete_read(actual: usize, requested: usize, allow_partial: bool) -
     }
 }
 
+fn recoverable_partial_read(code: ErrorCode, allow_partial: bool, captured: usize) -> bool {
+    // 2026-09-08: Partial reads swallowed cancellation and deadline failures
+    // after a valid prefix. Only an unavailable range may end a partial read.
+    allow_partial && captured > 0 && code == ErrorCode::GdbError
+}
+
 fn validate_memory_range(start: u64, length: usize) -> Result<()> {
     let last_offset = u64::try_from(length.saturating_sub(1)).map_err(|_| {
         Error::new(
@@ -137,9 +143,7 @@ async fn read_memory_bytes_in_observation(
             .await
         {
             Ok(reply) => reply,
-            Err(error)
-                if allow_partial && !bytes.is_empty() && error.code != ErrorCode::StaleContext =>
-            {
+            Err(error) if recoverable_partial_read(error.code, allow_partial, bytes.len()) => {
                 break;
             }
             Err(error) => return Err(error),
@@ -622,7 +626,24 @@ mod tests {
     use crate::ErrorCode;
     use gdb_ai_mi::{MiLimits, parse_record};
 
-    use super::{memory_contents, require_complete_read, validate_memory_range};
+    use super::{
+        memory_contents, recoverable_partial_read, require_complete_read, validate_memory_range,
+    };
+
+    #[test]
+    fn partial_memory_prefix_never_hides_control_failures() {
+        assert!(recoverable_partial_read(ErrorCode::GdbError, true, 65536));
+        assert!(!recoverable_partial_read(ErrorCode::GdbError, false, 65536));
+        assert!(!recoverable_partial_read(ErrorCode::GdbError, true, 0));
+        for code in [
+            ErrorCode::Cancelled,
+            ErrorCode::Timeout,
+            ErrorCode::StaleContext,
+            ErrorCode::GdbExited,
+        ] {
+            assert!(!recoverable_partial_read(code, true, 65536), "{code:?}");
+        }
+    }
 
     #[test]
     fn memory_blocks_stop_at_the_first_unreadable_gap() {
