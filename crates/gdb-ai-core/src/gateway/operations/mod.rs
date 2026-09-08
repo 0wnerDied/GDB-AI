@@ -72,14 +72,20 @@ impl Gateway {
             CanonicalMethod::TargetDetach => self.target_detach(request).await,
             CanonicalMethod::TargetRestart => self.target_restart(request).await,
             CanonicalMethod::TargetKill => self.target_kill(request).await,
-            CanonicalMethod::ExecutionControl => self.execution_control(request).await,
-            CanonicalMethod::ExecutionWait => self.execution_wait(request).await,
+            CanonicalMethod::ExecutionControl => {
+                return self.execution_control(request).await.map(Into::into);
+            }
+            CanonicalMethod::ExecutionWait => {
+                return self.execution_wait(request).await.map(Into::into);
+            }
             CanonicalMethod::BreakpointCreate => self.breakpoint_create(request).await,
             CanonicalMethod::BreakpointUpdate => self.breakpoint_update(request).await,
             CanonicalMethod::BreakpointDelete => self.breakpoint_delete(request).await,
             CanonicalMethod::BreakpointList => self.breakpoint_list(request).await,
             CanonicalMethod::InspectionGet => self.inspection_get(request).await,
-            CanonicalMethod::InspectionSnapshot => self.inspection_snapshot(request).await,
+            CanonicalMethod::InspectionSnapshot => {
+                return self.inspection_snapshot(request).await.map(Into::into);
+            }
             CanonicalMethod::InspectionDiff => self.inspection_diff(request).await,
             CanonicalMethod::InspectionBatch => {
                 return self.inspection_batch(request).await.map(Into::into);

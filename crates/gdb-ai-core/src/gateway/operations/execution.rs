@@ -118,7 +118,7 @@ use crate::{
     },
     gateway::{Gateway, SessionEntry},
     normalize::breakpoint_number as inserted_breakpoint_number,
-    protocol::ApiRequest,
+    protocol::{ApiRequest, ObservationContext, SemanticResult, result_evidence},
     session::{CommandReply, OutputRing, PendingModuleBreakpoint, settled_by},
 };
 
@@ -233,7 +233,7 @@ pub(super) fn breakpoint_number(entry: &SessionEntry, parameters: &Value) -> Res
 }
 
 impl Gateway {
-    pub(super) async fn execution_control(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn execution_control(&self, request: &ApiRequest) -> Result<SemanticResult> {
         let action = string(&request.parameters, "action")?;
         let wait = wait_spec(&request.parameters)?;
         validate_inspection_wait(&request.parameters, wait.as_ref())?;
@@ -321,12 +321,7 @@ impl Gateway {
                     operation.status = OperationStatus::Completed;
                     operation.completed_event_seq = Some(state.event_seq);
                     entry.handle.record_operation(&operation).await?;
-                    let mut result = json!({
-                        "operation_id": operation.operation_id,
-                        "wait_status": "COMPLETED",
-                        "command": reply,
-                        "state": state
-                    });
+                    let mut result = json!({});
                     if report_settled_by {
                         result["settled_by"] = Value::String(
                             settled_by(&state, operation.wait_baseline.as_ref())
@@ -341,9 +336,12 @@ impl Gateway {
                     }
                     append_input(&mut result, input.as_ref());
                     append_turn_output(&entry, output_offset, &mut result).await?;
-                    self.append_stop_observations(request, &state, &mut result)
-                        .await;
-                    Ok(result)
+                    let result = self.append_stop_observations(request, &state, result).await;
+                    let result = result
+                        .state("state", state)
+                        .detail("operation_id", json!(operation.operation_id))
+                        .detail("wait_status", json!("COMPLETED"));
+                    Ok(result.command(&entry.handle.id().0, "command", reply))
                 }
                 Err(error) if error.code == ErrorCode::Timeout => {
                     let state = entry.handle.state();
@@ -353,12 +351,14 @@ impl Gateway {
                     let mut result = json!({
                         "operation_id": operation.operation_id,
                         "wait_status": "TIMEOUT",
-                        "target_state": state,
-                        "can_interrupt": true,
-                        "command": reply
+                        "can_interrupt": true
                     });
                     append_input(&mut result, input.as_ref());
                     append_turn_output(&entry, output_offset, &mut result).await?;
+                    let mut result = SemanticResult::read(result, None, &entry.handle.id().0)
+                        .state("target_state", state)
+                        .command(&entry.handle.id().0, "command", reply);
+                    result.metadata.semantics.complete = false;
                     Ok(result)
                 }
                 Err(error) => {
@@ -376,16 +376,16 @@ impl Gateway {
             entry.handle.record_operation(&operation).await?;
             let mut result = json!({
                 "operation_id": operation.operation_id,
-                "wait_status": "ACCEPTED",
-                "command": reply,
-                "state": entry.handle.state()
+                "wait_status": "ACCEPTED"
             });
             append_input(&mut result, input.as_ref());
-            Ok(result)
+            Ok(SemanticResult::new(result, None)
+                .state("state", entry.handle.state())
+                .command(&entry.handle.id().0, "command", reply))
         }
     }
 
-    pub(super) async fn execution_wait(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn execution_wait(&self, request: &ApiRequest) -> Result<SemanticResult> {
         let input = turn_input(&request.parameters)?;
         let entry = self.entry(required_session(request)?).await?;
         let output_offset = entry.handle.inferior_output_position();
@@ -456,14 +456,16 @@ impl Gateway {
             operation.completed_event_seq = Some(state.event_seq);
             entry.handle.record_operation(operation).await?;
         }
-        let mut result = json!({ "operation": operation, "state": state });
+        let mut result = json!({});
         append_input(&mut result, input.as_ref());
         append_turn_output(&entry, output_offset, &mut result).await?;
         if let Some(settled_by) = settled_by {
             result["settled_by"] = Value::String(settled_by.into());
         }
-        self.append_stop_observations(request, &state, &mut result)
-            .await;
+        let result = self.append_stop_observations(request, &state, result).await;
+        let result = result
+            .state("state", state)
+            .detail("operation", json!(operation));
         Ok(result)
     }
 
@@ -471,13 +473,26 @@ impl Gateway {
         &self,
         request: &ApiRequest,
         state: &crate::domain::SessionState,
-        result: &mut Value,
-    ) {
+        result: Value,
+    ) -> SemanticResult {
+        let mut response = SemanticResult::new(result, ObservationContext::from_state(state));
+        let result = &mut response.facts;
+        response.metadata.truncated =
+            result.pointer("/output/truncated") == Some(&Value::Bool(true));
+        // 2026-09-08: Successful inspection must not hide output lost earlier
+        // in this turn. Combine completeness across both captured channels.
+        response.metadata.semantics.complete =
+            result.pointer("/output/gap") != Some(&Value::Bool(true));
         let Some(requests) = request.parameters.get("inspect") else {
-            return;
+            return response;
         };
         if state.stop_id.is_none() {
-            return;
+            // 2026-09-08: Exit-before-inspection silently omitted requested
+            // facts. Execution still succeeded, but nothing was collected.
+            result["observation_status"] = json!("not_collected");
+            result["observation_complete"] = Value::Bool(false);
+            response.metadata.semantics.complete = false;
+            return response;
         }
         result["stop_id"] = json!(state.stop_id);
         let observation = match required_session(request) {
@@ -497,25 +512,31 @@ impl Gateway {
                 }
                 result["observation_context"] = json!(observation.context);
                 result["observation_complete"] = Value::Bool(observation.complete);
-                result["observations"] = json!(observation.results);
-                if !observation.failures.is_empty() {
-                    result["observation_failures"] = json!(observation.failures);
-                }
+                result["observations"] = Value::Object(observation.results.into_iter().collect());
+                result["observation_availability"] = json!(observation.availability);
                 if !observation.evidence.is_empty() {
                     result["observation_evidence"] = json!(observation.evidence);
                 }
+                if !observation.failures.is_empty() {
+                    response.failures("observation_failures", observation.failures);
+                }
+                response.metadata.semantics.context = Some(observation.context);
+                response.metadata.semantics.complete &= observation.complete;
+                response.metadata.warnings = observation.warnings;
+                response.metadata.evidence = observation.evidence;
+                response.metadata.artifacts = observation.artifacts;
+                response.metadata.truncated |= observation.truncated;
             }
             Err(error) => {
                 // 2026-09-01: A post-stop observation failure must not
                 // disguise successful execution and invite a second resume.
-                result["observation_error"] = json!({
-                    "code": error.code,
-                    "message": error.message,
-                    "retryable": error.retryable,
-                    "details": error.details
-                });
+                let error = crate::protocol::ApiError::from(error);
+                response.metadata.semantics.complete = false;
+                response.metadata.evidence = result_evidence(&state.session_id.0, &json!(error));
+                response.error("observation_error", error);
             }
         }
+        response
     }
 
     pub(super) async fn breakpoint_create(&self, request: &ApiRequest) -> Result<Value> {

@@ -529,6 +529,20 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     assert!(partial["failures"]["1"]["details"].get("record").is_none());
     assert!(partial.get("commands").is_none());
 
+    let custom_before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let custom = successful(gateway.dispatch_agent(request(
+        "custom-snapshot", Some(&session_id), "inspection.snapshot", None,
+        json!({"stop_id": second_stop, "inspect": [{"view": "registers", "roles": ["pc"]}]})
+    ), &caller).await).result.unwrap();
+    assert_eq!(custom["profile"], "custom");
+    assert_eq!(custom["availability"]["stack"], "not_collected");
+    assert_eq!(custom["availability"]["tracked"], "not_collected");
+    assert_eq!(custom["observation_availability"]["registers"], "captured");
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total") - custom_before,
+        2
+    );
+
     let snapshot_response = successful(
         gateway
             .dispatch(
@@ -697,6 +711,27 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     assert_eq!(
         former_controller.error.unwrap().code,
         ErrorCode::WriteLeaseRequired
+    );
+    let exited = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "exit-before-inspection",
+                    Some(&session_id),
+                    "execution.control",
+                    None,
+                    json!({"action": "continue", "wait": {"until": "settled", "timeout_ms": 5000},
+            "inspect": [{"view": "evaluate", "expression": "observed"}]}),
+                ),
+                &next_controller,
+            )
+            .await,
+    );
+    assert!(!exited.semantics.as_ref().unwrap().complete);
+    assert_eq!(exited.result.as_ref().unwrap()["settled_by"], "exited");
+    assert_eq!(
+        exited.result.as_ref().unwrap()["observation_status"],
+        "not_collected"
     );
     successful(
         gateway

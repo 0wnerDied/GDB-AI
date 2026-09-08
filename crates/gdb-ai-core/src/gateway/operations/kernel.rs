@@ -1227,7 +1227,10 @@ impl Gateway {
                 let mut subrequest = request.clone();
                 subrequest.method = CanonicalMethod::InspectionSnapshot;
                 subrequest.parameters["profile"] = Value::String("standard".into());
-                let mut result = self.inspection_snapshot(&subrequest).await?;
+                let mut result = self
+                    .inspection_snapshot(&subrequest)
+                    .await?
+                    .into_value(true);
                 result["view"] = Value::String("panic".into());
                 result["source"] = json!({
                     "provider": "linux-kernel",

@@ -22,20 +22,19 @@ use super::{
         result_string_list, result_text, target_architecture, valid_integer_literal,
     },
     observation::{
-        ObservationKind, independent_failure, parse_observation_requests,
+        ObservationKind, independent_failure, parse_observation_requests, snapshot_requests,
         validate_observation_requests,
     },
-    reconciliation::{optional_command, reconcile_breakpoints},
+    reconciliation::reconcile_breakpoints,
     request::{bool_value, bounded_limit, required_session, string},
 };
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{DomainEvent, FrameId, SessionId, TrackingDefinition},
+    domain::{DomainEvent, SessionId, TrackingDefinition},
     gateway::{Gateway, SessionEntry},
     protocol::{
-        ApiError, ApiRequest, FactAvailability, ObservationContext, ObservationResult,
-        SemanticResult, result_evidence,
+        ApiError, ApiRequest, FactAvailability, ObservationResult, SemanticResult, result_evidence,
     },
     providers::mappings,
     session::CommandReply,
@@ -80,7 +79,7 @@ impl Gateway {
             "capabilities" => Ok(serde_json::to_value(entry.handle.capabilities())?),
             "providers" => self.session_providers(request).await,
             "crash" => {
-                let mut snapshot = self.inspection_snapshot(request).await?;
+                let mut snapshot = self.inspection_snapshot(request).await?.into_value(true);
                 snapshot["crash_signature"] =
                     Value::String(crate::providers::crash_signature(&entry.handle.state()));
                 snapshot["source"] = json!({
@@ -493,7 +492,7 @@ impl Gateway {
         entry.handle.command(command).await
     }
 
-    pub(super) async fn inspection_snapshot(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn inspection_snapshot(&self, request: &ApiRequest) -> Result<SemanticResult> {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
@@ -501,11 +500,18 @@ impl Gateway {
             .parameters
             .get("profile")
             .and_then(Value::as_str)
-            .unwrap_or("standard");
+            .unwrap_or_else(|| {
+                if request.parameters.get("inspect").is_some() {
+                    "custom"
+                } else {
+                    "standard"
+                }
+            });
         let frames = match profile {
             "minimal" => 1,
             "brief" => 3,
             "standard" => 8,
+            "custom" => 0,
             "deep" => bounded_limit(&request.parameters, 8, self.config.limits.stack_frames)?,
             _ => {
                 return Err(Error::new(
@@ -514,9 +520,8 @@ impl Gateway {
                 ));
             }
         };
-        if let Some(inspect) = request.parameters.get("inspect") {
-            validate_observation_requests(inspect, self.config.limits.memory_read_bytes)?;
-        }
+        let requests = snapshot_requests(&request.parameters, profile, frames);
+        validate_observation_requests(&requests, self.config.limits.memory_read_bytes)?;
         // 2026-08-28: Publishing SnapshotStarted before profile validation
         // left the current snapshot permanently BUILDING on invalid input.
         entry
@@ -529,7 +534,9 @@ impl Gateway {
             .handle
             .stable_observation(
                 &state,
-                Box::pin(self.build_and_commit_snapshot(&entry, request, &state, profile, frames)),
+                Box::pin(
+                    self.build_and_commit_snapshot(&entry, request, &state, profile, &requests),
+                ),
             )
             .await;
         if built.is_err() {
@@ -549,197 +556,101 @@ impl Gateway {
         request: &ApiRequest,
         state: &crate::domain::SessionState,
         profile: &str,
-        frames: usize,
-    ) -> Result<Value> {
+        requests: &Value,
+    ) -> Result<SemanticResult> {
         let started = Instant::now();
-        let mut warnings = Vec::new();
-        let stack = optional_command(
-            &entry.handle,
-            context_options(
-                MiCommand::new("-stack-list-frames")?,
-                &request.parameters,
-                state,
-            )?
-            .bare("0")?
-            .bare((frames - 1).to_string())?,
-            "stack",
-            &mut warnings,
-        )
-        .await
-        .map(|reply| normalized_frames(&reply.record, state, &request.parameters))
-        .transpose()?
-        .map(serde_json::to_value)
-        .transpose()?
-        .unwrap_or(Value::Null);
-        // 2026-09-01: GDB's stack-list-variables already includes top-frame
-        // arguments, so brief snapshots repeated those values in a second
-        // multi-frame argument list. Keep the variables superset; deeper
-        // profiles retain arguments from every frame.
-        let locals = if profile == "minimal" {
-            Value::Null
-        } else {
-            optional_command(
-                &entry.handle,
-                context_options(
-                    MiCommand::new("-stack-list-variables")?,
-                    &request.parameters,
-                    state,
-                )?
-                .bare("--simple-values")?,
-                "locals",
-                &mut warnings,
-            )
-            .await
-            .map(|reply| normalized_variables(&reply.record, "variables"))
-            .map(serde_json::to_value)
-            .transpose()?
-            .unwrap_or(Value::Null)
-        };
-        let arguments = if matches!(profile, "minimal" | "brief") {
-            Value::Null
-        } else {
-            optional_command(
-                &entry.handle,
-                context_options(
-                    MiCommand::new("-stack-list-arguments")?,
-                    &request.parameters,
-                    state,
-                )?
-                .bare("--simple-values")?
-                .bare("0")?
-                .bare((frames - 1).to_string())?,
-                "arguments",
-                &mut warnings,
-            )
-            .await
-            .map(|reply| normalized_arguments(&reply.record))
-            .map(serde_json::to_value)
-            .transpose()?
-            .unwrap_or(Value::Null)
-        };
-        let registers = if profile == "minimal" {
-            Value::Null
-        } else {
-            match self.register_read(request).await {
-                Ok(registers) => registers,
-                Err(error) => {
-                    warnings.push(json!({
-                        "code": "REGISTERS_UNAVAILABLE",
-                        "message": error.to_string()
-                    }));
-                    Value::Null
-                }
-            }
-        };
-        let disassembly = if matches!(profile, "brief" | "standard" | "deep") {
-            let mut disassembly_request = request.clone();
-            if profile == "brief" {
-                let parameters = disassembly_request.parameters.as_object_mut().unwrap();
-                if !parameters.contains_key("around") && !parameters.contains_key("range") {
-                    parameters.insert(
-                        "around".into(),
-                        json!({
-                            "expression": "$pc",
-                            "before_instructions": 4,
-                            "after_instructions": 7
-                        }),
-                    );
-                }
-                parameters
-                    .entry("include_source")
-                    .or_insert(Value::Bool(false));
-            }
-            match self.disassembly_read(&disassembly_request).await {
-                Ok(disassembly) => disassembly,
-                Err(error) => {
-                    warnings.push(json!({
-                        "code": "DISASSEMBLY_UNAVAILABLE",
-                        "message": error.to_string()
-                    }));
-                    Value::Null
-                }
-            }
-        } else {
-            Value::Null
-        };
-        let (tracked, changes) = match self
-            .capture_tracking(entry, request, state, &mut warnings)
-            .await
-        {
-            Ok(tracking) => tracking,
-            Err(error) if independent_failure(error.code) => {
-                warnings.push(json!({
-                    "code": "TRACKING_UNAVAILABLE",
-                    "message": error.to_string()
-                }));
-                (BTreeMap::new(), BTreeMap::new())
-            }
-            // 2026-09-08: Tracking downgraded stop, deadline, and cancellation
-            // failures into snapshot warnings. Those failures invalidate the
-            // whole capture rather than producing uncertain evidence.
-            Err(error) => return Err(error),
-        };
-        let partial = !warnings.is_empty();
-        let stop_id = state.stop_id.clone().unwrap();
-        let current = entry.handle.state();
-        let frame_id = state
-            .stopped_thread_id
-            .as_ref()
-            .zip(state.stopped_frame())
-            .map(|(thread, frame)| FrameId::new(thread, &stop_id, frame.level));
-        let observation_context = ObservationContext {
-            observation_id: None,
-            stop_id: stop_id.clone(),
-            captured_revision: current.revision,
-            execution_epoch: state.execution_epoch,
-            inferior_id: state.stopped_inferior_id.clone(),
-            thread_id: state.stopped_thread_id.clone(),
-            frame_id,
-        };
-        let snapshot = json!({
-            "stop_id": &stop_id,
-            "revision": current.revision,
-            "execution_epoch": state.execution_epoch,
+        // 2026-09-08: Profile snapshots bypassed the turn capturer, repeating
+        // work and swallowing fatal read failures. Profiles are now bounded
+        // read plans using the same context, reuse, and partial-error rules.
+        let mut observation = self
+            .capture_observations(request, entry, state, requests, false)
+            .await?;
+        let mut snapshot = json!({
+            "stop_id": observation.context.stop_id,
+            "revision": observation.context.captured_revision,
+            "execution_epoch": observation.context.execution_epoch,
             "profile": profile,
             "reason": state.stop_reason,
             "reason_detail": state.stop_reason_detail,
-            "stack": stack,
-            "locals": locals,
-            "arguments": arguments,
-            "registers": registers,
-            "disassembly": disassembly,
-            "tracked": tracked,
-            "changes": changes,
-            "observation_context": observation_context,
-            "observation_complete": !partial,
-            "observations": {},
-            "observation_failures": {},
-            "warnings": warnings,
-            "partial": partial,
-            "evidence": [{"kind": "mi-event", "uri": format!("gdbai://session/{}/event/{}", entry.handle.id(), current.event_seq)}]
+            "observation_context": observation.context,
+            "observation_complete": observation.complete,
+            "partial": !observation.complete
         });
-        let mut snapshot = snapshot;
-        let mut partial = partial;
-        if let Some(requests) = request.parameters.get("inspect") {
-            let observation = self
-                .capture_observations(request, entry, state, requests, false)
-                .await?;
-            partial |= !observation.complete;
-            snapshot["observation_context"] = serde_json::to_value(&observation.context)?;
-            snapshot["observation_complete"] = Value::Bool(observation.complete);
-            snapshot["observation_evidence"] = serde_json::to_value(&observation.evidence)?;
-            snapshot["observations"] = serde_json::to_value(observation.results)?;
-            snapshot["observation_failures"] = serde_json::to_value(observation.failures)?;
-            snapshot["partial"] = Value::Bool(partial);
-            snapshot["observation_complete"] = Value::Bool(!partial);
+        let mut availability = BTreeMap::new();
+        let mut profile_failures = BTreeMap::new();
+        for (field, member) in [
+            ("stack", Some("frames")),
+            ("locals", Some("variables")),
+            ("arguments", Some("arguments")),
+            ("registers", None),
+            ("disassembly", None),
+            ("tracked", Some("tracked")),
+        ] {
+            let key = format!("@snapshot.{field}");
+            availability.insert(
+                field,
+                observation
+                    .availability
+                    .remove(&key)
+                    .unwrap_or(FactAvailability::NotCollected),
+            );
+            if let Some(error) = observation.failures.remove(&key) {
+                observation.warnings.push(crate::protocol::Warning {
+                    code: format!("{}_UNAVAILABLE", field.to_ascii_uppercase()),
+                    message: error.message.clone(),
+                });
+                profile_failures.insert(field.to_owned(), error);
+            }
+            let mut captured = observation.results.remove(&key).unwrap_or(Value::Null);
+            if field == "tracked" {
+                snapshot["changes"] = captured
+                    .as_object_mut()
+                    .and_then(|captured| captured.remove("changes"))
+                    .unwrap_or_else(|| json!({}));
+            }
+            snapshot[field] = match member {
+                Some(member) => captured
+                    .as_object_mut()
+                    .and_then(|captured| captured.remove(member))
+                    .unwrap_or_else(|| {
+                        if field == "tracked" {
+                            json!({})
+                        } else {
+                            Value::Null
+                        }
+                    }),
+                None => captured,
+            };
         }
+        snapshot["availability"] = serde_json::to_value(availability)?;
+        snapshot["failures"] = serde_json::to_value(&profile_failures)?;
+        snapshot["observation_availability"] = serde_json::to_value(observation.availability)?;
+        snapshot["observation_failures"] = serde_json::to_value(&observation.failures)?;
+        snapshot["observations"] = Value::Object(observation.results.into_iter().collect());
+        snapshot["warnings"] = serde_json::to_value(&observation.warnings)?;
+        snapshot["evidence"] = serde_json::to_value(&observation.evidence)?;
+        let partial = !observation.complete;
         let snapshot = entry
             .handle
-            .commit_snapshot(snapshot, stop_id, state.execution_epoch, partial)
+            .commit_snapshot(
+                snapshot,
+                observation.context.stop_id,
+                state.execution_epoch,
+                partial,
+            )
             .await?;
+        let context = serde_json::from_value(snapshot["observation_context"].clone())?;
+        let mut result = SemanticResult::new(snapshot, Some(context));
+        result.failures("failures", profile_failures);
+        result.failures("observation_failures", observation.failures);
+        result.metadata.semantics.complete = !partial;
+        result.metadata.warnings = observation.warnings;
+        result.metadata.evidence = observation.evidence;
+        result.metadata.artifacts = observation.artifacts;
+        result.metadata.truncated = observation.truncated;
         self.metrics
             .snapshot(started.elapsed().as_micros() as u64, partial);
-        Ok(snapshot)
+        Ok(result)
     }
 
     pub(super) async fn inspection_diff(&self, request: &ApiRequest) -> Result<Value> {

@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gdb_ai_mi::{MiRecord, MiResult, MiValue};
-use serde_json::{Value, json};
 
 use super::mi::aggregate_items;
 use crate::{
@@ -10,21 +9,6 @@ use crate::{
     domain::{BreakpointLocationState, DomainEvent},
     session::{CommandReply, SessionHandle},
 };
-
-pub(super) async fn optional_command(
-    handle: &SessionHandle,
-    command: MiCommand,
-    name: &str,
-    warnings: &mut Vec<Value>,
-) -> Option<CommandReply> {
-    match handle.command(command).await {
-        Ok(reply) => Some(reply),
-        Err(error) => {
-            warnings.push(json!({ "code": format!("{}_UNAVAILABLE", name.to_uppercase()), "message": error.to_string() }));
-            None
-        }
-    }
-}
 
 pub(super) async fn reconciliation_command(
     handle: &SessionHandle,

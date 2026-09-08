@@ -310,7 +310,10 @@ pub(crate) struct SemanticResult {
 enum Diagnostic {
     Command(CommandReply),
     Commands(Vec<CommandReply>),
+    State(Box<SessionState>),
+    Value(Value),
     Failures(BTreeMap<String, ApiError>),
+    Error(ApiError),
 }
 
 impl SemanticResult {
@@ -389,6 +392,20 @@ impl SemanticResult {
         self
     }
 
+    pub(crate) fn state(mut self, key: &'static str, state: SessionState) -> Self {
+        // 2026-09-08: Native execution projection must retain the public
+        // top-level stop/exit state without reconstructing full registries.
+        self.metadata.semantics.state = Some(session_coordination_state(&state));
+        self.diagnostics
+            .insert(key, Diagnostic::State(Box::new(state)));
+        self
+    }
+
+    pub(crate) fn detail(mut self, key: &'static str, value: Value) -> Self {
+        self.diagnostics.insert(key, Diagnostic::Value(value));
+        self
+    }
+
     pub(crate) fn failures(&mut self, key: &'static str, failures: BTreeMap<String, ApiError>) {
         self.facts[key] = Value::Object(
             failures
@@ -397,6 +414,11 @@ impl SemanticResult {
                 .collect(),
         );
         self.diagnostics.insert(key, Diagnostic::Failures(failures));
+    }
+
+    pub(crate) fn error(&mut self, key: &'static str, error: ApiError) {
+        self.facts[key] = json!(error.compact());
+        self.diagnostics.insert(key, Diagnostic::Error(error));
     }
 
     pub(crate) fn into_value(mut self, detailed: bool) -> Value {

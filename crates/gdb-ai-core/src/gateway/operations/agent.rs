@@ -767,8 +767,10 @@ impl Gateway {
                 // and a separate inspection batch. Read them at the captured
                 // stop; continue_to_stop keeps its existing following-stop view.
                 if let Some(state) = capture_state.as_deref() {
-                    self.append_stop_observations(request, state, &mut result)
-                        .await;
+                    result = self
+                        .append_stop_observations(request, state, result)
+                        .await
+                        .into_value(true);
                 }
                 Ok(result)
             })
@@ -826,6 +828,7 @@ impl Gateway {
                         parameters,
                     })
                     .await
+                    .map(|result| result.into_value(true))
                 })
                 .await;
                 continued.map(|continued| {

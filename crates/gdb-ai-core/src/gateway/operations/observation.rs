@@ -317,6 +317,47 @@ pub(super) fn validate_observation_requests(
     .map(|_| ())
 }
 
+pub(super) fn snapshot_requests(parameters: &Value, profile: &str, frames: usize) -> Value {
+    let mut requests = Vec::new();
+    if profile != "custom" {
+        requests.push(serde_json::json!({"view": "stack", "limit": frames}));
+        if profile != "minimal" {
+            requests.push(serde_json::json!({"view": "locals"}));
+            if profile != "brief" {
+                requests.push(serde_json::json!({"view": "arguments", "limit": frames}));
+            }
+            let mut registers = serde_json::json!({"view": "registers", "profile": profile});
+            if let Some(roles) = parameters.get("roles") {
+                registers["roles"] = roles.clone();
+            }
+            requests.push(registers);
+            let mut disassembly = serde_json::json!({"view": "disassembly"});
+            for field in ["around", "range", "include_bytes", "include_source"] {
+                if let Some(value) = parameters.get(field) {
+                    disassembly[field] = value.clone();
+                }
+            }
+            if profile == "brief" {
+                let object = disassembly.as_object_mut().unwrap();
+                if !object.contains_key("around") && !object.contains_key("range") {
+                    object.insert("around".into(), serde_json::json!({"expression": "$pc", "before_instructions": 4, "after_instructions": 7}));
+                }
+                object.entry("include_source").or_insert(Value::Bool(false));
+            }
+            requests.push(disassembly);
+        }
+        requests.push(serde_json::json!({"view": "tracked"}));
+        for request in &mut requests {
+            request["name"] =
+                Value::String(format!("@snapshot.{}", request["view"].as_str().unwrap()));
+        }
+    }
+    if let Some(inspect) = parameters.get("inspect").and_then(Value::as_array) {
+        requests.extend(inspect.iter().cloned());
+    }
+    Value::Array(requests)
+}
+
 pub(super) fn independent_failure(code: ErrorCode) -> bool {
     matches!(
         code,
