@@ -1,6 +1,7 @@
 use std::{path::PathBuf, process::Command, time::Duration};
 
 use gdb_ai_core::{
+    ErrorCode,
     config::{ArtifactConfig, Config, PersistenceConfig},
     gateway::{Caller, Gateway},
 };
@@ -111,7 +112,9 @@ async fn noisy_pty_does_not_starve_mi_stop() {
             .await,
     );
     assert!(started.elapsed() < Duration::from_secs(10));
-    assert!(stopped.state.as_ref().unwrap().stop_id.is_some());
+    let stopped_state = stopped.state.as_ref().unwrap();
+    let stop_id = stopped_state.stop_id.as_ref().unwrap();
+    let snapshot_id = &stopped_state.snapshot.as_ref().unwrap().snapshot_id;
 
     let output = successful(
         gateway
@@ -134,5 +137,54 @@ async fn noisy_pty_does_not_starve_mi_stop() {
             .unwrap()
             > 0
     );
+
+    let exited = successful(
+        gateway
+            .dispatch(
+                request(
+                    "exit",
+                    Some(session_id),
+                    "execution.control",
+                    None,
+                    json!({
+                        "action": "continue", "lease_id": lease_id,
+                        "accept_latest_revision": true,
+                        "wait": {"until": "exited", "timeout_ms": 5000}
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(exited.state.as_ref().unwrap().stop_id.is_none());
+    let stale = gateway
+        .dispatch(
+            request(
+                "old-stack",
+                Some(session_id),
+                "inspection.get",
+                None,
+                json!({"view": "stack", "stop_id": stop_id}),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(stale.error.unwrap().code, ErrorCode::TargetExited);
+    let historical = successful(
+        gateway
+            .dispatch(
+                request(
+                    "history",
+                    Some(session_id),
+                    "inspection.snapshot_get",
+                    None,
+                    json!({"snapshot_id": snapshot_id}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(historical.semantics.as_ref().unwrap().historical);
+    assert_eq!(historical.result.unwrap()["stop_id"], json!(stop_id));
     gateway.shutdown().await;
 }

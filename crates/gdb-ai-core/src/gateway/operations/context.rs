@@ -10,7 +10,7 @@ use super::{
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{StopId, WaitBaseline},
+    domain::{InferiorStatus, StopId, WaitBaseline},
     gateway::Gateway,
     providers::live_module_offset,
     session::{SessionHandle, WaitUntil},
@@ -432,6 +432,16 @@ pub(super) fn require_stopped_context(
     state: &crate::domain::SessionState,
 ) -> Result<()> {
     let stop = state.stop_id.as_ref().ok_or_else(|| {
+        // 2026-09-08: A cleared stop_id also denotes process exit. Report a
+        // known exited target instead of advising callers that it is running.
+        if !state.inferiors.is_empty()
+            && state
+                .inferiors
+                .values()
+                .all(|inferior| inferior.status == InferiorStatus::Exited)
+        {
+            return Error::new(ErrorCode::TargetExited, "inspection target has exited");
+        }
         Error::new(
             ErrorCode::TargetRunning,
             "inspection requires stopped target",
@@ -462,6 +472,65 @@ mod tests {
     };
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn exited_inferior_does_not_make_a_running_sibling_terminal() {
+        let mut reducer = StateReducer::new(SessionState::creating(SessionId("sess_exit".into())));
+        let parameters = json!({"accept_current_stop": true});
+        assert_eq!(
+            require_stopped_context(&parameters, reducer.state())
+                .unwrap_err()
+                .code,
+            ErrorCode::TargetRunning
+        );
+        for (index, event) in [
+            DomainEvent::InferiorAdded {
+                backend_id: "i1".into(),
+                pid: Some(1),
+            },
+            DomainEvent::InferiorExited {
+                backend_id: Some("i1".into()),
+                exit_code: Some("0".into()),
+                from_stop_record: false,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            reducer
+                .apply(&JournaledEvent::for_replay(index as u64 + 1, event))
+                .unwrap();
+        }
+        assert_eq!(
+            require_stopped_context(&parameters, reducer.state())
+                .unwrap_err()
+                .code,
+            ErrorCode::TargetExited
+        );
+        reducer
+            .apply(&JournaledEvent::for_replay(
+                3,
+                DomainEvent::InferiorAdded {
+                    backend_id: "i2".into(),
+                    pid: Some(2),
+                },
+            ))
+            .unwrap();
+        reducer
+            .apply(&JournaledEvent::for_replay(
+                4,
+                DomainEvent::TargetRunning {
+                    backend_inferiors: vec!["i2".into()],
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            require_stopped_context(&parameters, reducer.state())
+                .unwrap_err()
+                .code,
+            ErrorCode::TargetRunning
+        );
+    }
 
     #[test]
     fn workspace_file_paths_resolve_roots_and_reject_special_files() {
