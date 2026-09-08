@@ -44,6 +44,9 @@ include the compact matched `state`. MCP projects these as top-level
 `result`, warnings, pagination, artifacts, and evidence. Facts stay inline
 within the response limit. Canonical diagnostics retain legacy MI replies;
 the compact projection does not construct or serialize those replies.
+Root-level per-read journal sequence markers remain in detailed diagnostics
+and promoted evidence, not in newly captured item facts. Item comparisons do
+not treat these transport markers as target-state changes.
 Legacy lifecycle, raw, and specialized provider responses remain compatible.
 
 Stdio and Unix stream clients may attach `_meta.progressToken` to a request.

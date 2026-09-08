@@ -257,6 +257,39 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
         "GDB_ERROR"
     );
 
+    let unchanged_request = request(
+        "unchanged-facts",
+        Some(&session_id),
+        "inspection.batch",
+        None,
+        json!({
+            "stop_id": second_stop,
+            "requests": [{"view": "stack", "limit": 1}, {"view": "locals"}]
+        }),
+    );
+    let before = successful(gateway.dispatch(unchanged_request.clone(), &caller).await);
+    let after = successful(gateway.dispatch(unchanged_request, &caller).await);
+    assert!(!before.evidence.is_empty());
+    assert_ne!(before.evidence, after.evidence);
+    let unchanged = successful(
+        gateway
+            .dispatch(
+                request(
+                    "unchanged-diff",
+                    Some(&session_id),
+                    "inspection.diff",
+                    None,
+                    json!({
+                        "before_snapshot_id": before.result.unwrap()["observation_id"],
+                        "after_snapshot_id": after.result.unwrap()["observation_id"]
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(unchanged.result.unwrap()["changes"], json!({}));
+
     let tracked_capture = successful(
         gateway
             .dispatch(

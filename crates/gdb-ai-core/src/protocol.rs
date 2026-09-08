@@ -374,11 +374,19 @@ impl SemanticResult {
             && facts.get("partial") != Some(&Value::Bool(true))
             && facts.get("complete") != Some(&Value::Bool(false));
         metadata.semantics.historical = facts.get("historical") == Some(&Value::Bool(true));
-        Self {
+        let mut result = Self {
             facts,
             metadata,
             diagnostics: BTreeMap::new(),
+        };
+        // 2026-09-08: Per-command sequence numbers made identical captures
+        // compare unequal. Keep the root transport marker in detailed output
+        // and promoted evidence, never in the facts shared by observations.
+        if let Some(sequence) = result.facts.get("evidence_seq").and_then(Value::as_u64) {
+            result.facts.as_object_mut().unwrap().remove("evidence_seq");
+            result = result.detail("evidence_seq", Value::from(sequence));
         }
+        result
     }
 
     pub(crate) fn commands(mut self, session_id: &str, replies: Vec<CommandReply>) -> Self {
@@ -1103,6 +1111,25 @@ mod tests {
         let restored: ApiResponse = serde_json::from_value(json!(compact)).unwrap();
         assert_eq!(restored.result, compact.result);
         assert_eq!(restored.semantics, compact.semantics);
+    }
+
+    #[test]
+    fn read_evidence_is_diagnostic_without_pruning_target_fields() {
+        let facts = json!({
+            "evidence_seq": 42,
+            "variables": [{"name": "evidence_seq", "value": "99"}],
+            "value": {"evidence_seq": "target text"}
+        });
+        let result = SemanticResult::read(facts.clone(), None, "sess_native");
+        assert_eq!(
+            result.metadata.evidence,
+            vec![Evidence::journal("sess_native", 42)]
+        );
+        assert_eq!(result.clone().into_value(true), facts);
+        let compact = result.into_value(false);
+        assert!(compact.get("evidence_seq").is_none());
+        assert_eq!(compact["variables"], facts["variables"]);
+        assert_eq!(compact["value"], facts["value"]);
     }
 
     #[test]
