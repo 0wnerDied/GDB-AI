@@ -975,6 +975,73 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
         .await;
     assert_eq!(denied.error.unwrap().code, ErrorCode::PolicyDenied);
 
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let single = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "single-expression",
+                    Some(&session_id),
+                    "value.evaluate",
+                    None,
+                    json!({"stop_id": second_stop, "expression": "observed"}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let single_cost = metric_value(&gateway.metrics(), "gdbai_commands_total") - before;
+    let observed: i64 = single.result.unwrap()["value"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let expressions: Vec<_> = (0..16).map(|index| format!("observed + {index}")).collect();
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let evaluated = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "full-expression-list",
+                    Some(&session_id),
+                    "value.evaluate",
+                    None,
+                    json!({"stop_id": second_stop, "expressions": expressions}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(evaluated.semantics.unwrap().complete);
+    assert_eq!(evaluated.result.unwrap()["results"], json!(expressions.iter().enumerate().map(|(index, expression)| {
+        json!({"expression": expression, "value": (observed + index as i64).to_string(), "type": null, "status": "available"})
+    }).collect::<Vec<_>>()));
+    // Compare with this GDB's single-read overhead: older releases reject
+    // a live register guard and therefore have one fewer restoration command.
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total") - before,
+        single_cost + 15
+    );
+
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let denied = gateway
+        .dispatch_agent(
+            request(
+                "invalid-expression-list",
+                Some(&session_id),
+                "value.evaluate",
+                None,
+                json!({"stop_id": second_stop, "expressions": ["observed", "observed = 0"]}),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(denied.error.unwrap().code, ErrorCode::PolicyDenied);
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total"),
+        before
+    );
+
     let partial = successful(gateway.dispatch_agent(request(
         "partial-expression-list", Some(&session_id), "value.evaluate", None,
         json!({"stop_id": second_stop, "expressions": ["observed", "missing_symbol", "observed + 1"]})
@@ -986,6 +1053,10 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     assert_eq!(partial["results"][2]["status"], "available");
     assert!(partial["failures"]["1"]["details"].get("record").is_none());
     assert!(partial.get("commands").is_none());
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total") - before,
+        single_cost + 2
+    );
 
     let custom_before = metric_value(&gateway.metrics(), "gdbai_commands_total");
     let custom = successful(gateway.dispatch_agent(request(

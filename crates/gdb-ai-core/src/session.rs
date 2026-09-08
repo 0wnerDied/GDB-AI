@@ -490,12 +490,22 @@ impl SessionHandle {
     }
 
     pub async fn safe_evaluate(&self, command: MiCommand) -> Result<CommandReply> {
+        self.safe_evaluate_batch(vec![command])
+            .await?
+            .pop()
+            .expect("one command produces one result")
+    }
+
+    pub(crate) async fn safe_evaluate_batch(
+        &self,
+        commands: Vec<MiCommand>,
+    ) -> Result<Vec<Result<CommandReply>>> {
         let deadline = command_deadline(self.command_timeout);
         if self.observation_active() {
-            return self.send_safe_evaluate(command, deadline).await;
+            return self.send_safe_evaluate(commands, deadline).await;
         }
         let _sequence = self.command_sequence_until(deadline).await?;
-        self.send_safe_evaluate(command, deadline).await
+        self.send_safe_evaluate(commands, deadline).await
     }
 
     pub(crate) async fn register_names(&self) -> Result<CommandReply> {
@@ -533,9 +543,9 @@ impl SessionHandle {
 
     async fn send_safe_evaluate(
         &self,
-        command: MiCommand,
+        commands: Vec<MiCommand>,
         deadline: tokio::time::Instant,
-    ) -> Result<CommandReply> {
+    ) -> Result<Vec<Result<CommandReply>>> {
         // 2026-08-30: Command-producing observation helpers previously lost
         // their canonical operation while queued behind another MI command.
         let operation = active_operation();
@@ -545,7 +555,7 @@ impl SessionHandle {
         let (sender, receiver) = oneshot::channel();
         self.enqueue_until(
             WorkerRequest::SafeEvaluate {
-                command,
+                commands,
                 operation,
                 deadline,
                 response: sender,

@@ -628,6 +628,227 @@ async fn stopped_wait_returns_target_exit_without_timing_out() {
 }
 
 #[tokio::test]
+async fn safe_evaluate_batch_preserves_profile_guards_and_partial_results() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let settings = [
+        "may-call-functions",
+        "may-write-memory",
+        "may-write-registers",
+    ];
+    let show = |setting| MiCommand::new("-gdb-show").unwrap().bare(setting).unwrap();
+    for profile in [
+        Profile::RawAdmin,
+        Profile::DebugControl,
+        Profile::LabMutation,
+        Profile::LiveObserver,
+        Profile::OfflineCore,
+    ] {
+        let directory = tempdir().unwrap();
+        let config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let session = SessionHandle::start(
+            Arc::new(config),
+            profile,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+        if profile == Profile::RawAdmin {
+            for (setting, value) in [("may-call-functions", "on"), ("may-write-memory", "off")] {
+                session
+                    .command(
+                        MiCommand::new("-gdb-set")
+                            .unwrap()
+                            .bare(setting)
+                            .unwrap()
+                            .bare(value)
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        let mut originals = Vec::new();
+        for setting in settings {
+            let reply = session.command(show(setting)).await.unwrap();
+            originals.push(
+                MiResult::find_str(reply.record.results(), "value")
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        let mut commands = settings.map(show).to_vec();
+        commands.extend(["missing_symbol", "42"].map(|expression| {
+            MiCommand::new("-data-evaluate-expression")
+                .unwrap()
+                .string(expression)
+        }));
+        let replies = session.safe_evaluate_batch(commands).await.unwrap();
+        let mut restored = Vec::new();
+        for setting in settings {
+            let reply = session.command(show(setting)).await.unwrap();
+            restored.push(
+                MiResult::find_str(reply.record.results(), "value")
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        session.close().await.unwrap();
+        assert_eq!(restored, originals, "{profile:?}");
+        assert_eq!(replies.len(), 5);
+        for reply in &replies[..3] {
+            assert_eq!(
+                MiResult::find_str(reply.as_ref().unwrap().record.results(), "value"),
+                Some("off"),
+                "{profile:?}"
+            );
+        }
+        assert_eq!(replies[3].as_ref().unwrap_err().code, ErrorCode::GdbError);
+        let last = replies[4].as_ref().unwrap();
+        assert_eq!(
+            MiResult::find_str(last.record.results(), "value"),
+            Some("42")
+        );
+        assert_eq!(last.token - replies[0].as_ref().unwrap().token, 4);
+        assert!(
+            crate::replay::replay(session.journal_path(), session.id().clone())
+                .unwrap()
+                .complete
+        );
+    }
+}
+
+#[tokio::test]
+async fn safe_evaluate_batch_restores_after_timeout_cancellation_and_waiter_drop() {
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    for mode in ["timeout", "cancel", "drop"] {
+        let directory = tempdir().unwrap();
+        let mut config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        config.server.command_timeout_ms = 500;
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let session = SessionHandle::start(
+            Arc::new(config),
+            Profile::RawAdmin,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+        let marker = directory.path().join("command-started");
+        let delay = if mode == "timeout" { "1" } else { "0.2" };
+        let commands = vec![
+            MiCommand::new("-interpreter-exec")
+                .unwrap()
+                .bare("console")
+                .unwrap()
+                .string(format!("shell touch {}; sleep {delay}", marker.display())),
+            MiCommand::new("-data-evaluate-expression")
+                .unwrap()
+                .string("987654321"),
+        ];
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let operation = ActiveOperation::new(OperationId::new(), cancelled.clone());
+        let batch_session = session.clone();
+        let batch = tokio::spawn(scope_operation(operation, async move {
+            batch_session.safe_evaluate_batch(commands).await
+        }));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if mode != "timeout" {
+            cancelled.store(true, Ordering::Release);
+        }
+        if mode == "drop" {
+            batch.abort();
+            assert!(batch.await.unwrap_err().is_cancelled());
+        } else {
+            assert_eq!(
+                batch.await.unwrap().unwrap_err().code,
+                if mode == "timeout" {
+                    ErrorCode::Timeout
+                } else {
+                    ErrorCode::Cancelled
+                }
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !session.state().outcome_unknown_tokens.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut restored = Vec::new();
+        for setting in [
+            "may-call-functions",
+            "may-write-memory",
+            "may-write-registers",
+        ] {
+            let reply = session
+                .command(MiCommand::new("-gdb-show").unwrap().bare(setting).unwrap())
+                .await
+                .unwrap();
+            restored.push(
+                MiResult::find_str(reply.record.results(), "value")
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        session.close().await.unwrap();
+        assert_eq!(restored, ["off", "on", "on"], "{mode}");
+        for line in std::fs::read_to_string(session.journal_path())
+            .unwrap()
+            .lines()
+        {
+            let entry: crate::journal::JournalEntry = serde_json::from_str(line).unwrap();
+            if entry.kind == "mi.input" {
+                let command = BASE64
+                    .decode(entry.data["raw_base64"].as_str().unwrap())
+                    .unwrap();
+                assert!(
+                    !String::from_utf8(command).unwrap().contains("987654321"),
+                    "{mode}: evaluated a cancelled tail"
+                );
+            }
+        }
+        assert!(
+            crate::replay::replay(session.journal_path(), session.id().clone())
+                .unwrap()
+                .complete
+        );
+    }
+}
+
+#[tokio::test]
 async fn safe_evaluate_restores_settings_after_a_late_result() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
@@ -653,6 +874,20 @@ async fn safe_evaluate_restores_settings_after_a_late_result() {
     )
     .await
     .unwrap();
+
+    let delayed_read = MiCommand::new("-interpreter-exec")
+        .unwrap()
+        .bare("console")
+        .unwrap()
+        .string("shell sleep 0.3");
+    assert!(
+        session
+            .safe_evaluate_batch(vec![delayed_read; 2])
+            .await
+            .unwrap()
+            .iter()
+            .all(Result::is_ok)
+    );
 
     let error = session
         .safe_evaluate(

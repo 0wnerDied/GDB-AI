@@ -352,20 +352,6 @@ pub(super) fn snapshot_requests(parameters: &Value, profile: &str, frames: usize
     Value::Array(requests)
 }
 
-pub(super) fn independent_failure(code: ErrorCode) -> bool {
-    matches!(
-        code,
-        ErrorCode::InvalidArgument
-            | ErrorCode::NotFound
-            | ErrorCode::CapabilityMissing
-            | ErrorCode::Unsupported
-            | ErrorCode::PolicyDenied
-            | ErrorCode::OutputLimit
-            | ErrorCode::PartialRead
-            | ErrorCode::GdbError
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;

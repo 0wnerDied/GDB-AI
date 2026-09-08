@@ -22,7 +22,7 @@ use super::{
         result_string_list, result_text, target_architecture, valid_integer_literal,
     },
     observation::{
-        ObservationKind, independent_failure, parse_observation_requests, snapshot_requests,
+        ObservationKind, parse_observation_requests, snapshot_requests,
         validate_observation_requests,
     },
     reconciliation::reconcile_breakpoints,
@@ -55,7 +55,7 @@ fn disassembly_architecture(reply: Result<CommandReply>) -> Result<&'static str>
             &reply.record,
             "register-names",
         ))),
-        Err(error) if independent_failure(error.code) => Ok("unknown"),
+        Err(error) if error.code.is_independent_read_failure() => Ok("unknown"),
         Err(error) => Err(error),
     }
 }
@@ -104,7 +104,7 @@ fn stack_facts(
                 )
             })
         }
-        Err(error) if independent_failure(error.code) => Some(error),
+        Err(error) if error.code.is_independent_read_failure() => Some(error),
         Err(error) => return Err(error),
     };
     let mut facts = json!({
@@ -939,7 +939,7 @@ impl Gateway {
                                     request.finalize_result(&mut result.facts);
                                     CachedObservation::Result(Box::new(result))
                                 }
-                                Err(error) if independent_failure(error.code) => {
+                                Err(error) if error.code.is_independent_read_failure() => {
                                     // 2026-09-08: One unavailable read aborted
                                     // already-valid siblings. Retain only
                                     // independent failures; stop, epoch,
@@ -1211,7 +1211,7 @@ impl Gateway {
                                 })
                             }
                         }
-                        Err(error) if independent_failure(error.code) => {
+                        Err(error) if error.code.is_independent_read_failure() => {
                             warnings.push(json!({
                                 "code": "TRACKED_EXPRESSION_UNAVAILABLE",
                                 "tracking_id": tracking_id,
@@ -1303,7 +1303,7 @@ impl Gateway {
                                 "evidence_seq": evidence_seq
                             })
                         }
-                        Err(error) if independent_failure(error.code) => {
+                        Err(error) if error.code.is_independent_read_failure() => {
                             warnings.push(json!({
                                 "code": "TRACKED_MEMORY_UNAVAILABLE",
                                 "tracking_id": tracking_id,

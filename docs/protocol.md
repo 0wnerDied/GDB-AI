@@ -206,7 +206,10 @@ metadata; `value.update` returns semantic `changes`, including availability
 and type changes. Values distinguish `available`, `unavailable`,
 `not_collected`, `failed`, `invalid`, and `unknown`; a missing aggregate value
 does not mean it is unavailable. Safe expression lists preserve successful
-siblings and identify failures by their zero-based string index. Variable
+siblings and identify failures by their zero-based string index. One list
+shares the session's read-only guards without memoizing expression results;
+cancellation or an uncertain command outcome stops the remaining reads, and
+the session worker owns restoration even after the caller disconnects. Variable
 handles preserve their creation frame for child and update reads, and reject
 conflicting selectors. Locals, arguments, and tracked expressions use the same
 value representation. Debugger values remain strings or lossless binary

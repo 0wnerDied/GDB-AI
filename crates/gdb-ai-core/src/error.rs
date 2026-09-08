@@ -40,6 +40,22 @@ pub enum ErrorCode {
     Internal,
 }
 
+impl ErrorCode {
+    pub(crate) fn is_independent_read_failure(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidArgument
+                | Self::NotFound
+                | Self::CapabilityMissing
+                | Self::Unsupported
+                | Self::PolicyDenied
+                | Self::OutputLimit
+                | Self::PartialRead
+                | Self::GdbError
+        )
+    }
+}
+
 #[derive(Debug, Error)]
 #[error("{code:?}: {message}")]
 pub struct Error {

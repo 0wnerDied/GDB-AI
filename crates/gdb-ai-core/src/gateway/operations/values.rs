@@ -18,7 +18,6 @@ use crate::{
     protocol::{
         ApiRequest, ObservationContext, SemanticResult, ValueChange, ValueChild, ValueStatus,
     },
-    session::CommandReply,
 };
 
 pub(super) fn result_value(results: &[MiResult], name: &str) -> Option<Value> {
@@ -127,39 +126,6 @@ fn value_changes(record: &MiRecord, binding: &ValueBinding) -> Vec<ValueChange> 
         .collect()
 }
 
-async fn evaluate_expression(
-    entry: &SessionEntry,
-    request: &ApiRequest,
-    state: &crate::domain::SessionState,
-    expression: &str,
-    side_effects: bool,
-) -> Result<CommandReply> {
-    let command = context_options(
-        MiCommand::new("-data-evaluate-expression")?.string(expression),
-        &request.parameters,
-        state,
-    )?;
-    if !side_effects {
-        return safe_evaluate_command(&entry.handle, command).await;
-    }
-    entry
-        .handle
-        .transaction(
-            vec![
-                MiCommand::new("-gdb-set")?
-                    .bare("may-call-functions")?
-                    .bare("on")?,
-            ],
-            command,
-            vec![
-                MiCommand::new("-gdb-set")?
-                    .bare("may-call-functions")?
-                    .bare("off")?,
-            ],
-        )
-        .await
-}
-
 async fn current_value_binding(
     entry: &SessionEntry,
     request: &ApiRequest,
@@ -265,24 +231,37 @@ impl Gateway {
             }
         }
         let capture = async {
-            let mut replies = Vec::with_capacity(expressions.len());
-            for expression in &expressions {
-                let reply =
-                    evaluate_expression(&entry, request, &state, expression, side_effects).await;
-                // 2026-09-08: One bad expression discarded valid siblings.
-                // Only independent side-effect-denied failures are partial;
-                // cancellation, deadlines, and uncertain effects still abort.
-                match reply {
-                    Ok(reply) => replies.push(Ok(reply)),
-                    Err(error)
-                        if batch
-                            && !side_effects
-                            && super::observation::independent_failure(error.code) =>
-                    {
-                        replies.push(Err(error))
-                    }
-                    Err(error) => return Err(error),
-                }
+            let commands = expressions
+                .iter()
+                .map(|expression| {
+                    context_options(
+                        MiCommand::new("-data-evaluate-expression")?.string(expression),
+                        &request.parameters,
+                        &state,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if !side_effects {
+                return entry.handle.safe_evaluate_batch(commands).await;
+            }
+            let mut replies = Vec::with_capacity(commands.len());
+            for command in commands {
+                replies.push(Ok(entry
+                    .handle
+                    .transaction(
+                        vec![
+                            MiCommand::new("-gdb-set")?
+                                .bare("may-call-functions")?
+                                .bare("on")?,
+                        ],
+                        command,
+                        vec![
+                            MiCommand::new("-gdb-set")?
+                                .bare("may-call-functions")?
+                                .bare("off")?,
+                        ],
+                    )
+                    .await?));
             }
             Ok(replies)
         };

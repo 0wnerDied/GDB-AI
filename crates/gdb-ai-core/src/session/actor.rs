@@ -54,10 +54,10 @@ pub(super) enum WorkerRequest {
         response: oneshot::Sender<Result<CommandReply>>,
     },
     SafeEvaluate {
-        command: MiCommand,
+        commands: Vec<MiCommand>,
         operation: Option<ActiveOperation>,
         deadline: tokio::time::Instant,
-        response: oneshot::Sender<Result<CommandReply>>,
+        response: oneshot::Sender<Result<Vec<Result<CommandReply>>>>,
     },
     RecordEvent {
         event: DomainEvent,
@@ -851,12 +851,15 @@ impl SessionWorker {
                 self.cleanup_one_stale_value().await;
             }
             WorkerRequest::SafeEvaluate {
-                command,
+                commands,
                 operation,
                 deadline,
                 response,
             } => {
-                if let Err(error) = self.require_known_outcome(&command) {
+                if let Err(error) = commands
+                    .iter()
+                    .try_for_each(|command| self.require_known_outcome(command))
+                {
                     let _ = response.send(Err(error));
                     return false;
                 }
@@ -865,7 +868,7 @@ impl SessionWorker {
                     return false;
                 }
                 let _ = response.send(
-                    self.execute_safe(command, operation.as_ref(), deadline)
+                    self.execute_safe(commands, operation.as_ref(), deadline)
                         .await,
                 );
                 self.cleanup_one_stale_value().await;
@@ -1590,10 +1593,10 @@ impl SessionWorker {
 
     async fn execute_safe(
         &mut self,
-        command: MiCommand,
+        commands: Vec<MiCommand>,
         operation: Option<&ActiveOperation>,
-        deadline: tokio::time::Instant,
-    ) -> Result<CommandReply> {
+        mut deadline: tokio::time::Instant,
+    ) -> Result<Vec<Result<CommandReply>>> {
         const SETTINGS: [&str; 3] = [
             "may-call-functions",
             "may-write-memory",
@@ -1653,13 +1656,32 @@ impl SessionWorker {
                 }
             }
         }
-        let result = match setup_error {
-            Some(error) => Err(error),
-            None => match operation.map(ActiveOperation::require_active) {
-                Some(Err(error)) => Err(error),
-                _ => self.execute_until(command, deadline).await,
-            },
-        };
+        // 2026-09-09: Expression lists toggled identical guards for every
+        // item. Keep one worker-owned guard scope so caller cancellation
+        // cannot skip restoration; only independent read failures continue.
+        let result = async {
+            if let Some(error) = setup_error {
+                return Err(error);
+            }
+            let mut replies = Vec::with_capacity(commands.len());
+            for (index, command) in commands.into_iter().enumerate() {
+                if let Some(operation) = operation {
+                    operation.require_active()?;
+                }
+                self.require_known_outcome(&command)?;
+                // Preserve the existing per-expression timeout after bounded
+                // admission and setup; batching must not shorten later reads.
+                if index > 0 {
+                    deadline = command_deadline(self.command_timeout);
+                }
+                match self.execute_until(command, deadline).await {
+                    Err(error) if !error.code.is_independent_read_failure() => return Err(error),
+                    reply => replies.push(reply),
+                }
+            }
+            Ok(replies)
+        }
+        .await;
         let restoration = originals
             .into_iter()
             .filter(|(setting, _)| guarded.contains(setting))
