@@ -37,6 +37,29 @@ and outside the default catalog.
 
 ## Runtime data-path verification
 
+### Shared debugging turns
+
+- [x] Use one bounded read plan for run/wait, batch, and snapshot profiles;
+  inspect-only snapshots must not collect an implicit standard profile.
+- [x] Reuse register metadata and resolved selection within a fenced turn,
+  preserve independent failures, and propagate cancellation/stale contexts.
+- [x] Construct native facts, context, completeness, availability, and evidence
+  in the core; keep canonical diagnostics separate from compact projection.
+- [x] Preserve value precision, binary bytes, pagination, and creation-frame
+  attribution; retain successful siblings in safe expression lists.
+- [x] Coalesce qualified concurrent reads with bounded retention and full
+  parameter/revision/mutation fences; exclude potentially volatile reads.
+- [x] Keep immutable historical reads outside target execution, retain
+  authorized controller handoff, and preserve independent-session concurrency.
+
+The focused regression uses a fixed local C program and verifies backend
+command counts for 1/4/8 readers, same-stop invalidation, partial failures,
+historical reuse, and context ownership. SDK verification covers both HTTP
+protocol paths and journal modes. These checks establish interface and
+collection behavior, not an autonomous Agent or exploit-speed claim.
+
+### Existing data-path gates
+
 Keep framing and replay incremental as retained output grows, without changing
 the three-crate ownership boundaries, record limits, normalized sequence
 authority, checkpoint checks, or evidence-gap rules. Qualify these paths with

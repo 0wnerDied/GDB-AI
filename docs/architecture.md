@@ -125,8 +125,10 @@ starve debugger state events.
 - The Gateway registry owns canonical operations; Streamable HTTP pending state
   owns only request IDs and response waiters. A waiter timeout returns a
   queryable operation ID and never detaches untracked target work.
-- GDB-specific command strings and record classes remain inside the core and
-  backend implementation and never enter the canonical protocol.
+- Native results separate facts and typed context/completeness/evidence from
+  detailed diagnostics. The compact MCP envelope consumes those semantics;
+  canonical v1 retains its legacy MI diagnostic fields. Dynamic provider
+  facts cross this boundary once before composition, not once per transport.
 
 ## State and evidence invariants
 
@@ -136,8 +138,14 @@ starve debugger state events.
   execution epoch. A context change returns `STALE_CONTEXT` instead of mixed
   evidence.
 - Run, batch, and snapshot observation plans share typed capture context and
-  per-item failures. Register metadata is reused inside one guarded turn;
-  target values are not cached across turns.
+  per-item failures. Snapshot profiles expand into this same bounded plan.
+  Register metadata and context resolution are reused inside one guarded turn.
+- Qualified metadata/top-frame register requests share a bounded per-session
+  capture after authorization and target-lock admission. Full parameters,
+  revision, and mutation generation fence reuse, including same-stop writes
+  without reducer events. Memory, expressions, and unwound register reads do
+  not qualify. Waiting readers retain independent cancellation and deadlines;
+  GDB mutation serialization is unchanged.
 - Committed observations have unique, immutable IDs and bounded retention.
   Authorized historical readers use the existing snapshot storage without
   entering the GDB command queue. Controller handoff preserves the same

@@ -148,6 +148,8 @@ per-item thread, frame, and source selectors. Independent read failures
 preserve successful siblings and mark the observation incomplete.
 The same plan can sample configured tracking definitions or compare two
 retained observations without building a full snapshot.
+For snapshots, supplying `inspect` without `profile` collects only those
+items; an explicit profile adds its standard facts to the same bounded plan.
 An `observation_error` reports failed post-stop inspection while preserving
 the execution outcome; it does not imply that execution should be repeated.
 Use `accepted` or `running` without `inspect` for asynchronous interaction.
@@ -247,6 +249,12 @@ interrupt/close have a separate control path. MCP-created sessions retain a
 fixed caller controller without recurring lease renewal. Same-principal
 callers may observe within their access rights; concurrent clients do not
 automatically acquire independent mutation authority over one target.
+
+While stopped, identical qualified read requests share a bounded per-session
+capture. Qualification covers metadata and top-frame registers, with full
+parameters, context, revision, and same-stop mutations checked before reuse.
+Expressions, memory (including volatile/MMIO), and unwound registers are not
+cached.
 
 Run inspections, batches, and snapshots return an immutable `observation_id`.
 Share it with an authorized observer through `gdb_inspect` view `observation`

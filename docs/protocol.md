@@ -33,9 +33,18 @@ tracking, and kernel projections; `--raw-admin` independently exposes the
 audited raw escape hatch. Hidden MCP projections do not remove methods from
 the canonical API.
 
-Projected mapping records retain start and end addresses, file offset,
-permissions, and path. Filesystem device, inode, and provider-source metadata
-remain available through the canonical API.
+Mapping records retain start and end addresses, file offset, permissions,
+and path. Provider-specific provenance may accompany those facts.
+
+Ordinary reads, values, snapshots, batches, and execution turns use a core
+semantic result. Canonical responses add `semantics` with capture `context`,
+`complete`, `historical`, and `projection: "detailed"`; execution may also
+include the compact matched `state`. MCP projects these as top-level
+`context`, `complete`, `historical` (when true), and `state`, alongside
+`result`, warnings, pagination, artifacts, and evidence. Facts stay inline
+within the response limit. Canonical diagnostics retain legacy MI replies;
+the compact projection does not construct or serialize those replies.
+Legacy lifecycle, raw, and specialized provider responses remain compatible.
 
 Stdio and Unix stream clients may attach `_meta.progressToken` to a request.
 GDB/AI emits ordered `notifications/progress` records before and after the
@@ -61,6 +70,9 @@ observations. Run/wait `inspect`, `inspection.batch.requests`, and
 expressions, and at most `limits.memory_read_bytes` total bytes across
 explicit memory reads. The whole plan is validated before run control or
 input delivery.
+For snapshots, `inspect` without `profile` selects only those items and
+reports `profile: "custom"`. An explicit profile expands into standard read
+items in the same plan; its items also count toward the sixteen-item limit.
 
 Alongside existing inspection views, items accept `view: "evaluate"` with
 `expression` or `expressions`, `view: "memory"` with `address` or
@@ -76,15 +88,34 @@ its result is explicitly historical and preserves both observation IDs.
 
 Composite results include `observation_context` with the captured stop,
 execution epoch, revision, and available inferior/thread/frame identity.
-This is the default stopped focus. Results retain explicit per-item context
-overrides in `selection`, and single-expression results include `expression`.
+This reflects the requested parent selection, or the default stopped focus.
+Contradictory inferior, thread, and frame selectors are rejected. Results
+retain explicit per-item context overrides in `selection`, and
+single-expression results include `expression`.
+An item's explicit selection replaces the parent selection as a unit, so a
+new thread never inherits a frame belonging to the parent's thread.
 Batch results contain `results`, keyed `failures`, and `complete`; run results
 use `observations`, `observation_failures`, and `observation_complete`.
+If the target exits before inspection, execution still succeeds but returns
+`observation_status: "not_collected"` and incomplete observation semantics.
+Missing output bytes also keep the turn incomplete even if inspection succeeds.
+Availability maps distinguish `captured`, `not_collected`, `unavailable`,
+and `failed`. `captured` means the read returned facts; value-level status and
+pagination still describe individual fields and omitted pages.
 Independent read failures keep successful siblings. A changed stop/epoch,
 cancellation, or deadline invalidates the composite observation instead of
-returning mixed evidence. Register-name metadata and identical eligible
-metadata/register views are reused only within that fenced turn; live
-expressions, memory, and disassembly are not memoized.
+returning mixed evidence. Register names and context resolution are reused
+within one fenced turn. While stopped, identical qualified requests also
+share a bounded per-session capture: capabilities, providers, mappings,
+signal policy, and top-frame registers qualify, as do batches containing
+only qualified views.
+Each caller is authorized independently. Full parameters, thread/frame
+selection, revision, and the session's mutation generation fence reuse;
+even same-stop writes without a revision event invalidate prior results.
+Only complete captures are retained, up to sixteen entries and one configured
+tool-response byte budget for serialized facts and keys. Expressions,
+memory, disassembly, source files, unwound registers, and stateful tracking
+are never memoized across requests.
 
 Completed and partially successful captures have an immutable
 `observation_id`, also accepted as `snapshot_id` by
@@ -105,9 +136,15 @@ The former controller keeps observation access but loses mutation authority.
 
 Variable-object `value.children` returns semantic `children` and paging
 metadata; `value.update` returns semantic `changes`, including availability
-and type changes. Debugger values remain strings, or lossless binary objects,
-not floating-point JSON conversions. Canonical v1 results retain the legacy
-MI reply for compatibility; projected tools expose the semantic collections.
+and type changes. Values distinguish `available`, `unavailable`,
+`not_collected`, `failed`, `invalid`, and `unknown`; a missing aggregate value
+does not mean it is unavailable. Safe expression lists preserve successful
+siblings and identify failures by their zero-based string index. Variable
+handles preserve their creation frame for child and update reads, and reject
+conflicting selectors. Locals, arguments, and tracked expressions use the same
+value representation. Debugger values remain strings or lossless binary
+objects, not floating-point JSON conversions. Canonical v1 results retain the
+legacy MI reply for compatibility; projected tools expose the semantic collections.
 
 Streamable HTTP supports two version-specific request paths over the same
 endpoint and canonical dispatcher. MCP `2025-11-25` stores the negotiated
