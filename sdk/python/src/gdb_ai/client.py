@@ -77,9 +77,15 @@ class Client:
         allow_raw: bool = False,
         timeout: float = 30.0,
         protocol_version: ProtocolVersion = MCP_VERSION,
+        client_name: str | None = None,
     ) -> None:
         if protocol_version not in {MCP_VERSION, STATELESS_MCP_VERSION}:
             raise ValueError("unsupported MCP protocol version")
+        explicit_client_name = client_name is not None
+        if client_name is None:
+            client_name = "gdb-ai-python"
+        if not client_name or len(client_name.encode()) > 128:
+            raise ValueError("client_name must contain 1 to 128 bytes")
         # 2026-09-06: A documented /mcp endpoint used to become /mcp/mcp.
         self.endpoint = endpoint.rstrip("/")
         if not self.endpoint.endswith("/mcp"):
@@ -88,6 +94,8 @@ class Client:
         self.allow_raw = allow_raw
         self.timeout = timeout
         self.protocol_version = protocol_version
+        self.client_name = client_name
+        self._explicit_client_name = explicit_client_name
         self._mcp_session: str | None = None
         self._mcp_version: str | None = None
         self._next_id = 1
@@ -105,7 +113,7 @@ class Client:
             "initialize",
             {
                 "protocolVersion": MCP_VERSION,
-                "clientInfo": {"name": "gdb-ai-python", "version": "1.2.0"},
+                "clientInfo": {"name": self.client_name, "version": "1.2.0"},
             },
             include_session=False,
         )
@@ -209,12 +217,15 @@ class Client:
         request_id = self._next_id
         self._next_id += 1
         if self.protocol_version == STATELESS_MCP_VERSION:
+            metadata: dict[str, Any] = {
+                "io.modelcontextprotocol/protocolVersion": STATELESS_MCP_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }
+            if self._explicit_client_name:
+                metadata["gdb-ai.dev/clientName"] = self.client_name
             params = {
                 **params,
-                "_meta": {
-                    "io.modelcontextprotocol/protocolVersion": STATELESS_MCP_VERSION,
-                    "io.modelcontextprotocol/clientCapabilities": {},
-                },
+                "_meta": metadata,
             }
         payload = json.dumps(
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
@@ -345,6 +356,9 @@ class Session:
         )
         self._observe_revision(response)
         self.lease_id = response["result"]["lease_id"]
+
+    def handoff(self, to: str) -> dict[str, Any]:
+        return self.call("session.handoff", {"to": to})
 
     def close(self) -> dict[str, Any]:
         # 2026-09-06: Discarding close replies hid finalized output artifacts

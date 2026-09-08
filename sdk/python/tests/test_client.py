@@ -117,13 +117,17 @@ class ClientTest(unittest.TestCase):
             return Response({})
 
         with patch("gdb_ai.client.urlopen", side_effect=open_request):
-            client = Client("http://127.0.0.1:8080")
+            client = Client("http://127.0.0.1:8080", client_name="analysis-agent")
             client.connect()
             client.connect()
             client.disconnect()
             client.disconnect()
 
         self.assertEqual(requests[-1].get_method(), "DELETE")
+        self.assertEqual(
+            json.loads(requests[0].data)["params"]["clientInfo"]["name"],
+            "analysis-agent",
+        )
         self.assertEqual(requests[-1].get_header("Mcp-session-id"), "mcp_test")
         for request in requests[1:]:
             self.assertEqual(
@@ -141,6 +145,9 @@ class ClientTest(unittest.TestCase):
             client._mcp_session = "mcp_evicted"
             client.disconnect()
         self.assertIsNone(client._mcp_session)
+        for name in ("", "\N{SNOWMAN}" * 43):
+            with self.assertRaises(ValueError):
+                Client(client.endpoint, client_name=name)
 
         requests.clear()
         def open_stateless(request, **_):
@@ -172,6 +179,18 @@ class ClientTest(unittest.TestCase):
                 "io.modelcontextprotocol/clientCapabilities": {},
             })
 
+        requests.clear()
+        with patch("gdb_ai.client.urlopen", side_effect=open_stateless):
+            Client(
+                client.endpoint,
+                protocol_version="2026-07-28",
+                client_name="analysis-agent",
+            ).connect()
+        self.assertEqual(
+            json.loads(requests[0].data)["params"]["_meta"]["gdb-ai.dev/clientName"],
+            "analysis-agent",
+        )
+
     def test_renew_accepts_the_latest_revision(self) -> None:
         calls = []
 
@@ -186,6 +205,13 @@ class ClientTest(unittest.TestCase):
         self.assertNotIn("expected_revision", calls[0][2])
         self.assertEqual(session.revision, 9)
         self.assertEqual(session.lease_id, "lease_new")
+        session.handoff("principal/mcp:next-agent")
+        self.assertEqual(calls[-1][0], "session.handoff")
+        self.assertEqual(calls[-1][1], {
+            "to": "principal/mcp:next-agent",
+            "lease_id": "lease_new",
+        })
+        self.assertEqual(calls[-1][2]["expected_revision"], 9)
 
     def test_session_retries_once_after_managed_lease_expiry(self) -> None:
         calls = []

@@ -39,6 +39,7 @@ canonical_methods! {
     SessionForceAbort => "session.force_abort",
     SessionAcquireWriteLease => "session.acquire_write_lease",
     SessionReleaseWriteLease => "session.release_write_lease",
+    SessionHandoff => "session.handoff",
     SessionAttemptRecovery => "session.attempt_recovery",
     SessionCapabilities => "session.capabilities",
     SessionProviders => "session.providers",

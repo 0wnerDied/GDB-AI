@@ -117,6 +117,8 @@ impl Gateway {
             .await?;
         let mut result = json!({
             "session_id": id,
+            "caller_identity": caller.identity,
+            "controller": caller.identity,
             "resource": format!("gdbai://session/{}/status", id.0),
             "state": entry.handle.state(),
             "backend": entry.handle.capabilities().backend,
@@ -214,6 +216,71 @@ impl Gateway {
         Ok(json!({ "released": released }))
     }
 
+    pub(super) async fn session_handoff(
+        &self,
+        request: &ApiRequest,
+        caller: &Caller,
+    ) -> Result<Value> {
+        let entry = self.entry(required_session(request)?).await?;
+        let to = string(&request.parameters, "to")?;
+        if to.is_empty() || to.len() > 256 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "handoff identity must contain 1 to 256 bytes",
+            ));
+        }
+        if !same_principal(&entry.owner, &caller.identity) || !same_principal(&to, &caller.identity)
+        {
+            return Err(Error::new(
+                ErrorCode::PolicyDenied,
+                "controller handoff must remain within the session owner principal",
+            ));
+        }
+
+        let generation = {
+            let mut current = entry.controller.lock().await;
+            // 2026-09-08: Checking control only during admission let a
+            // concurrent transfer replace it before handoff. Recheck the exact
+            // controller under its serialization lock; display names only route
+            // an already authenticated same-principal transfer.
+            match current.as_ref() {
+                Some(Controller::Agent(owner)) if owner == &caller.identity => {}
+                Some(Controller::Lease(lease))
+                    if lease.owner == caller.identity
+                        && request.parameters.get("lease_id").and_then(Value::as_str)
+                            == Some(lease.lease_id.0.as_str()) =>
+                {
+                    self.store.delete_lease(entry.handle.id())?;
+                }
+                _ => {
+                    return Err(Error::new(
+                        ErrorCode::WriteLeaseRequired,
+                        "caller no longer holds the session controller",
+                    ));
+                }
+            }
+            current.replace(Controller::Agent(to.clone()));
+            entry.lease_generation.fetch_add(1, Ordering::Relaxed) + 1
+        };
+        let mut result = json!({ "controller": to, "generation": generation });
+        if let Err(error) = entry
+            .handle
+            .record_event(DomainEvent::ControllerChanged {
+                kind: "controller_handoff".into(),
+            })
+            .await
+        {
+            // 2026-09-08: Returning failure after control had transferred
+            // invited a retry by the former controller. Report the evidence
+            // gap while preserving the already-completed handoff result.
+            result["warnings"] = json!([{
+                "code": "CONTROLLER_EVENT_NOT_RECORDED",
+                "message": error.to_string()
+            }]);
+        }
+        Ok(result)
+    }
+
     pub(super) async fn session_attempt_recovery(&self, request: &ApiRequest) -> Result<Value> {
         let entry = self.entry(required_session(request)?).await?;
         self.reconcile_session(&entry, true).await
@@ -262,16 +329,33 @@ impl Gateway {
         )?)
     }
 
-    pub(super) async fn session_get(&self, request: &ApiRequest) -> Result<Value> {
+    pub(super) async fn session_get(&self, request: &ApiRequest, caller: &Caller) -> Result<Value> {
         let session_id = SessionId::parse(required_session(request)?)?;
         if let Ok(entry) = self.entry(&session_id.0).await {
-            return Ok(serde_json::to_value(entry.handle.state())?);
+            let controller =
+                entry
+                    .controller
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|controller| match controller {
+                        Controller::Agent(identity) => identity.clone(),
+                        Controller::Lease(lease) => lease.owner.clone(),
+                    });
+            let mut state = serde_json::to_value(entry.handle.state())?;
+            state["caller_identity"] = Value::String(caller.identity.clone());
+            state["controller"] = serde_json::to_value(controller)?;
+            return Ok(state);
         }
-        self.retained_session_state(&session_id)
+        let mut state = self
+            .retained_session_state(&session_id)
             .await?
             .map(serde_json::to_value)
             .transpose()?
-            .ok_or_else(|| Error::new(ErrorCode::NotFound, "session not found"))
+            .ok_or_else(|| Error::new(ErrorCode::NotFound, "session not found"))?;
+        state["caller_identity"] = Value::String(caller.identity.clone());
+        state["controller"] = Value::Null;
+        Ok(state)
     }
 
     pub(super) async fn session_providers(&self, request: &ApiRequest) -> Result<Value> {

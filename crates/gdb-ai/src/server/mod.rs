@@ -119,12 +119,8 @@ fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<
         .and_then(|info| info.get("name"))
         .and_then(Value::as_str)
         .ok_or_else(|| RpcFault::invalid("clientInfo.name is required"))?;
-    if client_name.is_empty() || client_name.len() > 128 {
-        return Err(RpcFault::invalid(
-            "clientInfo.name must contain 1 to 128 bytes",
-        ));
-    }
-    caller.identity = format!("{}/mcp:{client_name}", caller.identity);
+    validate_client_name(client_name, "clientInfo.name")?;
+    *caller = caller_with_client_name(caller, client_name);
     *phase = Phase::AwaitingInitialized;
     let supported = [MCP_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"];
     let version = if supported.contains(&requested) {
@@ -141,6 +137,80 @@ fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<
         "serverInfo": {"name": "gdb-ai", "version": env!("CARGO_PKG_VERSION")},
         "instructions": AGENT_INSTRUCTIONS
     }))
+}
+
+fn validate_client_name(name: &str, field: &str) -> Result<(), RpcFault> {
+    if name.is_empty() || name.len() > 128 {
+        return Err(RpcFault::invalid(format!(
+            "{field} must contain 1 to 128 bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn caller_with_client_name(caller: &Caller, client_name: &str) -> Caller {
+    // 2026-09-08: An existing client label may itself contain `/mcp:`.
+    // Replace everything after the first trusted principal boundary.
+    let principal = caller
+        .identity
+        .split_once("/mcp:")
+        .map_or(caller.identity.as_str(), |(principal, _)| principal);
+    Caller {
+        identity: format!("{principal}/mcp:{client_name}"),
+        admin: caller.admin,
+    }
+}
+
+fn stateless_caller(caller: &Caller, params: &Value) -> Result<Caller, RpcFault> {
+    const CLIENT_NAME_KEY: &str = "gdb-ai.dev/clientName";
+    let Some(name) = params
+        .get("_meta")
+        .and_then(|metadata| metadata.get(CLIENT_NAME_KEY))
+    else {
+        return Ok(caller.clone());
+    };
+    let name = name
+        .as_str()
+        .ok_or_else(|| RpcFault::invalid(format!("_meta.{CLIENT_NAME_KEY} must be a string")))?;
+    validate_client_name(name, &format!("_meta.{CLIENT_NAME_KEY}"))?;
+    Ok(caller_with_client_name(caller, name))
+}
+
+#[cfg(test)]
+mod client_identity_tests {
+    use super::*;
+
+    #[test]
+    fn stateless_client_name_preserves_the_authenticated_principal() {
+        let caller = Caller {
+            identity: "principal/mcp:old/mcp:untrusted".into(),
+            admin: true,
+        };
+        let unchanged = stateless_caller(&caller, &json!({})).unwrap();
+        assert_eq!(unchanged.identity, caller.identity);
+        assert!(unchanged.admin);
+
+        let labeled = stateless_caller(
+            &caller,
+            &json!({"_meta": {"gdb-ai.dev/clientName": "worker"}}),
+        )
+        .unwrap();
+        assert_eq!(labeled.identity, "principal/mcp:worker");
+        assert!(labeled.admin);
+    }
+
+    #[test]
+    fn stateless_client_name_reuses_initialize_bounds() {
+        for name in [Value::Null, json!(""), json!("x".repeat(129))] {
+            assert!(
+                stateless_caller(
+                    &Caller::local("principal"),
+                    &json!({"_meta": {"gdb-ai.dev/clientName": name}}),
+                )
+                .is_err()
+            );
+        }
+    }
 }
 
 // 2026-08-30: MCP 2026 removed connection handshakes and carries protocol
@@ -814,13 +884,24 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                 // 2026-08-31: Session creation repeated the hidden lease,
                 // complete capabilities, backend PTY, and initial state before
                 // the Agent had a target. Keep only launch-relevant identity.
-                result.retain(|field, _| matches!(field.as_str(), "session_id" | "profile"));
+                // 2026-09-08: Controller-aware creation added caller identity,
+                // which projection must retain for explicit Agent handoff.
+                result.retain(|field, _| {
+                    matches!(
+                        field.as_str(),
+                        "session_id" | "profile" | "caller_identity" | "controller"
+                    )
+                });
                 state = None;
             }
             CanonicalMethod::SessionGet => {
                 // 2026-09-01: Projected status repeated every registry on each
                 // poll, although full target state has its own inspection view.
                 // Keep only target coordination plus the event-wait cursor.
+                // 2026-09-08: SessionState deserialization ignores additive
+                // semantic fields. Save control identity before summarizing it.
+                let caller_identity = result.get("caller_identity").cloned();
+                let controller = result.get("controller").cloned();
                 if let Ok(status) =
                     serde_json::from_value::<SessionState>(Value::Object(result.clone()))
                 {
@@ -828,6 +909,12 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                         unreachable!();
                     };
                     summary.insert("event_seq".into(), Value::from(status.event_seq));
+                    if let Some(caller_identity) = caller_identity {
+                        summary.insert("caller_identity".into(), caller_identity);
+                    }
+                    if let Some(controller) = controller {
+                        summary.insert("controller".into(), controller);
+                    }
                     *result = summary;
                     state = None;
                 }

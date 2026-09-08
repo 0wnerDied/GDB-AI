@@ -625,6 +625,7 @@ impl CanonicalMethod {
             | InferiorIoSendEof
             | TrackingList
             | SignalGet => MethodContract::plain(vec![]),
+            SessionHandoff => MethodContract::plain(vec![required("to", String)]),
             SessionAcquireWriteLease => MethodContract::plain(vec![optional("force", Boolean)]),
             SessionTranscript => MethodContract::plain(vec![
                 optional("offset", Unsigned),
@@ -1116,6 +1117,9 @@ mod tests {
                 "wait": {"until": "settled"},
                 "inspect": [{"view": "stack", "limit": 4}]
             }))
+            .unwrap();
+        CanonicalMethod::SessionHandoff
+            .validate_parameters(&json!({"to": "agent:test"}))
             .unwrap();
         CanonicalMethod::InferiorIoWrite
             .validate_parameters(&json!({

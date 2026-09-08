@@ -223,6 +223,40 @@
       "if": {
         "properties": {
           "method": {
+            "const": "session.handoff"
+          }
+        },
+        "required": [
+          "method"
+        ]
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "accept_latest_revision": {
+                "type": "boolean"
+              },
+              "lease_id": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "to"
+            ],
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "method": {
             "const": "session.attempt_recovery"
           }
         },
@@ -4852,6 +4886,7 @@
         "session.force_abort",
         "session.acquire_write_lease",
         "session.release_write_lease",
+        "session.handoff",
         "session.attempt_recovery",
         "session.capabilities",
         "session.providers",

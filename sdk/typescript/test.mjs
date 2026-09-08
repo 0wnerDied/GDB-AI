@@ -15,13 +15,14 @@ globalThis.fetch = async (url, init) => {
   return new Response(null, { status: 202 });
 };
 
-const client = new Client("http://127.0.0.1:8080");
+const client = new Client("http://127.0.0.1:8080", { clientName: "analysis-agent" });
 await client.connect();
 await client.connect();
 await client.disconnect();
 await client.disconnect();
 
 assert.equal(requests.at(-1).init.method, "DELETE");
+assert.equal(JSON.parse(requests[0].init.body).params.clientInfo.name, "analysis-agent");
 assert.equal(requests.at(-1).init.headers["Mcp-Session-Id"], "mcp_test");
 assert.ok(requests.slice(1).every(
   ({ init }) => init.headers["Mcp-Protocol-Version"] === "2025-11-25",
@@ -32,6 +33,8 @@ assert.ok(requests.slice(0, -1).every(
 assert.ok(requests.every(({ init }) => init.signal === undefined));
 assert.equal(requests.filter(({ init }) => init.method === "DELETE").length, 1);
 assert.equal(requests.filter(({ init }) => JSON.parse(init.body ?? "{}").method === "initialize").length, 1);
+assert.throws(() => new Client(client.endpoint, { clientName: "" }), /1 to 128 bytes/);
+assert.throws(() => new Client(client.endpoint, { clientName: "☃".repeat(43) }), /1 to 128 bytes/);
 
 requests.length = 0;
 globalThis.fetch = async (url, init) => {
@@ -69,6 +72,15 @@ for (const { url, init } of requests) {
     "io.modelcontextprotocol/clientCapabilities": {},
   });
 }
+const namedStateless = new Client("http://127.0.0.1:8080/mcp", {
+  protocolVersion: "2026-07-28",
+  clientName: "analysis-agent",
+});
+await namedStateless.connect();
+assert.equal(
+  JSON.parse(requests.at(-1).init.body).params._meta["gdb-ai.dev/clientName"],
+  "analysis-agent",
+);
 const sent = requests.length;
 await assert.rejects(stateless.call("raw.mi"), /allowRaw=true/);
 await assert.rejects(stateless.call("raw.console"), /allowRaw=true/);
@@ -116,6 +128,13 @@ const session = await Session.create(fakeClient);
 assert.equal(calls[0].parameters.profile, "lab_mutation");
 await session.renew();
 assert.equal(calls.at(-1).options.expectedRevision, undefined);
+await session.handoff("principal/mcp:next-agent");
+assert.equal(calls.at(-1).method, "session.handoff");
+assert.deepEqual(calls.at(-1).parameters, {
+  to: "principal/mcp:next-agent",
+  lease_id: "lease_new",
+});
+assert.equal(calls.at(-1).options.expectedRevision, 9);
 
 let killAttempts = 0;
 const retryCalls = [];

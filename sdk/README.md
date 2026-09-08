@@ -156,6 +156,15 @@ sends the negotiated version on subsequent requests. With explicit
 to delete. Choose the protocol when constructing the client and retain the
 same endpoint and authenticated identity for the debugging session.
 
+For cooperating workers, pass `client_name="worker-a"` in Python or
+`clientName: "worker-a"` in TypeScript. Defaults remain unchanged. The option
+sets the stateful initialization name or the stateless
+`_meta["gdb-ai.dev/clientName"]` label; it does not grant access or change the
+authenticated principal. Session create/status returns `caller_identity`
+and `controller`. The current controller can call `gdb_session` action
+`handoff` with `to` equal to the recipient's exact `caller_identity`.
+Keep projected sessions on `call_tool` / `callTool` after handoff.
+
 Disconnecting the client is not the same as closing the debugging session.
 Close each session explicitly to release GDB and finalize retained output.
 `Session.close()` and `force_abort()` / `forceAbort()` return the response,

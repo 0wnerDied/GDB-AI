@@ -21,6 +21,12 @@ renew it with `session.acquire_write_lease`. That operation also lets the
 current MCP controller switch to a canonical lease. Transferring control from
 another active caller requires administrative `force=true`. Projected calls
 on a session explicitly using a canonical lease retain its expiration rules.
+For a cooperative transfer, read the recipient's `caller_identity` from
+session status and have the current controller call `session.handoff` with
+`to` set to that exact identity (`gdb_session` action `handoff` in MCP).
+Both callers must belong to the session owner's authenticated principal.
+This establishes fixed MCP control for the recipient; a canonical client can
+then acquire its own lease. A handoff does not interrupt or resume the target.
 Expiration never interrupts a running target. If consistency is lost, the
 session owner can attempt recovery or use `gdb_session` action `force_abort`.
 Forced abort terminates resources without claiming a clean debugger shutdown.

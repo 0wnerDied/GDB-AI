@@ -435,7 +435,9 @@ async fn projected_tools_keep_control_without_lease_renewal() {
     let result = created["structuredContent"]["result"]["operation"]["result"]["result"]
         .as_object()
         .unwrap();
-    assert_eq!(result.len(), 2);
+    assert_eq!(result.len(), 4);
+    assert_eq!(result["caller_identity"], caller.identity);
+    assert_eq!(result["controller"], caller.identity);
     assert!(result.get("write_lease").is_none());
     let session_id = result["session_id"].as_str().unwrap();
 

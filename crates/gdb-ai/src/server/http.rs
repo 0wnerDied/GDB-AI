@@ -35,8 +35,8 @@ use super::{
     MAX_HTTP_PENDING_DURATION, MAX_MESSAGE_BYTES, MAX_PENDING_REQUESTS, MCP_VERSION, Phase,
     RequestCancellation, RpcFault, STATELESS_MCP_VERSION, admit_canonical_operation,
     apply_cancel_mode, canonical_rpc_request, dispatch_rpc, initialize, request_cancellation,
-    request_key, rpc_error, rpc_fault, rpc_result, stateless_request, stateless_result,
-    valid_request_id,
+    request_key, rpc_error, rpc_fault, rpc_result, stateless_caller, stateless_request,
+    stateless_result, valid_request_id,
 };
 use crate::AnyError;
 
@@ -455,16 +455,26 @@ async fn http_mcp_stateless(
     // Agents to build a stateful session first. A sessionless HTTP request
     // defaults to the current stateless protocol; explicit metadata is still
     // validated before dispatch.
-    let validation = stateless_request(&params).map(|_| ());
-    if let Err(error) = validation {
-        let mut response = json_http_response_for(
-            rpc_fault(id.unwrap_or(Value::Null), error),
-            None,
-            STATELESS_MCP_VERSION,
-        );
-        *response.status_mut() = StatusCode::BAD_REQUEST;
-        return response;
-    }
+    let caller = match stateless_request(&params).and_then(|_| {
+        stateless_caller(
+            &Caller {
+                identity: "mcp-http".into(),
+                admin: state.raw_admin,
+            },
+            &params,
+        )
+    }) {
+        Ok(caller) => caller,
+        Err(error) => {
+            let mut response = json_http_response_for(
+                rpc_fault(id.unwrap_or(Value::Null), error),
+                None,
+                STATELESS_MCP_VERSION,
+            );
+            *response.status_mut() = StatusCode::BAD_REQUEST;
+            return response;
+        }
+    };
     let Some(id) = id else {
         return StatusCode::ACCEPTED.into_response();
     };
@@ -480,10 +490,6 @@ async fn http_mcp_stateless(
     };
     // 2026-08-30: Releasing admission when a client drops its socket let it
     // accumulate detached work. Completion owns the permit until termination.
-    let caller = Caller {
-        identity: "mcp-http".into(),
-        admin: state.raw_admin,
-    };
     if let Err(error) = request_cancellation(method, &params) {
         return json_http_response_for(rpc_fault(id, error), None, STATELESS_MCP_VERSION);
     }
@@ -1299,6 +1305,20 @@ mod tests {
             "io.modelcontextprotocol/protocolVersion": STATELESS_MCP_VERSION,
             "io.modelcontextprotocol/clientCapabilities": {}
         });
+        let invalid_label = http_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Json(json!({
+                "jsonrpc": "2.0", "id": "invalid-label", "method": "tools/list",
+                "params": {"_meta": {"gdb-ai.dev/clientName": ""}}
+            })),
+        )
+        .await;
+        assert_eq!(invalid_label.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state.stateless_pending.available_permits(),
+            MAX_PENDING_REQUESTS
+        );
         let rejected = http_mcp(
             State(state.clone()),
             headers.clone(),

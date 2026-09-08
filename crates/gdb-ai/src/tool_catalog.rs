@@ -55,6 +55,7 @@ const SESSION_ACTIONS: &[ToolAction] = &[
     action!("list", SessionList),
     action!("capabilities", SessionCapabilities),
     action!("providers", SessionProviders),
+    action!("handoff", SessionHandoff),
     action!("attempt_recovery", SessionAttemptRecovery),
     action!("operation_status", OperationGet),
     action!("operation_cancel", OperationCancel),
@@ -726,6 +727,10 @@ mod tests {
         assert!(!tool_exists("gdb_values", false, false));
         assert!(tool_exists("gdb_values", true, false));
         assert!(tool_exists("gdb_batch", false, false));
+        assert_eq!(
+            method_for_tool("gdb_session", Some("handoff"), false, false),
+            Some(CanonicalMethod::SessionHandoff)
+        );
         assert!(method_for_tool("gdb_memory", Some("write"), false, false).is_none());
         assert!(method_for_tool("gdb_memory", Some("write"), true, false).is_some());
         assert_eq!(

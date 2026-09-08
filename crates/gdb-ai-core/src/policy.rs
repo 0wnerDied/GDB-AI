@@ -36,6 +36,7 @@ impl Profile {
                 | CanonicalMethod::SessionForceAbort
                 | CanonicalMethod::SessionAcquireWriteLease
                 | CanonicalMethod::SessionReleaseWriteLease
+                | CanonicalMethod::SessionHandoff
                 | CanonicalMethod::SessionAttemptRecovery
                 | CanonicalMethod::OperationCancel
         ) || (self == Self::OfflineCore && method == CanonicalMethod::TargetOpenCore)
@@ -135,6 +136,7 @@ pub fn effect_for_method(method: CanonicalMethod) -> Effect {
         | SessionForceAbort
         | SessionAcquireWriteLease
         | SessionReleaseWriteLease
+        | SessionHandoff
         | SessionAttemptRecovery => Effect::Control,
     }
 }

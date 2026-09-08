@@ -59,6 +59,13 @@ observations. Turn items expose `view` plus the high-frequency `limit`,
 `roles`, and `profile` selectors; `inspection.batch` retains the complete
 selector set.
 
+`session.create` and `session.get` expose the exact `caller_identity` and
+current `controller` (null for a closed session). `session.handoff` accepts
+`to`, requires the current controller and normal mutation preconditions, and
+transfers fixed MCP control only within the authenticated owner principal.
+Its result returns the new `controller` and coordination `generation`.
+The former controller keeps observation access but loses mutation authority.
+
 Variable-object `value.children` returns semantic `children` and paging
 metadata; `value.update` returns semantic `changes`, including availability
 and type changes. Debugger values remain strings, or lossless binary objects,
@@ -78,6 +85,12 @@ requests advertise `application/json` and `text/event-stream`; responses use
 JSON, while GET returns HTTP 405 because the server does not open an optional
 SSE stream. Older message versions remain limited to tested stdio/Unix
 compatibility; GDB/AI does not advertise the legacy HTTP+SSE transport.
+
+Stateful clients select a coordination label with `initialize.clientInfo.name`.
+Stateless clients may send `_meta["gdb-ai.dev/clientName"]` on each request;
+omission preserves the existing transport identity. Labels contain 1–128
+UTF-8 bytes and never change the authenticated principal or administrative
+authority. They are cooperative controller labels, not tenant isolation.
 
 Large results return `gdbai://artifact/sha256:...`. Artifact reads re-check
 session ownership; the URI itself is not authorization. `artifact.get` uses

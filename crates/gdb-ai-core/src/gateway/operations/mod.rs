@@ -34,7 +34,7 @@ impl Gateway {
     ) -> Result<Value> {
         match request.method {
             CanonicalMethod::SessionCreate => self.session_create(request, caller, mode).await,
-            CanonicalMethod::SessionGet => self.session_get(request).await,
+            CanonicalMethod::SessionGet => self.session_get(request, caller).await,
             CanonicalMethod::SessionList => self.session_list(caller).await,
             CanonicalMethod::SessionClose => self.session_close(request).await,
             CanonicalMethod::SessionForceAbort => self.session_force_abort(request).await,
@@ -44,6 +44,7 @@ impl Gateway {
             CanonicalMethod::SessionReleaseWriteLease => {
                 self.session_release_write_lease(request, caller).await
             }
+            CanonicalMethod::SessionHandoff => self.session_handoff(request, caller).await,
             CanonicalMethod::SessionAttemptRecovery => self.session_attempt_recovery(request).await,
             CanonicalMethod::SessionCapabilities => Ok(serde_json::to_value(
                 self.entry(required_session(request)?)

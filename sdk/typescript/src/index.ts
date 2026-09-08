@@ -10,6 +10,7 @@ export interface ClientOptions {
   allowRaw?: boolean;
   protocolVersion?: ProtocolVersion;
   timeoutMs?: number;
+  clientName?: string;
 }
 
 export interface CallOptions {
@@ -149,6 +150,8 @@ export class Client {
   private readonly token?: string;
   private readonly allowRaw: boolean;
   private readonly timeoutMs?: number;
+  private readonly explicitClientName: boolean;
+  readonly clientName: string;
   readonly protocolVersion: ProtocolVersion;
 
   constructor(endpoint: string, options?: ClientOptions);
@@ -164,6 +167,11 @@ export class Client {
     this.protocolVersion = options.protocolVersion ?? MCP_VERSION;
     if (![MCP_VERSION, STATELESS_MCP_VERSION].includes(this.protocolVersion)) {
       throw new Error("unsupported MCP protocol version");
+    }
+    this.explicitClientName = options.clientName !== undefined;
+    this.clientName = options.clientName ?? "gdb-ai-typescript";
+    if (!this.clientName || new TextEncoder().encode(this.clientName).length > 128) {
+      throw new Error("clientName must contain 1 to 128 bytes");
     }
     // 2026-09-06: Accept both the server base URL and its documented /mcp URL.
     const base = endpoint.replace(/\/+$/, "");
@@ -186,7 +194,7 @@ export class Client {
     }
     const { result, response } = await this.rpc("initialize", {
       protocolVersion: MCP_VERSION,
-      clientInfo: { name: "gdb-ai-typescript", version: "1.2.0" },
+      clientInfo: { name: this.clientName, version: "1.2.0" },
     }, false);
     if ((result as { protocolVersion?: string }).protocolVersion !== MCP_VERSION) {
       throw new Error("server returned an unsupported MCP protocol version");
@@ -280,12 +288,14 @@ export class Client {
   ): Promise<{ result: unknown; response: Response }> {
     const id = this.nextId++;
     if (this.protocolVersion === STATELESS_MCP_VERSION) {
+      const metadata: Record<string, unknown> = {
+        "io.modelcontextprotocol/protocolVersion": STATELESS_MCP_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": {},
+      };
+      if (this.explicitClientName) metadata["gdb-ai.dev/clientName"] = this.clientName;
       params = {
         ...params,
-        _meta: {
-          "io.modelcontextprotocol/protocolVersion": STATELESS_MCP_VERSION,
-          "io.modelcontextprotocol/clientCapabilities": {},
-        },
+        _meta: metadata,
       };
     }
     const response = await this.request({
@@ -417,6 +427,10 @@ export class Session {
     );
     this.observeRevision(response);
     this.leaseId = response.result!.lease_id;
+  }
+
+  handoff(to: string): Promise<ApiResponse<{ controller: string; generation: number }>> {
+    return this.call("session.handoff", { to });
   }
 
   async close(): Promise<ApiResponse> {

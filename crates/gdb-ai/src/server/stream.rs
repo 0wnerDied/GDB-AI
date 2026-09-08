@@ -25,8 +25,8 @@ use super::{
     MAX_MESSAGE_BYTES, MAX_PENDING_REQUESTS, Phase, RequestCancellation, RpcOutput,
     admit_canonical_operation, apply_cancel_mode, canonical_rpc_request, dispatch_rpc, initialize,
     progress_notification, progress_token, read_line_bounded, request_cancellation, request_key,
-    rpc_error, rpc_fault, rpc_result, stateless_request, stateless_result, valid_request_id,
-    write_rpc,
+    rpc_error, rpc_fault, rpc_result, stateless_caller, stateless_request, stateless_result,
+    valid_request_id, write_rpc,
 };
 use crate::AnyError;
 
@@ -34,6 +34,7 @@ struct StreamPending {
     generation: u64,
     waiter: JoinHandle<()>,
     cancellation: RequestCancellation,
+    caller: Caller,
     stateless: bool,
 }
 
@@ -122,7 +123,6 @@ where
                         &mut phase,
                         &mut pending,
                         &gateway,
-                        &caller,
                         &sequence,
                     );
                     continue;
@@ -152,6 +152,17 @@ where
                     write_rpc(&mut output, rpc_error(id, -32002, "server is not initialized")).await?;
                     continue;
                 }
+                let request_caller = if stateless {
+                    match stateless_caller(&caller, &params) {
+                        Ok(caller) => caller,
+                        Err(error) => {
+                            write_rpc(&mut output, rpc_fault(id, error)).await?;
+                            continue;
+                        }
+                    }
+                } else {
+                    caller.clone()
+                };
 
                 let key = request_key(&id);
                 // 2026-08-28: Duplicate IDs replaced cancellation handles and
@@ -186,7 +197,7 @@ where
                     &method,
                     &mut params,
                     advanced_tools,
-                    caller.admin,
+                    request_caller.admin,
                     &sequence,
                 ) {
                     Ok(canonical) => canonical,
@@ -198,7 +209,7 @@ where
                 let (operation_id, operation) = if let Some((request, presentation)) = canonical {
                     match admit_canonical_operation(
                         gateway.clone(),
-                        caller.clone(),
+                        request_caller.clone(),
                         request,
                         presentation,
                         None,
@@ -213,7 +224,7 @@ where
                     }
                 } else {
                     let dispatch_gateway = gateway.clone();
-                    let dispatch_caller = caller.clone();
+                    let dispatch_caller = request_caller.clone();
                     let dispatch_sequence = sequence.clone();
                     let method = method.clone();
                     (
@@ -273,6 +284,7 @@ where
                         generation,
                         waiter: handle,
                         cancellation,
+                        caller: request_caller,
                         stateless,
                     },
                 );
@@ -282,7 +294,7 @@ where
                     let Some(request) = remove_stream_pending(&mut pending, &key, generation) else {
                         continue;
                     };
-                    request.cancellation.operation_id
+                    request.cancellation.operation_id.map(|id| (id, request.caller))
                 } else {
                     None
                 };
@@ -290,8 +302,10 @@ where
                 // 2026-08-31: Response tasks released operation records before
                 // enqueue and socket write, so cancellation or disconnect made
                 // completed results unqueryable. Release only after flush.
-                if let Some(operation_id) = delivered_operation {
-                    gateway.release_delivered_operation(&operation_id, &caller).await;
+                // 2026-09-08: Stateless calls can use distinct client labels;
+                // completion must retain the identity that admitted the work.
+                if let Some((operation_id, operation_caller)) = delivered_operation {
+                    gateway.release_delivered_operation(&operation_id, &operation_caller).await;
                 }
             }
         }
@@ -398,7 +412,6 @@ fn handle_notification(
     phase: &mut Phase,
     pending: &mut HashMap<String, StreamPending>,
     gateway: &Arc<Gateway>,
-    caller: &Caller,
     sequence: &Arc<AtomicU64>,
 ) {
     match method {
@@ -417,7 +430,7 @@ fn handle_notification(
                     request.waiter.abort();
                     apply_cancel_mode(
                         gateway.clone(),
-                        caller.clone(),
+                        request.caller,
                         sequence.clone(),
                         request.cancellation,
                     );
@@ -714,6 +727,7 @@ mod tests {
                     mode: super::super::CancelMode::DetachWaiter,
                     operation_id: None,
                 },
+                caller: Caller::local("pending-test"),
                 stateless: false,
             },
         )]);
@@ -878,6 +892,19 @@ mod tests {
         let called = read_json_line(&mut client_input).await.unwrap();
         assert_eq!(called["result"]["resultType"], "complete");
         assert!(called["result"]["result"].as_array().is_some());
+        let mut invalid_metadata = metadata;
+        invalid_metadata["gdb-ai.dev/clientName"] = Value::Bool(true);
+        write_rpc(
+            &mut client_output,
+            json!({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/list",
+                "params": {"_meta": invalid_metadata}
+            }),
+        )
+        .await
+        .unwrap();
+        let rejected = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(rejected["error"]["code"], -32602);
         client_output.shutdown().await.unwrap();
         drop(client_output);
         serving.await.unwrap().unwrap();

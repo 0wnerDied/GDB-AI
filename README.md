@@ -170,7 +170,7 @@ The default MCP catalog contains eleven tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `gdb_session` | Session creation, launch, lifecycle, capabilities, and operation status |
+| `gdb_session` | Session creation, launch, lifecycle, controller handoff, and operation status |
 | `gdb_run` | Execution control, direct restart, input, waits, and requested views |
 | `gdb_probe` | Temporary breakpoint, optional trigger, bounded capture, and cleanup |
 | `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
@@ -240,6 +240,11 @@ interrupt/close have a separate control path. MCP-created sessions retain a
 fixed caller controller without recurring lease renewal. Same-principal
 callers may observe within their access rights; concurrent clients do not
 automatically acquire independent mutation authority over one target.
+
+Session create/status returns `caller_identity` and `controller`. The current
+controller can use `gdb_session` action `handoff` with `to` set to another
+same-principal caller's exact identity. SDK client names distinguish workers
+for this coordination; they are not authentication credentials.
 
 The canonical API retains explicit write leases and revision checks. In MCP,
 an omitted `stop_id` binds to the current stop; supplying a returned ID makes
