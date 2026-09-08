@@ -85,6 +85,11 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
         .await,
     );
     assert!(stopped.state.is_none());
+    assert!(stopped.semantics.as_ref().unwrap().complete);
+    assert_eq!(
+        stopped.result.as_ref().unwrap()["observations"]["threads"]["partial"],
+        false
+    );
     let stop = stopped.result.as_ref().unwrap()["observation_context"]["stop_id"]
         .as_str()
         .unwrap();

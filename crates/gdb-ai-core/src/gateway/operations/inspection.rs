@@ -31,7 +31,7 @@ use super::{
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{DomainEvent, SessionId, TrackingDefinition},
+    domain::{DomainEvent, SessionId, StopId, TrackingDefinition},
     gateway::{Gateway, SessionEntry},
     protocol::{
         ApiError, ApiRequest, FactAvailability, ObservationResult, SemanticResult, result_evidence,
@@ -57,6 +57,18 @@ fn disassembly_architecture(reply: Result<CommandReply>) -> Result<&'static str>
         Err(error) if independent_failure(error.code) => Ok("unknown"),
         Err(error) => Err(error),
     }
+}
+
+fn thread_facts(stop_id: Option<&StopId>, threads: Vec<Value>, evidence_seq: u64) -> Value {
+    // 2026-09-08: Per-thread stack errors retained valid siblings but left
+    // direct and composed reads marked complete. Carry the gap with the facts.
+    let partial = threads.iter().any(|thread| thread.get("error").is_some());
+    json!({
+        "stop_id": stop_id,
+        "threads": threads,
+        "partial": partial,
+        "evidence_seq": evidence_seq
+    })
 }
 
 impl Gateway {
@@ -367,11 +379,7 @@ impl Gateway {
                         }
                     }
                     let next = offset.saturating_add(threads.len() as u64);
-                    let mut result = json!({
-                        "stop_id": state.stop_id,
-                        "threads": threads,
-                        "evidence_seq": evidence_seq
-                    });
+                    let mut result = thread_facts(state.stop_id.as_ref(), threads, evidence_seq);
                     if next < total as u64 {
                         result["next_offset"] = Value::from(next);
                     }
@@ -1544,5 +1552,24 @@ mod tests {
             disassembly_architecture(Err(Error::new(ErrorCode::GdbError, "unsupported"))).unwrap(),
             "unknown"
         );
+    }
+
+    #[test]
+    fn thread_stack_failures_keep_successful_siblings_incomplete() {
+        let captured = json!({"thread_id": "thread_a", "frames": [{"function": "main"}]});
+        let complete = SemanticResult::read(
+            thread_facts(None, vec![captured.clone()], 1),
+            None,
+            "session_test",
+        );
+        assert!(complete.metadata.semantics.complete);
+        let failed = json!({"thread_id": "thread_b", "error": {"code": "GDB_ERROR", "message": "stack unavailable"}});
+        let partial = SemanticResult::read(
+            thread_facts(None, vec![captured.clone(), failed.clone()], 1),
+            None,
+            "session_test",
+        );
+        assert!(!partial.metadata.semantics.complete);
+        assert_eq!(partial.facts["threads"], json!([captured, failed]));
     }
 }
