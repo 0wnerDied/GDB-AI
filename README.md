@@ -32,6 +32,12 @@ observations together with target output. Independent sessions can progress
 concurrently. Effects on debugging accuracy, token consumption, and elapsed
 time require task-level measurement; see [Evaluation](#evaluation).
 
+The primary workflow is native Linux crash and blocked-thread diagnosis in a
+trusted development workspace. Start with [run and inspect](#run-and-inspect)
+for crashes and [thread diagnosis](#thread-diagnosis) for hangs. Remote,
+kernel, and runtime-specific paths have additional prerequisites described
+under [supported targets](#supported-targets-and-verification-scope).
+
 ## Build and connect
 
 Running the server requires Linux and a supported GDB. Building from source
@@ -147,6 +153,8 @@ stop in one request:
 
 Continue and step wait for a stop or exit by default. Requested views apply
 to a resulting stop; a target that exits instead is reported as exited.
+For crash triage, use `inspect: [{"view": "crash", "profile": "brief"}]`
+on `gdb_run` action `continue` to collect a bounded crash view at the stop.
 Run `inspect`, `gdb_batch` requests, and snapshot `inspect` share the same
 bounded read vocabulary, including expressions, memory, disassembly, and
 per-item thread, frame, and source selectors. Independent read failures
@@ -354,6 +362,19 @@ Install the prerequisites listed in the workflow for the integration targets.
 The required integration flag makes missing prerequisites fail checks that
 would otherwise be skipped. Kernel artifact selection and QEMU system setup
 are separate, explicitly configured lanes.
+
+For a focused state/evidence regression run:
+
+```sh
+GDB_AI_REQUIRE_INTEGRATION=1 cargo +1.88.0 test --locked -p gdb-ai-core --lib session::tests
+GDB_AI_REQUIRE_INTEGRATION=1 cargo +1.88.0 test --locked -p gdb-ai-core \
+  --test operation_cancel --test storage_chaos --test chaos --test output_evidence
+```
+
+These required workspace tests cover late replies after cancellation,
+interrupt/close during waits with failed history storage, and output loss
+followed by target exit and historical lookup. They check state and evidence
+invariants, not Agent diagnostic success.
 
 ### Native runtime comparisons
 

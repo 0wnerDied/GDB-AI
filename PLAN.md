@@ -13,6 +13,18 @@ Completed and superseded plans are preserved in:
 
 ## Version-1 maintenance
 
+- Prioritize native Linux crash and blocked-thread diagnosis in trusted
+  workspaces. Preserve existing remote/kernel/runtime compatibility, but add
+  extension surface only for a reproducible use case on that primary path or
+  an explicitly qualified target.
+- Defer new real-Agent comparative trials during this maintenance pass.
+  Keep supplied-data aggregation honest: success counts and denominators,
+  explicit missing outcomes, and separate cost distributions. These summaries
+  do not replace controlled task-level evidence.
+- Keep request classification independently testable while target/control
+  guards and audit ordering remain in checked Gateway dispatch. Extend the
+  existing state regressions for late replies after cancellation, storage
+  failure during interrupt/close, and truncated output followed by exit.
 - Preserve the `gdb.ai/v1` compatibility rules and the default eleven-tool MCP
   catalog. Add public surface only for a demonstrated user or Agent need.
 - Keep correctness, bounded output, stop consistency, operation ownership,
@@ -107,13 +119,14 @@ the existing decoded-output copy into domain events. Use the GDB output
 benchmark above to check whether those isolated costs matter to the complete
 command path before changing byte ownership or adding a parser dependency.
 
-## Agent exploit speed
+## Deferred Agent task evaluation
 
-The only optimization target is shorter wall time from the first debugger turn
-to a reproducible exploit. Tool calls, output size, and RPC latency are
-diagnostics only: optimize them when they delay Agent reasoning or split one
-debugging operation into several turns. Preserve precise stop, frame, memory,
-register, and crash evidence.
+New Agent comparisons are deferred during the maintenance work above. Future
+evaluation should measure reproducible diagnosis success and end-to-end cost
+on native crashes and blocked threads. Tool calls, output size, and RPC latency
+are supporting measurements. Preserve precise stop, frame, memory, register,
+and crash evidence. The earlier qualification notes below retain their original
+scope and limitations; they do not establish general diagnostic effectiveness.
 
 GDB/AI is a semantic compressor over GDB, not a decomposition of GDB commands
 into transport steps. Strip prompts, terminal formatting, control bytes, and
