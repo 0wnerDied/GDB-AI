@@ -44,46 +44,36 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
     }
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller::local("deadlock-test");
-    let created = successful(
+    let stopped = successful(
         gateway
             .dispatch_agent(
-                request("create", None, "session.create", None, json!({})),
+                request(
+                    "launch",
+                    None,
+                    "target.launch",
+                    None,
+                    json!({
+                        "program": executable, "stop": "none",
+                        "breakpoints": [{"function": "pthread_join"}],
+                        "inspect": [{"view": "threads", "stack_depth": 8}]
+                    }),
+                ),
                 &caller,
             )
             .await,
     );
-    let session = created.session_id.unwrap();
+    let session = stopped.session_id.clone().unwrap();
+    assert_eq!(
+        stopped.result.as_ref().unwrap()["created_breakpoints"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     let call = async |id: &str, method: &str, parameters: Value| {
         let request = request(id, Some(&session), method, None, parameters);
         gateway.dispatch_agent(request, &caller).await
     };
-    successful(
-        call(
-            "launch",
-            "target.launch",
-            json!({"program": executable, "stop": "main"}),
-        )
-        .await,
-    );
-    successful(
-        call(
-            "break",
-            "breakpoint.create",
-            json!({"function": "pthread_join", "temporary": true}),
-        )
-        .await,
-    );
-    let stopped = successful(
-        call(
-            "continue",
-            "execution.control",
-            json!({
-                "action": "continue", "wait": {"until": "snapshot", "timeout_ms": 5000},
-                "inspect": [{"view": "threads", "stack_depth": 8}]
-            }),
-        )
-        .await,
-    );
     assert!(stopped.state.is_none());
     assert!(stopped.semantics.as_ref().unwrap().complete);
     assert_eq!(

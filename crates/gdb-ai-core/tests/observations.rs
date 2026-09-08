@@ -24,6 +24,122 @@ fn metric_value(metrics: &str, name: &str) -> u64 {
 }
 
 #[tokio::test]
+async fn launch_locations_remain_effective_after_restart() {
+    if !support::require_commands(&["gdb", "cc", "nm", "readelf"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("launch-locations.c");
+    let executable = directory.path().join("launch-locations");
+    std::fs::write(&source, "int main(void) {\n  return 0;\n}\n").unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0", "-no-pie"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let symbols = Command::new("nm").arg(&executable).output().unwrap();
+    assert!(symbols.status.success());
+    let address = String::from_utf8(symbols.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let address = fields.next()?;
+            (fields.next() == Some("T") && fields.next() == Some("main"))
+                .then(|| format!("0x{address}"))
+        })
+        .unwrap();
+    let headers = Command::new("readelf")
+        .arg("-lW")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(headers.status.success());
+    let base = String::from_utf8(headers.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            (fields.first() == Some(&"LOAD"))
+                .then(|| u64::from_str_radix(fields[2].trim_start_matches("0x"), 16).unwrap())
+        })
+        .unwrap();
+    // Module offsets are image-relative, unlike an ET_EXEC symbol address.
+    let offset = u64::from_str_radix(address.trim_start_matches("0x"), 16).unwrap() - base;
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("launch-locations");
+    for location in [
+        json!({"function": "main"}),
+        json!({"source": {"path": source, "line": 2}}),
+        json!({"expression": "main"}),
+        json!({"address": address}),
+        json!({"module_offset": {"module": executable, "offset": format!("0x{offset:x}")}}),
+    ] {
+        let mut session = None;
+        for method in ["target.launch", "target.restart"] {
+            let mut parameters = json!({
+                "stop": "none", "inspect": [{"view": "stack", "limit": 1}]
+            });
+            if session.is_none() {
+                parameters["program"] = json!(executable);
+                parameters["breakpoints"] = json!([location]);
+            }
+            let stopped = successful(
+                gateway
+                    .dispatch_agent(
+                        request(method, session.as_deref(), method, None, parameters),
+                        &caller,
+                    )
+                    .await,
+            );
+            let result = stopped.result.as_ref().unwrap();
+            assert!(stopped.semantics.as_ref().unwrap().complete, "{location}");
+            assert_eq!(
+                result["observations"]["stack"]["frames"][0]["function"], "main",
+                "{method}: {location}; {stopped:?}"
+            );
+            if session.is_none() {
+                assert_eq!(result["created_breakpoints"].as_array().unwrap().len(), 1);
+                session = stopped.session_id;
+            }
+        }
+        successful(
+            gateway
+                .dispatch_agent(
+                    request(
+                        "close",
+                        session.as_deref(),
+                        "session.close",
+                        None,
+                        json!({}),
+                    ),
+                    &caller,
+                )
+                .await,
+        );
+    }
+}
+
+#[tokio::test]
 async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     if !support::require_commands(&["gdb", "cc"]) {
         return;
@@ -114,6 +230,36 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
             metric_value(&gateway.metrics(), "gdbai_commands_total"),
             before_launch
         );
+    }
+    for (breakpoints, code) in [
+        (
+            json!([{"function": "main"}, {"address": "invalid"}]),
+            ErrorCode::InvalidArgument,
+        ),
+        (
+            json!([{"function": "main", "address": "0x0"}]),
+            ErrorCode::InvalidArgument,
+        ),
+        (
+            json!([{"function": "main"}, {"source": {"path": "/bin/true", "line": 1}}]),
+            ErrorCode::PolicyDenied,
+        ),
+        (
+            json!(vec![json!({"function": "main"}); 17]),
+            ErrorCode::InvalidArgument,
+        ),
+    ] {
+        let rejected = gateway.dispatch(
+            request("invalid-launch-breakpoints", Some(&session_id), "target.launch", created.revision,
+                json!({"program": executable, "lease_id": lease_id, "breakpoints": breakpoints})),
+            &caller,
+        ).await;
+        assert_eq!(rejected.error.unwrap().code, code);
+        assert_eq!(
+            metric_value(&gateway.metrics(), "gdbai_commands_total"),
+            before_launch
+        );
+        assert!(rejected.state.unwrap().breakpoints.is_empty());
     }
     let launched = successful(
         gateway

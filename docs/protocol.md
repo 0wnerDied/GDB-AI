@@ -87,6 +87,26 @@ reports only a partial write or error; success adds no redundant input echo. A
 stopped result returns views from that same stop; an exited result returns no
 observations. `target.launch` and `target.restart` also accept `inspect`, so
 starting, waiting, and collecting the initial diagnosis need one request.
+
+Launch can also take up to sixteen `breakpoints`. Each location contains
+exactly one of `function`, `source: {path, line}`, `address`, `expression`, or
+`module_offset: {module, offset}`. A module offset is relative to its loaded
+image base, not an absolute symbol address. Locations are validated before
+target commands, then installed after executable symbols load and before
+execution.
+They are ordinary persistent software breakpoints with pending resolution
+enabled; existing breakpoints are not replaced. The `stop` and wait policies
+are unchanged: use `stop: "none"` with inspection to collect at the first
+breakpoint, signal, or exit. Restart retains the installed breakpoints.
+Success returns their IDs in `result.created_breakpoints`. Failures after
+setup begins retain confirmed IDs in `error.details.created_breakpoints`;
+`failed_breakpoint_index`, when present, identifies the zero-based item that
+failed. That item may have an unconfirmed partial effect. Original error and
+unknown-outcome details remain intact, and insertion failure prevents run.
+Cancellation does not roll back the requested breakpoints; closing the session
+still closes its GDB process. Conditions, scopes, temporary breakpoints, and
+watchpoints use the existing separate breakpoint API.
+
 An explicit wait with inspection must be `stopped`, `settled`, or `snapshot`.
 Launch/restart and run/wait `inspect`, `inspection.batch.requests`, and
 `inspection.snapshot.inspect` use the same item contract. Each turn accepts

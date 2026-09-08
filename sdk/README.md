@@ -161,8 +161,13 @@ try {
 The Python equivalent uses `Client(..., protocol_version="2026-07-28")`
 and `call_tool`. If launch creates a session but then raises `ApiError`, its
 `response.error.details.session` retains the ID and control metadata; close
-or reuse that session. Passing an existing `session_id` still launches in it;
-use a separate create when pre-launch setup is required.
+or reuse that session. Passing an existing `session_id` still launches in it.
+Launch also accepts `breakpoints: [{"function": "main"}]`; use `stop: "none"`
+and `inspect` to create the session, install breakpoints, and capture the stop
+in one call. Keep `result.created_breakpoints` for later update or deletion.
+They persist across restart. A setup failure retains confirmed IDs in
+`error.details.created_breakpoints` without rolling them back. Use a separate
+create for other pre-launch configuration.
 TypeScript also provides `Session.create(client)` and
 `session.call`, with the same canonical semantics as Python. The existing
 TypeScript constructor `new Client(endpoint, token, allowRaw)` remains

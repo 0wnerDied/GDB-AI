@@ -18,12 +18,15 @@ use super::{
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{DomainEvent, LeaseId, SessionId, StopReason, TargetOrigin, WaitBaseline, WriteLease},
+    domain::{
+        DomainEvent, LeaseId, SessionId, SessionState, StopReason, TargetOrigin, WaitBaseline,
+        WriteLease,
+    },
     gateway::{
         Caller, Controller, Gateway, RequestMode, SessionEntry, now_unix_ms, same_principal,
     },
     policy::Profile,
-    protocol::{ApiRequest, SemanticResult},
+    protocol::{ApiRequest, CanonicalMethod, Evidence, SemanticResult},
     session::SessionHandle,
 };
 
@@ -590,6 +593,7 @@ impl Gateway {
             detach_on_fork: bool,
             follow_exec: String,
             wait: Option<WaitSpec>,
+            breakpoints: Vec<Value>,
         }
         impl Default for Parameters {
             fn default() -> Self {
@@ -605,6 +609,7 @@ impl Gateway {
                     detach_on_fork: true,
                     follow_exec: "same-inferior".into(),
                     wait: None,
+                    breakpoints: Vec::new(),
                 }
             }
         }
@@ -682,6 +687,13 @@ impl Gateway {
         )?;
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
+        // 2026-09-09: Launch setup needed separate breakpoint calls. Validate
+        // every location before effects, without resolving the previous
+        // target's modules as addresses in the new process.
+        let breakpoint_context = SessionState::creating(entry.handle.id().clone());
+        for location in &parameters.breakpoints {
+            self.breakpoint_location(location, &breakpoint_context)?;
+        }
         let output_offset = entry.handle.inferior_output_position();
         let aslr = parameters.aslr.clone();
         let disable_randomization = match aslr.as_str() {
@@ -775,26 +787,86 @@ impl Gateway {
         );
         let start_policy = parameters.stop;
         let run = start_policy.command()?;
-        let reply = entry.handle.transaction(setup, run, Vec::new()).await?;
-        entry
-            .handle
-            .record_event(DomainEvent::TargetConfigured {
-                origin: TargetOrigin::Local,
-            })
-            .await?;
-        let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
-        let capabilities = entry.handle.refresh_target_capabilities().await?;
-        let mut result = json!({
-            "start_policy": start_policy.as_str(),
-            "aslr": {"requested": aslr, "backend_managed": aslr_managed}
-        });
-        append_turn_output(&entry, output_offset, &mut result).await?;
-        Ok(self
-            .append_stop_observations(request, &state, result)
-            .await
-            .state("state", state)
-            .command(&entry.handle.id().0, "command", reply)
-            .capabilities(capabilities))
+        let mut created_breakpoints = Vec::new();
+        let mut breakpoint_evidence = Vec::new();
+        let mut failed_breakpoint_index = None;
+        let launched: Result<SemanticResult> = async {
+            if !parameters.breakpoints.is_empty() {
+                // Load symbols before insertion, under the launch's existing
+                // target guard and cancellation scope. Only the file command
+                // moves out of the ordinary setup/run transaction.
+                entry.handle.command(setup.remove(0)).await?;
+                for (index, location) in parameters.breakpoints.iter().enumerate() {
+                    failed_breakpoint_index = Some(index);
+                    let created = self
+                        .breakpoint_create(&ApiRequest {
+                            api_version: request.api_version.clone(),
+                            request_id: request.request_id.clone(),
+                            session_id: request.session_id.clone(),
+                            method: CanonicalMethod::BreakpointCreate,
+                            expected_revision: None,
+                            idempotency_key: None,
+                            parameters: location.clone(),
+                        })
+                        .await?;
+                    let id = created["breakpoint"]["id"].as_str().ok_or_else(|| {
+                        Error::new(ErrorCode::Internal, "created breakpoint has no handle")
+                    })?;
+                    created_breakpoints.push(id.to_owned());
+                    if let Some(sequence) = created["command"]["evidence_seq"].as_u64() {
+                        breakpoint_evidence.push(Evidence::journal(&entry.handle.id().0, sequence));
+                    }
+                }
+                failed_breakpoint_index = None;
+            }
+            let reply = entry.handle.transaction(setup, run, Vec::new()).await?;
+            entry
+                .handle
+                .record_event(DomainEvent::TargetConfigured {
+                    origin: TargetOrigin::Local,
+                })
+                .await?;
+            let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
+            let capabilities = entry.handle.refresh_target_capabilities().await?;
+            let mut result = json!({
+                "start_policy": start_policy.as_str(),
+                "aslr": {"requested": aslr, "backend_managed": aslr_managed}
+            });
+            append_turn_output(&entry, output_offset, &mut result).await?;
+            Ok(self
+                .append_stop_observations(request, &state, result)
+                .await
+                .state("state", state)
+                .command(&entry.handle.id().0, "command", reply)
+                .capabilities(capabilities))
+        }
+        .await;
+        if parameters.breakpoints.is_empty() {
+            return launched;
+        }
+        match launched {
+            Ok(mut result) => {
+                result.facts["created_breakpoints"] = json!(created_breakpoints);
+                result.metadata.evidence.extend(breakpoint_evidence);
+                Ok(result)
+            }
+            Err(mut error) => {
+                // Breakpoint failure stops setup before run; later errors can
+                // follow execution. Preserve confirmed handles and unknown
+                // outcomes without rolling back caller-requested breakpoints.
+                let mut details = match error.details.take() {
+                    Some(Value::Object(details)) => details,
+                    Some(cause) => serde_json::Map::from_iter([("cause".into(), cause)]),
+                    None => serde_json::Map::new(),
+                };
+                details.insert("created_breakpoints".into(), json!(created_breakpoints));
+                if let Some(index) = failed_breakpoint_index {
+                    details.insert("failed_breakpoint_index".into(), json!(index));
+                }
+                error.details = Some(Value::Object(details));
+                Err(error)
+            }
+        }
     }
 
     pub(super) async fn target_attach(&self, request: &ApiRequest) -> Result<Value> {

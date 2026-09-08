@@ -1047,6 +1047,7 @@ async fn launch_creates_one_owned_session_and_preserves_failure_handles() {
             idempotency_key: Some(format!("launch-{mode:?}")),
             parameters: json!({
                 "program": "/bin/true", "stop": "first_instruction",
+                "breakpoints": [{"function": "gdb_ai_unused_stop"}],
                 "inspect": [{"name": "stack", "view": "stack", "limit": 1}]
             }),
         };
@@ -1057,6 +1058,22 @@ async fn launch_creates_one_owned_session_and_preserves_failure_handles() {
         assert!(launched.error.is_none(), "{:?}", launched.error);
         assert_eq!(launched.session_id, retry.session_id);
         assert_eq!(gateway.sessions.read().await.len(), 1);
+        assert_eq!(
+            launched.result.as_ref().unwrap()["created_breakpoints"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            launched.result.as_ref().unwrap()["created_breakpoints"],
+            retry.result.as_ref().unwrap()["created_breakpoints"]
+        );
+        let entry = gateway
+            .entry(launched.session_id.as_deref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(entry.handle.with_state(|state| state.breakpoints.len()), 1);
         let session = &launched.result.as_ref().unwrap()["session"];
         assert_eq!(session["controller"], caller.identity);
         assert_eq!(session["caller_identity"], caller.identity);
@@ -1114,7 +1131,7 @@ async fn launch_creates_one_owned_session_and_preserves_failure_handles() {
                 .is_none()
         );
 
-        let mut invalid = request;
+        let mut invalid = request.clone();
         invalid.idempotency_key = None;
         invalid.parameters["program"] = json!("/bin/gdb-ai-nonexistent-test-program");
         let failed = gateway.dispatch_inner(invalid, &caller, false, mode).await;
@@ -1125,6 +1142,37 @@ async fn launch_creates_one_owned_session_and_preserves_failure_handles() {
         assert_eq!(session["controller"], caller.identity);
         close.session_id = failed.session_id;
         if let Some(lease) = session.get("write_lease") {
+            close.parameters["lease_id"] = lease["lease_id"].clone();
+        }
+        assert!(
+            gateway
+                .dispatch_inner(close.clone(), &caller, false, mode)
+                .await
+                .error
+                .is_none()
+        );
+        assert_eq!(gateway.session_slots.available_permits(), 1);
+
+        let mut partial = request;
+        partial.idempotency_key = None;
+        partial.parameters["breakpoints"] = json!([
+            {"function": "gdb_ai_pending_stop"}, {"expression": "-source"}
+        ]);
+        let failed = gateway.dispatch_inner(partial, &caller, false, mode).await;
+        let state = failed.state.unwrap();
+        assert_eq!(state.execution_epoch, 0);
+        assert_eq!(state.breakpoints.len(), 1);
+        let error = failed.error.unwrap();
+        assert_eq!(error.code, ErrorCode::GdbError);
+        let details = error.details.unwrap();
+        assert_eq!(details["failed_breakpoint_index"], 1);
+        assert_eq!(
+            details["created_breakpoints"],
+            json!([state.breakpoints.values().next().unwrap().id])
+        );
+        assert!(details["record"].is_object());
+        close.session_id = failed.session_id;
+        if let Some(lease) = details["session"].get("write_lease") {
             close.parameters["lease_id"] = lease["lease_id"].clone();
         }
         assert!(

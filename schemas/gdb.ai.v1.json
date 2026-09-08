@@ -520,6 +520,87 @@
                 ],
                 "type": "string"
               },
+              "breakpoints": {
+                "items": {
+                  "additionalProperties": false,
+                  "minProperties": 1,
+                  "oneOf": [
+                    {
+                      "required": [
+                        "function"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "address"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "expression"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "source"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "module_offset"
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "expression": {
+                      "type": "string"
+                    },
+                    "function": {
+                      "type": "string"
+                    },
+                    "module_offset": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "module": {
+                          "type": "string"
+                        },
+                        "offset": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "module",
+                        "offset"
+                      ],
+                      "type": "object"
+                    },
+                    "source": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "line": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "line"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [],
+                  "type": "object"
+                },
+                "maxItems": 16,
+                "type": "array"
+              },
               "cwd": {
                 "type": "string"
               },

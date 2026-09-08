@@ -7,6 +7,9 @@ function check(session: Session) {
   session.launch({ program: "/workspace/app", stop: "main", inspect: [{ view: "stack" }] });
   session.launch({ program: "/workspace/app", stop: "none", wait: { until: "settled" },
     inspect: [{ view: "crash", profile: "brief" }] });
+  session.launch({ program: "/workspace/app", stop: "none", breakpoints: [
+    { function: "main" }, { source: { path: "/workspace/main.c", line: 10 } },
+  ], inspect: [{ view: "threads", stack_depth: 8 }] });
   session.control({ action: "until", location: "main", wait: { until: "stopped" } });
   session.control({ action: "continue", input: { text: "1\n" },
     wait: { until: "snapshot" }, inspect: [{ view: "threads", stack_depth: 8 }] });
@@ -22,6 +25,10 @@ function check(session: Session) {
   session.launch({ argv: ["/workspace/app"] });
   // @ts-expect-error Launch inspection cannot follow an accepted-only wait.
   session.launch({ program: "/workspace/app", wait: { until: "accepted" }, inspect: [{ view: "stack" }] });
+  // @ts-expect-error Launch breakpoints require location objects.
+  session.launch({ program: "/workspace/app", breakpoints: ["main"] });
+  // @ts-expect-error Source locations require a line number.
+  session.launch({ program: "/workspace/app", breakpoints: [{ source: { path: "main.c" } }] });
   // @ts-expect-error Unknown wait policy.
   session.control({ action: "continue", wait: { until: "stop" } });
   // @ts-expect-error Run-until requires a location.

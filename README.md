@@ -114,7 +114,7 @@ on the configured mode.
 | --- | --- |
 | Process ownership | One GDB child per session; an actor correlates MI command tokens and owns live session state. |
 | Execution context | Stop IDs and execution epochs bind observations. Resuming invalidates previous frame and value handles. |
-| Compound operations | Session creation, launch, wait, and requested inspection can share one Agent call. Run calls can also supply input. Probes combine a temporary breakpoint, bounded capture, and cleanup. |
+| Compound operations | Session creation, breakpoint setup, launch, wait, and requested inspection can share one Agent call. Run calls can also supply input. Probes combine a temporary breakpoint, bounded capture, and cleanup. |
 | Output | Structured replies omit MI envelopes and debugger prompts. Inferior PTY bytes and GDB console, target, and log streams remain separately accessible. |
 | Large results | Pagination and artifact references bound responses. Continuation, truncation, and evidence-gap metadata identify incomplete data. |
 | Persistence | Live state belongs to the actor. Journal durability and output retention are explicit configuration choices. |
@@ -123,8 +123,9 @@ on the configured mode.
 
 Use `gdb_session` action `launch` without `session_id` to create a session
 and launch in one call. Retain `result.session.session_id` for later calls.
-Pass an existing `session_id` to reuse a session, or use `create` separately
-when setup such as pending breakpoints must precede launch.
+Pass an existing `session_id` to reuse a session. Launch accepts `breakpoints`
+with up to sixteen locations, so ordinary breakpoint setup needs no separate
+call. Use `create` separately for other pre-launch configuration.
 `program` names the executable; `argv` contains
 only its arguments. Empty arguments, whitespace, quotes, and shell characters
 in `argv` are preserved literally. Use `stop: "main"` when the target has an
@@ -325,6 +326,28 @@ remain available with `arguments_error` and the observation is incomplete.
 Argument values require matching debug information; optimized-out values stay
 explicitly unavailable. Standard and deep snapshots retain their separate
 `arguments` field without collecting or presenting those values twice.
+
+If the desired stop is known before launch, install its breakpoint and collect
+the thread stacks in one call. For example, to stop at `pthread_join`:
+
+```json
+{
+  "name": "gdb_session",
+  "arguments": {
+    "action": "launch",
+    "program": "/workspace/app",
+    "stop": "none",
+    "breakpoints": [{"function": "pthread_join"}],
+    "inspect": [{"view": "threads", "stack_depth": 8}]
+  }
+}
+```
+
+These software breakpoints persist across restart; `result.created_breakpoints`
+contains their IDs for later update or deletion. Source, address, expression,
+and module-offset locations are also accepted. The requested start policy
+still applies: use `stop: "none"` to run until a breakpoint, signal, or exit.
+Other breakpoint attributes remain available through `gdb_breakpoints`.
 
 These observations support diagnosis of the captured state. All-stop
 debugging changes scheduling, and a captured stop does not establish

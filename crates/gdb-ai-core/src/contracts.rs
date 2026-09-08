@@ -11,6 +11,7 @@ enum ParameterKind {
     StringArray,
     Shape(&'static ObjectContract),
     ArrayOf(&'static ParameterKind),
+    BoundedArray(&'static ParameterKind, usize),
     MapOf(&'static ParameterKind),
     OneOf(&'static [ParameterKind]),
     BooleanOrEnum(&'static [&'static str]),
@@ -31,6 +32,10 @@ impl ParameterKind {
             Self::ArrayOf(kind) => value
                 .as_array()
                 .is_some_and(|items| items.iter().all(|item| kind.accepts(item))),
+            Self::BoundedArray(kind, maximum) => {
+                value.as_array().is_some_and(|items| items.len() <= maximum)
+                    && Self::ArrayOf(kind).accepts(value)
+            }
             Self::MapOf(kind) => value
                 .as_object()
                 .is_some_and(|object| object.values().all(|value| kind.accepts(value))),
@@ -51,6 +56,9 @@ impl ParameterKind {
             Self::StringArray => "an array of strings".into(),
             Self::Shape(_) => "a supported object".into(),
             Self::ArrayOf(_) => "an array of supported values".into(),
+            Self::BoundedArray(_, maximum) => {
+                format!("an array of at most {maximum} supported values")
+            }
             Self::MapOf(_) => "an object with supported values".into(),
             Self::OneOf(_) => "one supported shape".into(),
             // 2026-08-28: Generic enum errors forced Agents to guess values
@@ -71,6 +79,11 @@ impl ParameterKind {
             Self::StringArray => json!({"type": "array", "items": {"type": "string"}}),
             Self::Shape(contract) => contract.schema(),
             Self::ArrayOf(kind) => json!({"type": "array", "items": kind.schema()}),
+            Self::BoundedArray(kind, maximum) => {
+                let mut schema = Self::ArrayOf(kind).schema();
+                schema["maxItems"] = Value::from(maximum);
+                schema
+            }
             Self::MapOf(kind) => {
                 json!({"type": "object", "additionalProperties": kind.schema()})
             }
@@ -644,6 +657,7 @@ impl CanonicalMethod {
                 optional("follow_exec", Enum(&["same-inferior"])),
                 optional("wait", WAIT_KIND),
                 optional("inspect", TURN_INSPECTION_KIND),
+                optional("breakpoints", BoundedArray(&LOCATION_KIND, 16)),
             ]),
             TargetAttach => MethodContract::plain(vec![
                 required("pid", Unsigned),

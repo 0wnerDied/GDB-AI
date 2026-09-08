@@ -164,7 +164,7 @@ const TOOLS: &[ToolProjection] = &[
         // 2026-09-05: Advertising a profile that ordinary projected callers
         // cannot select caused a guaranteed create retry. The default already
         // permits exploit debugging, so expose only the actionable lifecycle.
-        description: "launch without session_id creates a session; keep result.session.session_id. With inspect it waits and returns those views at the resulting stop. Use create only for pre-launch setup, or pass an existing session_id. Programs run unchanged with argument-only argv; patch their runtime first when needed. Relative paths use workspace roots; use first_instruction only for pre-run setup. Remote uses connect_remote with endpoint and optional executable.",
+        description: "launch without session_id creates a session; keep result.session.session_id. Optional breakpoints install persistent software breakpoint locations before running. With inspect it waits and returns those views at the resulting stop. Use create only for other pre-launch setup, or pass an existing session_id. Programs run unchanged with argument-only argv; patch their runtime first when needed. Relative paths use workspace roots; use first_instruction only for pre-run setup. Remote uses connect_remote with endpoint and optional executable.",
         discriminator: Some("action"),
         actions: SESSION_ACTIONS,
         read_only: false,

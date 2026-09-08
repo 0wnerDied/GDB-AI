@@ -512,6 +512,14 @@ mod tests {
                 json!({"program": "/bin/true", "inspect": "stack"}),
                 ErrorCode::InvalidArgument,
             ),
+            (
+                json!({"program": "/bin/true", "breakpoints": [{"function": "main", "address": "0x0"}]}),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                json!({"program": "/bin/true", "breakpoints": vec![json!({"function": "main"}); 17]}),
+                ErrorCode::InvalidArgument,
+            ),
             (json!({"program": "/bin/true"}), ErrorCode::PolicyDenied),
         ] {
             let response = gateway
@@ -683,6 +691,7 @@ mod tests {
                     expected_revision: None,
                     idempotency_key: None,
                     parameters: json!({"program": "/bin/sh", "argv": ["-c", "read gdb_ai_input"], "stop": "none",
+                                   "breakpoints": [{"function": "gdb_ai_unused_stop"}],
                                    "wait": {"until": "exited", "timeout_ms": 5000}}),
                 },
                 caller.clone(),
@@ -744,10 +753,10 @@ mod tests {
             response.state.as_ref().unwrap().lifecycle,
             crate::domain::SessionLifecycle::Closed
         );
-        assert_eq!(
-            response.error.unwrap().details.unwrap()["session"]["session_id"],
-            session_id
-        );
+        let details = response.error.unwrap().details.unwrap();
+        assert_eq!(details["session"]["session_id"], session_id);
+        assert_eq!(details["created_breakpoints"].as_array().unwrap().len(), 1);
+        assert!(details.get("failed_breakpoint_index").is_none());
         assert!(gateway.sessions.read().await.is_empty());
         assert_eq!(gateway.session_slots.available_permits(), 1);
         gateway.shutdown().await;

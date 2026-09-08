@@ -49,11 +49,13 @@ def canonical(client, program):
         session.renew()
         launched = session.call("target.launch", {
             "program": program, "environment": {"GDB_AI_TEST_ENV": "sdk-世界"},
-            "stop": "first_instruction", "wait": {"until": "snapshot", "timeout_ms": 5000},
+            "stop": "none", "breakpoints": [{"function": "main"}],
+            "wait": {"until": "snapshot", "timeout_ms": 5000},
             "inspect": [{"view": "stack", "limit": 4}],
         })
         stop_id = launched["state"]["stop_id"]
         assert launched["result"]["observations"]["stack"]["frames"], launched
+        assert len(launched["result"]["created_breakpoints"]) == 1, launched
         assert launched["semantics"]["context"]["stop_id"] == stop_id, launched
         context = session.call("inspection.get", {"view": "stop_context"})
         assert context["result"]["stop_id"] == stop_id, context
@@ -88,7 +90,9 @@ def canonical(client, program):
 
 def projected(client, program):
     launched = client.call_tool("gdb_session", {
-        "action": "launch", "program": program, "stop": "first_instruction",
+        "action": "launch", "program": program, "stop": "none",
+        "breakpoints": [{"function": "main"}],
+        "inspect": [{"view": "stack", "limit": 4}],
         "environment": {"GDB_AI_TEST_ENV": "sdk-世界"}})
     assert "api_version" not in launched and "revision" not in launched, launched
     created = launched["result"]["session"]
@@ -106,6 +110,8 @@ def projected(client, program):
     try:
         observer.connect()
         assert launched["state"]["stop_id"], launched
+        assert len(launched["result"]["created_breakpoints"]) == 1, launched
+        assert launched["result"]["observations"]["stack"]["frames"][0]["function"] == "main", launched
         assert "backend" not in launched["state"], launched
         stack = call("gdb_inspect", view="stack", limit=4)
         assert stack["result"]["frames"], stack

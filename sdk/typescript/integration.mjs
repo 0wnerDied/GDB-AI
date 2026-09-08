@@ -43,12 +43,14 @@ async function canonical(client, program) {
   try {
     await session.renew();
     const launched = await session.launch({
-      program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
+      program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "none",
+      breakpoints: [{ function: "main" }],
       wait: { until: "snapshot", timeout_ms: 5000 },
       inspect: [{ view: "stack", limit: 4 }],
     });
     const stopId = launched.state.stop_id;
     assert.ok(launched.result.observations.stack.frames.length);
+    assert.equal(launched.result.created_breakpoints.length, 1);
     assert.equal(launched.semantics.context.stop_id, stopId);
     assert.ok(launched.result.command.record && launched.result.capabilities);
     const context = await session.call("inspection.get", { view: "stop_context" });
@@ -81,7 +83,8 @@ async function canonical(client, program) {
 
 async function projected(client, program) {
   const launched = await client.callTool("gdb_session", {
-    action: "launch", program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "first_instruction",
+    action: "launch", program, environment: { GDB_AI_TEST_ENV: "sdk-世界" }, stop: "none",
+    breakpoints: [{ function: "main" }],
     inspect: [{ view: "stack", limit: 4 }],
   });
   assert.equal(launched.api_version, undefined);
@@ -106,6 +109,11 @@ async function projected(client, program) {
     assert.ok(launched.complete && launched.evidence.length);
     assert.equal(launched.result.command, undefined);
     assert.equal(launched.result.capabilities, undefined);
+    assert.equal(launched.result.observations.stack.frames[0].function, "main");
+    assert.equal(launched.result.created_breakpoints.length, 1);
+    await call("gdb_breakpoints", {
+      action: "delete", breakpoint_id: launched.result.created_breakpoints[0],
+    });
     const restarted = await call("gdb_run", {
       action: "restart", stop: "first_instruction", inspect: [{ view: "stack", limit: 4 }],
     });

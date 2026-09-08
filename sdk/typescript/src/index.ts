@@ -40,6 +40,13 @@ export type StopContext =
   | { stop_id: string; accept_current_stop?: boolean }
   | { stop_id?: string; accept_current_stop: true };
 
+export type BreakpointLocation =
+  | { function: string }
+  | { address: string }
+  | { expression: string }
+  | { source: { path: string; line: number } }
+  | { module_offset: { module: string; offset: string } };
+
 export type LaunchParameters = MutationParameters & {
   program: string;
   argv?: string[];
@@ -51,6 +58,7 @@ export type LaunchParameters = MutationParameters & {
   follow_fork?: "parent" | "child";
   detach_on_fork?: boolean;
   follow_exec?: "same-inferior";
+  breakpoints?: BreakpointLocation[];
 } & (
   | { wait?: WaitSpec; inspect?: never }
   | { wait?: WaitSpec & { until: "stopped" | "settled" | "snapshot" };

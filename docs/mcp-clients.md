@@ -186,7 +186,10 @@ With this inspection plan, launch waits for a stop or exit and returns bounded
 target output with the collected observations. Keep `result.session.session_id`
 for later calls. A failure after creation retains that metadata under
 `error.details.session`, so the session can still be inspected or closed.
-Use `create` separately only when setup must precede launch.
+Launch may include `breakpoints: [{"function": "main"}]` to install ordinary
+software breakpoints before execution. Keep `result.created_breakpoints` for
+later updates or deletion; these breakpoints persist across restart. Use
+`create` separately for other pre-launch configuration.
 A normal exit has no stopped
 observations. Inspection failure preserves the execution outcome; do not repeat
 execution merely to recover a failed read. Use `gdb_run` action `restart` with
