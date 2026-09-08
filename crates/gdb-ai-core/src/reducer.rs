@@ -268,8 +268,17 @@ impl StateMutator<'_> {
                 reason_detail,
                 frame,
             } => {
+                // 2026-09-08: A stop without thread-group was assigned to the
+                // first inferior, duplicating a known thread in the wrong
+                // process. Preserve its registered owner before falling back.
                 let backend_id = backend_inferior
                     .as_deref()
+                    .or_else(|| {
+                        let thread = backend_thread.as_ref()?;
+                        self.state.inferiors.iter().find_map(|(id, inferior)| {
+                            inferior.threads.contains_key(thread).then_some(id.as_str())
+                        })
+                    })
                     .or_else(|| self.state.inferiors.keys().next().map(String::as_str))
                     .unwrap_or("i1")
                     .to_owned();
@@ -957,6 +966,29 @@ mod tests {
         assert_eq!(
             reducer.state().stopped_frame().unwrap().function.as_deref(),
             Some("current_frame")
+        );
+
+        let thread = reducer.state().inferiors["i2"].threads["2"].id.clone();
+        let record = gdb_ai_mi::parse_record(
+            b"*stopped,reason=\"end-stepping-range\",thread-id=\"2\",frame={level=\"0\",func=\"next_frame\"}",
+            gdb_ai_mi::MiLimits::default(),
+        )
+        .unwrap();
+        apply(
+            &mut reducer,
+            6,
+            crate::normalize::normalize(&record).unwrap(),
+        );
+        let state = reducer.state();
+        assert_eq!(
+            state.stopped_inferior_id.as_ref(),
+            Some(&state.inferiors["i2"].id)
+        );
+        assert_eq!(state.stopped_thread_id.as_ref(), Some(&thread));
+        assert!(!state.inferiors["i1"].threads.contains_key("2"));
+        assert_eq!(
+            state.stopped_frame().unwrap().function.as_deref(),
+            Some("next_frame")
         );
     }
 
