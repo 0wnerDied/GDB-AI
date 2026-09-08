@@ -401,6 +401,25 @@ impl SemanticResult {
         self
     }
 
+    pub(crate) fn observation_details(mut self) -> Self {
+        // 2026-09-08: Composite facts duplicated full capture context and
+        // evidence already owned by the envelope. Only observation producers
+        // move these root fields; nested target values are never inspected.
+        if let Some(facts) = self.facts.as_object_mut() {
+            for field in [
+                "context",
+                "observation_context",
+                "evidence",
+                "observation_evidence",
+            ] {
+                if let Some(value) = facts.remove(field) {
+                    self.diagnostics.insert(field, Diagnostic::Value(value));
+                }
+            }
+        }
+        self
+    }
+
     pub(crate) fn state(mut self, key: &'static str, state: SessionState) -> Self {
         // 2026-09-08: Native execution projection must retain the public
         // top-level stop/exit state without reconstructing full registries.
@@ -616,7 +635,7 @@ impl ObservationResult {
             diagnostics: BTreeMap::new(),
         };
         result.failures("failures", self.failures);
-        result
+        result.observation_details()
     }
 }
 
@@ -1282,7 +1301,12 @@ mod tests {
                 thread_id: None,
                 frame_id: None,
             },
-            results: BTreeMap::from([("stack".into(), json!({"frames": []}))]),
+            results: BTreeMap::from([(
+                "context".into(),
+                json!({
+                    "frames": [], "evidence": "target evidence", "observation_context": "target context"
+                }),
+            )]),
             failures: BTreeMap::new(),
             complete: true,
             availability: BTreeMap::new(),
@@ -1302,5 +1326,13 @@ mod tests {
             serde_json::from_value::<ObservationResult>(serialized).unwrap(),
             observation
         );
+        let result = observation.clone().into_batch_result();
+        let detailed = result.clone().into_value(true);
+        let compact = result.into_value(false);
+        assert_eq!(detailed["observation_context"], json!(observation.context));
+        assert_eq!(detailed["evidence"], json!(observation.evidence));
+        assert!(compact.get("observation_context").is_none());
+        assert!(compact.get("evidence").is_none());
+        assert_eq!(compact["results"], json!(observation.results));
     }
 }

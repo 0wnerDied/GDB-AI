@@ -97,8 +97,11 @@ existing bounded tracking history. `view: "diff"` accepts
 `before_snapshot_id` and `after_snapshot_id` and compares retained facts;
 its result is explicitly historical and preserves both observation IDs.
 
-Composite results include `observation_context` with the captured stop,
-execution epoch, revision, and available inferior/thread/frame identity.
+Composite responses expose the captured stop, execution epoch, revision, and
+available inferior/thread/frame identity through `semantics.context` in the
+canonical envelope or top-level `context` in MCP. Canonical detailed results
+also retain inline context and evidence copies; compact results expose those
+once in the envelope, without changing nested target values or stored captures.
 Crash views preserve their committed snapshot context and observation ID in
 the envelope; later session revisions do not replace that capture identity.
 This reflects the requested parent selection, or the default stopped focus.

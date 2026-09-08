@@ -694,7 +694,7 @@ impl Gateway {
         result.metadata.truncated = observation.truncated;
         self.metrics
             .snapshot(started.elapsed().as_micros() as u64, partial);
-        Ok(result)
+        Ok(result.observation_details())
     }
 
     pub(super) async fn inspection_diff(&self, request: &ApiRequest) -> Result<Value> {

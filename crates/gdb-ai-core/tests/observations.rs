@@ -354,10 +354,16 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
         });
         let semantics = crash.semantics.as_ref().unwrap();
         let capture = crash.result.as_ref().unwrap();
-        assert_eq!(json!(semantics.context), capture["observation_context"]);
+        if agent {
+            assert!(capture.get("observation_context").is_none());
+            assert!(capture.get("evidence").is_none());
+        } else {
+            assert_eq!(json!(semantics.context), capture["observation_context"]);
+            assert_eq!(json!(crash.evidence), capture["evidence"]);
+        }
         assert!(!semantics.complete);
         assert!(!crash.warnings.is_empty());
-        assert_eq!(json!(crash.evidence), capture["evidence"]);
+        assert!(!crash.evidence.is_empty());
         let retained = successful(
             gateway
                 .dispatch_agent(
@@ -376,6 +382,7 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
             retained.semantics.as_ref().unwrap().context,
             semantics.context
         );
+        assert_eq!(retained.evidence, crash.evidence);
         assert_eq!(retained.result.as_ref().unwrap()["stack"], capture["stack"]);
     }
 
@@ -1005,10 +1012,8 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     assert!(restarted.semantics.as_ref().unwrap().complete);
     assert_ne!(restart_context.stop_id.0, second_stop);
     let restart_result = restarted.result.as_ref().unwrap();
-    assert_eq!(
-        restart_result["observation_context"]["stop_id"],
-        restart_context.stop_id.0
-    );
+    assert!(restart_result.get("observation_context").is_none());
+    assert_eq!(restart_result["stop_id"], restart_context.stop_id.0);
     assert_eq!(
         restart_result["observations"]["stack"]["frames"][0]["function"],
         "main"

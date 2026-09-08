@@ -90,9 +90,15 @@ async fn thread_stacks_capture_a_deadlock_in_one_stop() {
         stopped.result.as_ref().unwrap()["observations"]["threads"]["partial"],
         false
     );
-    let stop = stopped.result.as_ref().unwrap()["observation_context"]["stop_id"]
-        .as_str()
-        .unwrap();
+    let stop = &stopped
+        .semantics
+        .as_ref()
+        .unwrap()
+        .context
+        .as_ref()
+        .unwrap()
+        .stop_id
+        .0;
     let threads = stopped.result.as_ref().unwrap()["observations"]["threads"]["threads"]
         .as_array()
         .unwrap();

@@ -161,6 +161,7 @@ impl Gateway {
                     result.failures(field, serde_json::from_value(failures.clone())?);
                 }
             }
+            result = result.observation_details();
         }
         Ok(result.into())
     }

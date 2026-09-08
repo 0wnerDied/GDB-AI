@@ -549,7 +549,7 @@ impl Gateway {
                 response.error("observation_error", error);
             }
         }
-        response
+        response.observation_details()
     }
 
     pub(super) async fn breakpoint_create(&self, request: &ApiRequest) -> Result<Value> {

@@ -598,6 +598,39 @@ async fn projected_tools_keep_control_without_lease_renewal() {
             .as_str()
             .is_some()
     );
+    let snapshot = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({"name": "gdb_inspect", "arguments": {
+            "session_id": session_id, "view": "snapshot", "profile": "minimal"
+        }}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot["isError"], false);
+    let retained = call_tool(
+        &gateway,
+        &caller,
+        false,
+        &sequence,
+        json!({"name": "gdb_inspect", "arguments": {
+            "session_id": session_id, "view": "observation",
+            "snapshot_id": snapshot["structuredContent"]["result"]["observation_id"]
+        }}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retained["isError"], false);
+    assert_eq!(
+        snapshot["structuredContent"]["context"],
+        retained["structuredContent"]["context"]
+    );
+    assert_eq!(
+        snapshot["structuredContent"]["result"]["stack"],
+        retained["structuredContent"]["result"]["stack"]
+    );
     let evaluated = call_tool(
         &gateway,
         &caller,
@@ -685,6 +718,40 @@ async fn projected_tools_keep_control_without_lease_renewal() {
     let result = &waited["structuredContent"]["result"];
     assert!(result["observations"]["stack"].is_object());
     assert!(result.get("operation").is_none());
+
+    let samples = [
+        ("batch", &observed),
+        ("snapshot", &snapshot),
+        ("retained", &retained),
+        ("run", &turned),
+        ("wait", &waited),
+    ];
+    for (name, response) in samples {
+        eprintln!(
+            "{name} MCP response bytes: {}",
+            serde_json::to_vec(response).unwrap().len()
+        );
+    }
+    for (name, response) in samples {
+        let response = &response["structuredContent"];
+        assert!(response["context"].is_object());
+        assert_eq!(
+            response["context"]["observation_id"],
+            response["result"]["observation_id"]
+        );
+        for field in [
+            "context",
+            "observation_context",
+            "evidence",
+            "observation_evidence",
+        ] {
+            assert!(
+                response["result"].get(field).is_none(),
+                "{name} repeats {field}"
+            );
+        }
+    }
+    assert!(observed["structuredContent"]["result"]["results"]["context"].is_object());
 
     let closed = call_tool(
         &gateway,
