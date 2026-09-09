@@ -137,7 +137,7 @@ class Client:
             "initialize",
             {
                 "protocolVersion": MCP_VERSION,
-                "clientInfo": {"name": self.client_name, "version": "1.2.0"},
+                "clientInfo": {"name": self.client_name, "version": "1.3.0"},
             },
             include_session=False,
         )

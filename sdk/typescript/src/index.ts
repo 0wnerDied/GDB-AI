@@ -291,7 +291,7 @@ export class Client {
     }
     const { result, response } = await this.rpc("initialize", {
       protocolVersion: MCP_VERSION,
-      clientInfo: { name: this.clientName, version: "1.2.0" },
+      clientInfo: { name: this.clientName, version: "1.3.0" },
     }, false);
     if ((result as { protocolVersion?: string }).protocolVersion !== MCP_VERSION) {
       throw new Error("server returned an unsupported MCP protocol version");
