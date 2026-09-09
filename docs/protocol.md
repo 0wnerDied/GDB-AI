@@ -160,6 +160,13 @@ The option also applies to `threads`: omitted `stack_depth` defaults to one,
 and the returned thread page is capped so its requested frame count fits
 `limits.stack_frames`. Follow `next_offset` to collect another thread page.
 
+The `locals` view uses the same typed aggregate capture for its selected
+frame, including arguments in GDB's original variable order. This applies
+to standalone reads, inspection plans, and snapshot profiles. Scalar-only
+frames need no aggregate query. Partial reads retain valid variables and
+`variables_error`; profiles place that error in `failures.locals` beside the
+retained `locals` array. These captures remain explicitly incomplete.
+
 Composite responses expose the captured stop, execution epoch, revision, and
 available inferior/thread/frame identity through `semantics.context` in the
 canonical envelope or top-level `context` in MCP. Canonical detailed results

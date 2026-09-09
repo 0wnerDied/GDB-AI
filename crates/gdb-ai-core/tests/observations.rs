@@ -608,6 +608,103 @@ async fn stack_locals_capture_caller_aggregates_in_one_turn() {
     let basic = call("basic-stack", json!({"view": "stack", "limit": 8})).await;
     let basic_cost = metric_value(&gateway.metrics(), "gdbai_commands_total") - before;
     let page = call("caller-page", json!({"view": "stack", "offset": 1, "limit": 1, "frame_id": frames[1]["frame_id"], "include_locals": true})).await;
+    let expected_variables = json!([
+        {"name": "requested", "type": "int", "value": "8", "status": "available"},
+        {"name": "counts", "type": "struct summary", "value": "{accepted = 8, rejected = 1}", "status": "available"},
+        {"name": "total", "type": "int", "value": "9", "status": "available"}
+    ]);
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let (caller_locals, stopped_locals) = tokio::join!(
+        call(
+            "caller-locals",
+            json!({"view": "locals", "frame_id": frames[1]["frame_id"]})
+        ),
+        call("stopped-locals", json!({"view": "locals"})),
+    );
+    let caller_locals = successful(caller_locals);
+    assert!(caller_locals.semantics.as_ref().unwrap().complete);
+    assert_eq!(
+        caller_locals.result.unwrap()["variables"],
+        expected_variables
+    );
+    assert_eq!(
+        successful(stopped_locals).result.unwrap()["variables"],
+        json!([
+            {"name": "total", "type": "int", "value": "9", "status": "available"},
+            {"name": "expected", "type": "int", "value": "10", "status": "available"}
+        ])
+    );
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total") - before,
+        3
+    );
+    let stop_id = &launched
+        .semantics
+        .as_ref()
+        .unwrap()
+        .context
+        .as_ref()
+        .unwrap()
+        .stop_id;
+    let mut captures = Vec::new();
+    for (method, parameters, pointer, commands) in [
+        ("inspection.get", json!({"view": "locals"}), "/variables", 2),
+        (
+            "inspection.batch",
+            json!({"requests": [
+                {"name": "first", "view": "locals"}
+            ]}),
+            "/results/first/variables",
+            2,
+        ),
+        (
+            "inspection.snapshot",
+            json!({"inspect": [{"view": "locals"}]}),
+            "/observations/locals/variables",
+            2,
+        ),
+        (
+            "inspection.snapshot",
+            json!({"profile": "brief"}),
+            "/locals",
+            8,
+        ),
+    ] {
+        let mut parameters = parameters;
+        parameters["frame_id"] = frames[1]["frame_id"].clone();
+        parameters["stop_id"] = json!(stop_id);
+        let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+        let result = successful(
+            gateway
+                .dispatch(
+                    request(method, Some(session), method, None, parameters),
+                    &caller,
+                )
+                .await,
+        );
+        assert!(result.semantics.as_ref().unwrap().complete, "{result:?}");
+        assert_eq!(
+            result.result.as_ref().unwrap().pointer(pointer).unwrap(),
+            &expected_variables
+        );
+        assert_eq!(
+            metric_value(&gateway.metrics(), "gdbai_commands_total") - before,
+            commands,
+            "{method}"
+        );
+        if result
+            .semantics
+            .as_ref()
+            .unwrap()
+            .context
+            .as_ref()
+            .unwrap()
+            .observation_id
+            .is_some()
+        {
+            captures.push((result, pointer));
+        }
+    }
     successful(
         gateway
             .dispatch_agent(
@@ -649,6 +746,192 @@ async fn stack_locals_capture_caller_aggregates_in_one_turn() {
     assert_eq!(
         &history.result.unwrap()["results"]["stack"]["frames"],
         frames
+    );
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    for (capture, pointer) in captures {
+        let historical = successful(gateway.dispatch_agent(request(
+            "locals-reader", Some(session), "inspection.snapshot_get", None,
+            json!({"snapshot_id": capture.semantics.as_ref().unwrap().context.as_ref().unwrap().observation_id}),
+        ), &Caller::local("stack-locals/mcp:reader")).await);
+        assert!(historical.semantics.as_ref().unwrap().historical);
+        assert_eq!(
+            historical
+                .result
+                .as_ref()
+                .unwrap()
+                .pointer(pointer)
+                .unwrap(),
+            &expected_variables
+        );
+    }
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total"),
+        before
+    );
+    assert!(
+        gdb_ai_core::replay::replay(
+            directory
+                .path()
+                .join("sessions")
+                .join(session)
+                .join("journal.jsonl"),
+            gdb_ai_core::domain::SessionId::parse(session).unwrap(),
+        )
+        .unwrap()
+        .complete
+    );
+}
+
+#[tokio::test]
+async fn locals_keep_partial_values_and_failures_in_shared_snapshots() {
+    if !support::require_commands(&["gdb", "c++"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("unavailable.cc");
+    let executable = directory.path().join("unavailable");
+    std::fs::write(
+        &source,
+        "struct Summary { int total; };\nint main() {\n\
+        int observed = 7;\nSummary &counts = *reinterpret_cast<Summary *>(0x1234);\n\
+        __builtin_trap();\nreturn counts.total + observed;\n}\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("c++")
+            .args(["-g", "-O0"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("partial-locals/mcp:writer");
+    let launched = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "launch",
+                    None,
+                    "target.launch",
+                    None,
+                    json!({
+                        "program": executable, "stop": "none", "inspect": [{"view": "locals"}]
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let session = launched.session_id.as_deref().unwrap();
+    let locals = &launched.result.as_ref().unwrap()["observations"]["locals"];
+    assert!(!launched.semantics.as_ref().unwrap().complete);
+    assert_eq!(locals["variables_error"]["code"], "GDB_ERROR");
+    assert!(locals["variables_error"].get("details").is_none());
+    let variables = locals["variables"].as_array().unwrap();
+    assert!(variables.contains(
+        &json!({"name": "observed", "type": "int", "value": "7", "status": "available"})
+    ));
+    assert!(variables.contains(
+        &json!({"name": "counts", "type": "Summary &", "status": "failed",
+        "value": "<error reading variable: Cannot access memory at address 0x1234>"})
+    ));
+    let mut captures = Vec::new();
+    for (method, parameters, pointer, error_pointer) in [
+        (
+            "inspection.get",
+            json!({"view": "locals"}),
+            "/variables",
+            "/variables_error",
+        ),
+        (
+            "inspection.batch",
+            json!({"requests": [{"view": "locals"}, {"view": "frame"}]}),
+            "/results/locals/variables",
+            "/results/locals/variables_error",
+        ),
+        (
+            "inspection.snapshot",
+            json!({"inspect": [{"view": "locals"}]}),
+            "/observations/locals/variables",
+            "/observations/locals/variables_error",
+        ),
+        (
+            "inspection.snapshot",
+            json!({"profile": "brief"}),
+            "/locals",
+            "/failures/locals",
+        ),
+    ] {
+        let mut parameters = parameters;
+        parameters["stop_id"] = json!(
+            launched
+                .semantics
+                .as_ref()
+                .unwrap()
+                .context
+                .as_ref()
+                .unwrap()
+                .stop_id
+        );
+        let result = successful(
+            gateway
+                .dispatch_agent(
+                    request(method, Some(session), method, None, parameters),
+                    &caller,
+                )
+                .await,
+        );
+        assert!(!result.semantics.as_ref().unwrap().complete, "{result:?}");
+        let facts = result.result.as_ref().unwrap();
+        assert_eq!(facts.pointer(pointer).unwrap(), &locals["variables"]);
+        assert_eq!(facts.pointer(error_pointer).unwrap()["code"], "GDB_ERROR");
+        if method == "inspection.batch" {
+            assert_eq!(facts["results"]["frame"]["frame"]["function"], "main");
+        }
+        if method != "inspection.get" {
+            captures.push((result, pointer, error_pointer));
+        }
+    }
+    successful(
+        gateway
+            .dispatch_agent(
+                request("close", Some(session), "session.close", None, json!({})),
+                &caller,
+            )
+            .await,
+    );
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    for (capture, pointer, error_pointer) in captures {
+        let historical = successful(gateway.dispatch_agent(request(
+            "reader", Some(session), "inspection.snapshot_get", None,
+            json!({"snapshot_id": capture.semantics.as_ref().unwrap().context.as_ref().unwrap().observation_id}),
+        ), &Caller::local("partial-locals/mcp:reader")).await);
+        let semantics = historical.semantics.as_ref().unwrap();
+        assert!(semantics.historical && !semantics.complete);
+        let facts = historical.result.as_ref().unwrap();
+        assert_eq!(facts.pointer(pointer).unwrap(), &locals["variables"]);
+        assert_eq!(facts.pointer(error_pointer).unwrap()["code"], "GDB_ERROR");
+    }
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total"),
+        before
     );
     assert!(
         gdb_ai_core::replay::replay(

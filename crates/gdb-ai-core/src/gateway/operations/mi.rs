@@ -121,20 +121,10 @@ fn normalized_variable(fields: &[MiResult]) -> Value {
     variable
 }
 
-pub(super) fn normalized_variables(record: &MiRecord, name: &str) -> Vec<Value> {
-    let Some(variables) = MiResult::find(record.results(), name) else {
-        return Vec::new();
-    };
-    aggregate_items(variables, "variable")
-        .into_iter()
-        .map(normalized_variable)
-        .collect()
-}
-
 pub(super) fn normalized_frame_variables(
     types: &MiRecord,
     values: Option<&MiRecord>,
-) -> Result<(Vec<Value>, Vec<Value>)> {
+) -> Result<Vec<(bool, Value)>> {
     fn fields(record: &MiRecord) -> Result<&MiValue> {
         MiResult::find(record.results(), "variables")
             .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB omitted frame variables"))
@@ -158,8 +148,7 @@ pub(super) fn normalized_frame_variables(
             "GDB variable identities changed between type and value reads",
         ));
     }
-    let mut arguments = Vec::new();
-    let mut locals = Vec::new();
+    let mut variables = Vec::with_capacity(typed.len());
     for (index, fields) in typed.iter().enumerate() {
         let mut variable = normalized_variable(fields);
         if let Some(values) = &values {
@@ -169,13 +158,9 @@ pub(super) fn normalized_frame_variables(
                 variable["dynamic"] = Value::Bool(dynamic);
             }
         }
-        if result_bool(fields, "arg") == Some(true) {
-            arguments.push(variable);
-        } else {
-            locals.push(variable);
-        }
+        variables.push((result_bool(fields, "arg") == Some(true), variable));
     }
-    Ok((arguments, locals))
+    Ok(variables)
 }
 
 pub(super) fn normalized_arguments(record: &MiRecord) -> Vec<Value> {
@@ -507,7 +492,11 @@ mod tests {
             br#"1^done,variables=[{name="wide",type="unsigned long",value="18446744073709551615"},{name="bytes",value="\377",dynamic="1"},{name="aggregate",type="struct pair",dynamic="0"}],stack-args=[frame={level="0",args=[{name="bytes",value="\377",dynamic="1"}]}]"#,
             gdb_ai_mi::MiLimits::default(),
         ).unwrap();
-        let locals = super::normalized_variables(&record, "variables");
+        let locals = super::normalized_frame_variables(&record, None)
+            .unwrap()
+            .into_iter()
+            .map(|(_, variable)| variable)
+            .collect::<Vec<_>>();
         assert_eq!(locals[0]["value"], "18446744073709551615");
         assert_eq!(locals[1]["value"]["data_base64"], "/w==");
         assert_eq!(locals[1]["status"], "available");
@@ -524,7 +513,7 @@ mod tests {
         let record =
             gdb_ai_mi::parse_record(encoded.as_bytes(), gdb_ai_mi::MiLimits::default()).unwrap();
         assert_eq!(
-            super::normalized_variables(&record, "variables")[0]["value"],
+            super::normalized_frame_variables(&record, None).unwrap()[0].1["value"],
             value
         );
     }
@@ -540,22 +529,34 @@ mod tests {
             r#"1^done,variables=[{name="input",arg="1",type="int",value="2"},{name="counts",type="struct summary"},{name="x",type="int",value="1",fullname="scope.c",line="1",shadowed="true"},{name="x",type="char",value="2",fullname="scope.c",line="2"}]"#,
         );
         let full = r#"2^done,variables=[{name="input",arg="1",value="2"},{name="counts",value="{accepted = 8, rejected = 1}"},{name="x",value="1",fullname="scope.c",line="1",shadowed="true"},{name="x",value="\377",fullname="scope.c",line="2"}]"#;
-        let (arguments, simple) = normalized_frame_variables(&types, None).unwrap();
+        let simple = normalized_frame_variables(&types, None).unwrap();
         assert_eq!(
-            arguments,
-            vec![json!({"name": "input", "type": "int", "value": "2", "status": "available"})]
+            simple[0],
+            (
+                true,
+                json!({"name": "input", "type": "int", "value": "2", "status": "available"})
+            )
         );
-        assert_eq!(simple[0]["status"], "not_collected");
-        let (merged_arguments, merged) =
-            normalized_frame_variables(&types, Some(&parse(full))).unwrap();
-        assert_eq!(merged_arguments, arguments);
+        assert_eq!(simple[1].1["status"], "not_collected");
+        let merged = normalized_frame_variables(&types, Some(&parse(full))).unwrap();
+        assert_eq!(merged[0], simple[0]);
         assert_eq!(
-            merged[0],
-            json!({"name": "counts", "type": "struct summary", "value": "{accepted = 8, rejected = 1}", "status": "available"})
+            merged[1],
+            (
+                false,
+                json!({"name": "counts", "type": "struct summary", "value": "{accepted = 8, rejected = 1}", "status": "available"})
+            )
         );
-        assert_eq!(merged[1]["value"], "1");
-        assert_eq!(merged[2]["type"], "char");
-        assert_eq!(merged[2]["value"]["data_base64"], "/w==");
+        assert_eq!(merged[2].1["value"], "1");
+        assert_eq!(merged[3].1["type"], "char");
+        assert_eq!(merged[3].1["value"]["data_base64"], "/w==");
+        let interleaved = parse(
+            r#"1^done,variables=[{name="local",type="int",value="1"},{name="input",arg="1",type="int",value="2"}]"#,
+        );
+        let ordered = normalized_frame_variables(&interleaved, None).unwrap();
+        assert!(!ordered[0].0 && ordered[1].0);
+        assert_eq!(ordered[0].1["name"], "local");
+        assert_eq!(ordered[1].1["name"], "input");
         for (before, after) in [
             ("name=\"counts\"", "name=\"other\""),
             ("arg=\"1\"", "arg=\"0\""),
@@ -592,19 +593,19 @@ mod tests {
             br#"2^done,variables=[{name="counts",value="<error reading variable: Cannot access memory at address 0x1234>"}]"#,
             gdb_ai_mi::MiLimits::default(),
         ).unwrap();
-        let (_, variables) = normalized_frame_variables(&types, Some(&full)).unwrap();
-        assert_eq!(variables[0]["type"], "Summary &");
-        assert_eq!(variables[0]["status"], "failed");
+        let variables = normalized_frame_variables(&types, Some(&full)).unwrap();
+        assert_eq!(variables[0].1["type"], "Summary &");
+        assert_eq!(variables[0].1["status"], "failed");
         assert_eq!(
-            variables[0]["value"],
+            variables[0].1["value"],
             "<error reading variable: Cannot access memory at address 0x1234>"
         );
         let quoted = gdb_ai_mi::parse_record(
             br#"3^done,variables=[{name="counts",value="\"<error reading variable: user text>\""}]"#,
             gdb_ai_mi::MiLimits::default(),
         ).unwrap();
-        let (_, variables) = normalized_frame_variables(&types, Some(&quoted)).unwrap();
-        assert_eq!(variables[0]["status"], "available");
+        let variables = normalized_frame_variables(&types, Some(&quoted)).unwrap();
+        assert_eq!(variables[0].1["status"], "available");
     }
 
     #[test]

@@ -18,9 +18,8 @@ use super::{
     mi::{
         disassembly_instructions, frame_summary, normalized_arguments, normalized_frame_variables,
         normalized_frames, normalized_modules, normalized_source_files, normalized_symbols,
-        normalized_threads, normalized_variables, register_role_candidates, register_values,
-        resolve_register_name, result_string_list, result_text, target_architecture,
-        valid_integer_literal,
+        normalized_threads, register_role_candidates, register_values, resolve_register_name,
+        result_string_list, result_text, target_architecture, valid_integer_literal,
     },
     observation::{
         ObservationKind, parse_observation_requests, snapshot_requests,
@@ -46,6 +45,12 @@ use crate::{
 enum CachedObservation {
     Result(Box<SemanticResult>),
     Failure(ApiError),
+}
+
+struct FrameVariables {
+    variables: Vec<(bool, Value)>,
+    evidence_seq: u64,
+    error: Option<ApiError>,
 }
 
 fn disassembly_architecture(reply: Result<CommandReply>) -> Result<&'static str> {
@@ -188,6 +193,16 @@ impl Gateway {
         let mut result = SemanticResult::read(facts, context, session_id);
         match view.as_str() {
             "source" => result.metadata.semantics.complete = true,
+            "locals" => {
+                if let Some(error) = result
+                    .facts
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("variables_error")
+                {
+                    result.error("variables_error", serde_json::from_value(error)?);
+                }
+            }
             "stack" => result = compact_stack_variable_errors(result, false),
             "threads" => result = compact_stack_variable_errors(result, true),
             _ => {}
@@ -266,19 +281,22 @@ impl Gateway {
             }
             "locals" => {
                 let stop_id = entry.handle.with_state(|state| state.stop_id.clone());
-                let reply = self
-                    .inspection_command(
-                        &entry,
-                        request,
-                        "-stack-list-variables",
-                        vec![("bare", "--simple-values".into())],
-                    )
-                    .await?;
-                Ok(json!({
+                let captured = self.inspection_frame_variables(&entry, request).await?;
+                let variables = captured
+                    .variables
+                    .into_iter()
+                    .map(|(_, variable)| variable)
+                    .collect::<Vec<_>>();
+                let mut facts = json!({
                     "stop_id": stop_id,
-                    "variables": normalized_variables(&reply.record, "variables"),
-                    "evidence_seq": reply.evidence_seq
-                }))
+                    "variables": variables,
+                    "evidence_seq": captured.evidence_seq
+                });
+                if let Some(error) = captured.error {
+                    facts["variables_error"] = json!(error);
+                    facts["partial"] = Value::Bool(true);
+                }
+                Ok(facts)
             }
             "arguments" => {
                 let stop_id = entry.handle.with_state(|state| state.stop_id.clone());
@@ -439,11 +457,23 @@ impl Gateway {
                             variables_request.parameters["frame_level"] = frame["level"].clone();
                             variables_request.parameters["frame_id"] = frame["frame_id"].clone();
                             match self.inspection_frame_variables(entry, &variables_request).await {
-                                Ok(mut variables) => {
-                                    let variables = variables.as_object_mut().unwrap();
-                                    evidence_seq = variables.remove("evidence_seq").unwrap().as_u64().unwrap();
-                                    partial |= variables.contains_key("variables_error");
-                                    frame.as_object_mut().unwrap().extend(std::mem::take(variables));
+                                Ok(captured) => {
+                                    evidence_seq = captured.evidence_seq;
+                                    let mut arguments = Vec::new();
+                                    let mut locals = Vec::new();
+                                    for (argument, variable) in captured.variables {
+                                        if argument {
+                                            arguments.push(variable);
+                                        } else {
+                                            locals.push(variable);
+                                        }
+                                    }
+                                    frame["arguments"] = json!(arguments);
+                                    frame["locals"] = json!(locals);
+                                    if let Some(error) = captured.error {
+                                        frame["variables_error"] = json!(error);
+                                        partial = true;
+                                    }
                                 }
                                 Err(error) if error.code.is_independent_read_failure() => {
                                     frame["arguments"] = Value::Null;
@@ -481,7 +511,10 @@ impl Gateway {
         &self,
         entry: &SessionEntry,
         request: &ApiRequest,
-    ) -> Result<Value> {
+    ) -> Result<FrameVariables> {
+        // 2026-09-09: Standalone locals skipped aggregates and forced guarded
+        // expression follow-ups. Share ordered typed reads with full stacks;
+        // only missing values need a second query at the caller's fenced stop.
         let types = self
             .inspection_command(
                 entry,
@@ -490,13 +523,12 @@ impl Gateway {
                 vec![("bare", "--simple-values".into())],
             )
             .await?;
-        let (mut arguments, mut locals) = normalized_frame_variables(&types.record, None)?;
+        let mut variables = normalized_frame_variables(&types.record, None)?;
         let mut evidence_seq = types.evidence_seq;
         let mut error = None;
-        if arguments
+        if variables
             .iter()
-            .chain(&locals)
-            .any(|variable| variable["status"] == "not_collected")
+            .any(|(_, variable)| variable["status"] == "not_collected")
         {
             let values = self
                 .inspection_command(
@@ -511,7 +543,7 @@ impl Gateway {
                 normalized_frame_variables(&types.record, Some(&values.record))
             });
             match merged {
-                Ok(variables) => (arguments, locals) = variables,
+                Ok(merged) => variables = merged,
                 Err(failure) if failure.code.is_independent_read_failure() => {
                     error = Some(ApiError::from(failure))
                 }
@@ -519,22 +551,20 @@ impl Gateway {
             }
         }
         if error.is_none()
-            && arguments
+            && variables
                 .iter()
-                .chain(&locals)
-                .any(|variable| variable["status"] == "failed")
+                .any(|(_, variable)| variable["status"] == "failed")
         {
             error = Some(ApiError::from(Error::new(
                 ErrorCode::GdbError,
                 "GDB could not read every frame variable",
             )));
         }
-        let mut facts =
-            json!({"arguments": arguments, "locals": locals, "evidence_seq": evidence_seq});
-        if let Some(error) = error {
-            facts["variables_error"] = json!(error);
-        }
-        Ok(facts)
+        Ok(FrameVariables {
+            variables,
+            evidence_seq,
+            error,
+        })
     }
 
     async fn inspection_threads(
@@ -828,6 +858,18 @@ impl Gateway {
         let mut observation = self
             .capture_observations(request, entry, state, requests, false)
             .await?;
+        // 2026-09-09: Profile projection keeps only the variable array, so
+        // retain its read failure before discarding the locals wrapper.
+        if let Some(error) = observation
+            .results
+            .get_mut("@snapshot.locals")
+            .and_then(Value::as_object_mut)
+            .and_then(|locals| locals.remove("variables_error"))
+        {
+            observation
+                .failures
+                .insert("@snapshot.locals".into(), serde_json::from_value(error)?);
+        }
         if let Some(error) = observation
             .results
             .get_mut("@snapshot.stack")
