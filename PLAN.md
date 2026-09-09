@@ -1,8 +1,10 @@
 # GDB/AI maintenance plan
 
-Status: the North-star implementation and its runtime release hardening are
-complete. This file tracks maintenance and evidence gates that remain relevant
-after the version-1 release; it is not a second implementation backlog.
+<!-- 2026-09-09: Completed historical gates do not qualify a different revision. -->
+This plan separates maintained runtime behavior, deferred Agent evaluation,
+and historical comparison records. Completed implementation checklists do not
+establish that Agents debug faster or more accurately than with native GDB.
+Release qualification applies only to the tested revision and configuration.
 
 Completed and superseded plans are preserved in:
 
@@ -49,6 +51,10 @@ and outside the default catalog.
 
 ## Runtime data-path verification
 
+Checked items below identify implemented behavior and its focused regressions,
+not the status of every release lane on the current revision. Keep these
+invariants covered when their implementation changes.
+
 ### Shared debugging turns
 
 - [x] Use one bounded read plan for run/wait, batch, and snapshot profiles;
@@ -64,11 +70,18 @@ and outside the default catalog.
 - [x] Keep immutable historical reads outside target execution, retain
   authorized controller handoff, and preserve independent-session concurrency.
 
-The focused regression uses a fixed local C program and verifies backend
-command counts for 1/4/8 readers, same-stop invalidation, partial failures,
-historical reuse, and context ownership. SDK verification covers both HTTP
-protocol paths and journal modes. These checks establish interface and
-collection behavior, not an autonomous Agent or exploit-speed claim.
+Core regressions cover qualified read coalescing, same-stop invalidation,
+partial failures, historical reuse, and context ownership. The Python SDK
+check adds 1/4/8 distinct HTTP readers of mixed captures while control waits
+for target input, then verifies new-stop attribution and both captures after
+close. SDK verification covers both HTTP protocols and journal modes. These
+checks establish interface and collection behavior, not Agent task success.
+
+The [fixed native comparison](benchmarks/python/compare_native.py) covers
+signal stops, thread stacks, full-stack locals, and expression batches through
+CLI, MI, and projected MCP. Preserve fact checks, native batching, raw response
+bytes, and separate cold/reused timings. Reproduce it through
+[Evaluation](README.md#evaluation); it does not replace a task-level trial.
 
 ### Existing data-path gates
 
@@ -125,14 +138,31 @@ New Agent comparisons are deferred during the maintenance work above. Future
 evaluation should measure reproducible diagnosis success and end-to-end cost
 on native crashes and blocked threads. Tool calls, output size, and RPC latency
 are supporting measurements. Preserve precise stop, frame, memory, register,
-and crash evidence. The earlier qualification notes below retain their original
-scope and limitations; they do not establish general diagnostic effectiveness.
+and crash evidence.
 
 GDB/AI is a semantic compressor over GDB, not a decomposition of GDB commands
 into transport steps. Strip prompts, terminal formatting, control bytes, and
 duplicate state while preserving exact debugger facts. One projected call
 should perform an operation that GDB can complete atomically; coordination IDs
 are returned evidence and optional cross-call pins, not required preflight.
+
+When evaluation resumes, use the projected MCP `tools/call` surface with a
+prebuilt server, and compare both direct CLI and direct MI under matched
+models, targets, symbols, permissions, resources, and budgets. Allow each
+interface its normal batching. Define correct diagnoses before trials, record
+failures and timeouts, and separate cold startup, reused-session work, actual
+model tokens, tool calls, and backend commands. Distinguish shared-session
+readers from independent debugger sessions when evaluating concurrency.
+
+## Historical comparison records
+
+The records below describe earlier interfaces, hosts, and evaluation tasks,
+including incomplete or invalidated trials. Their references to "current",
+"now", and future follow-ups belong to those records; the maintenance and
+deferred-evaluation sections above define the active scope. Unchecked items
+below are historical deferrals, not newly scheduled work. Neither their
+checkboxes nor their timing totals qualify the present revision or establish
+a general advantage over native GDB.
 
 Complete these changes before the next comparison:
 

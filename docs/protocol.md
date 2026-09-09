@@ -2,11 +2,13 @@
 
 The current major namespace is `gdb.ai/v1`. Protocol compatibility and
 release qualification are separate: the schema follows the version-1
-compatibility rules, while [`compatibility.md`](compatibility.md) records
-which target matrices have actually run. Requests carry a request ID,
-optional session ID, method, expected revision, idempotency key, and
-parameters. Mutations of existing canonical sessions require the current
-revision and write lease.
+compatibility rules, while [`compatibility.md`](compatibility.md) describes
+supported environments and configured qualification lanes. Results for a
+particular revision belong to CI runs and release attestations.
+
+Requests carry a request ID, optional session ID, method, expected revision,
+idempotency key, and parameters. Mutations of existing canonical sessions
+require the current revision and write lease.
 Stop-sensitive canonical reads require the current `stop_id` or an explicit
 `accept_current_stop` binding.
 MCP-created sessions use fixed caller control without write-lease renewal.

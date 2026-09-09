@@ -299,7 +299,9 @@ Share it with an authorized observer through `gdb_inspect` view `observation`
 and `snapshot_id: "<observation-id>"`; lookup issues no new GDB commands.
 Retrieved observations are explicitly historical, even before the target
 resumes. New captures never overwrite an earlier ID, and configured snapshot
-and session retention limits still apply.
+and session retention limits still apply. The
+[SDK verification](sdk/README.md#reproducible-verification) checks mixed
+historical reads during pending control and retrieval after session close.
 
 Session create/status returns `caller_identity` and `controller`. The current
 controller can use `gdb_session` action `handoff` with `to` set to another
