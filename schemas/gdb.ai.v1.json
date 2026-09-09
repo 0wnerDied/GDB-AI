@@ -392,21 +392,43 @@
         "properties": {
           "parameters": {
             "additionalProperties": false,
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "required": [
+                      "event_seq"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "event_seqs"
+                    ]
+                  }
+                ]
+              }
+            ],
             "properties": {
               "accept_latest_revision": {
                 "type": "boolean"
               },
               "event_seq": {
-                "minimum": 0,
+                "minimum": 1,
                 "type": "integer"
+              },
+              "event_seqs": {
+                "items": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maxItems": 64,
+                "type": "array"
               },
               "lease_id": {
                 "type": "string"
               }
             },
-            "required": [
-              "event_seq"
-            ],
+            "required": [],
             "type": "object"
           }
         }

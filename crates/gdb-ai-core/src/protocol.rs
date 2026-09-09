@@ -354,14 +354,14 @@ impl SemanticResult {
             .collect::<BTreeMap<_, _>>();
         for field in ["evidence", "observation_evidence"] {
             if let Some(items) = facts.get(field).and_then(Value::as_array) {
-                for item in items.iter().take(64) {
+                for item in items.iter().take(MAX_EVIDENCE_ENTRIES) {
                     if let Ok(item) = serde_json::from_value::<Evidence>(item.clone()) {
                         evidence.insert(item.uri.clone(), item);
                     }
                 }
             }
         }
-        metadata.evidence = evidence.into_values().take(64).collect();
+        metadata.evidence = evidence.into_values().take(MAX_EVIDENCE_ENTRIES).collect();
         metadata.continuation = facts
             .get("continuation")
             .filter(|value| !value.is_null())
@@ -744,6 +744,8 @@ pub struct Evidence {
     pub kind: String,
     pub uri: String,
 }
+
+pub const MAX_EVIDENCE_ENTRIES: usize = 64;
 
 impl Evidence {
     pub(crate) fn journal(session_id: &str, sequence: u64) -> Self {
@@ -1144,7 +1146,7 @@ pub fn is_command_reply(value: &Value) -> bool {
 }
 
 fn collect_evidence_sequences(value: &Value, depth: usize, output: &mut BTreeSet<u64>) {
-    if depth >= 8 || output.len() >= 64 {
+    if depth >= 8 || output.len() >= MAX_EVIDENCE_ENTRIES {
         return;
     }
     match value {

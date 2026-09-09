@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     os::unix::fs::PermissionsExt,
     path::Path,
     sync::{Arc, atomic::Ordering},
@@ -444,26 +444,44 @@ impl Gateway {
     }
 
     pub(super) async fn session_event(&self, request: &ApiRequest) -> Result<Value> {
+        #[derive(Deserialize)]
+        struct Parameters {
+            event_seq: Option<u64>,
+            event_seqs: Option<Vec<u64>>,
+        }
+
         let session_id = SessionId::parse(required_session(request)?)?;
-        let wanted = unsigned(&request.parameters, "event_seq")?;
-        if wanted == 0 {
+        let parameters: Parameters = parameters(request)?;
+        let batch = parameters.event_seqs.is_some();
+        let wanted = parameters
+            .event_seq
+            .into_iter()
+            .chain(parameters.event_seqs.unwrap_or_default())
+            .collect::<BTreeSet<_>>();
+        if wanted.is_empty() {
             return Err(Error::new(
                 ErrorCode::InvalidArgument,
-                "event_seq must be positive",
+                "at least one event sequence is required",
             ));
         }
         let path = self.session_journal_path(&session_id).await?;
-        let entry = tokio::task::spawn_blocking(move || -> Result<_> {
+        let (missing, mut entries) = tokio::task::spawn_blocking(move || -> Result<_> {
             use std::io::BufRead as _;
 
+            // 2026-09-09: Reading each evidence URI rescanned the journal.
+            // Scan a bounded batch once, without substituting gap markers or
+            // returning a successful partial set of the requested entries.
+            let mut missing = wanted;
+            let last = *missing.last().unwrap();
+            let mut entries = Vec::with_capacity(missing.len());
             for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
                 let entry: crate::journal::JournalEntry = serde_json::from_str(&line?)?;
                 // 2026-09-05: A live event ID can outlast journal recording;
                 // its gap marker is not a substitute for the requested event.
                 if entry.kind == "journal.gap"
-                    && entry.data["from_seq"]
+                    && let Some(wanted) = entry.data["from_seq"]
                         .as_u64()
-                        .is_some_and(|first| wanted >= first)
+                        .and_then(|first| missing.range(first..).next())
                 {
                     return Err(
                         Error::new(ErrorCode::EventGap, "event evidence was not retained")
@@ -472,14 +490,15 @@ impl Gateway {
                             ),
                     );
                 }
-                if entry.seq == wanted {
-                    return Ok(Some(entry));
+                let sequence = entry.seq;
+                if missing.remove(&sequence) {
+                    entries.push(entry);
                 }
-                if entry.seq > wanted {
+                if missing.is_empty() || sequence > last {
                     break;
                 }
             }
-            Ok(None)
+            Ok((missing, entries))
         })
         .await
         .map_err(|error| {
@@ -488,9 +507,14 @@ impl Gateway {
                 format!("journal scan task failed: {error}"),
             )
         })??;
-        if let Some(entry) = entry {
-            return Ok(serde_json::to_value(entry)?);
+        if missing.is_empty() {
+            return Ok(if batch {
+                json!({"entries": entries})
+            } else {
+                serde_json::to_value(entries.pop().unwrap())?
+            });
         }
+        let wanted = missing.first().unwrap();
         let state = match self.entry(&session_id.0).await {
             Ok(entry) => Some(entry.handle.state()),
             Err(_) => self.retained_session_state(&session_id).await?,

@@ -252,6 +252,14 @@ Respect the manifest page size and verify the final SHA-256 when collecting
 an artifact. The SDK returns pages as-is; it does not automatically fetch
 unbounded evidence or treat a resource URI as authorization.
 
+Projected `evidence` may contain `kind: "journal-entries"`: pass its `uri`
+directly to `read_resource`/`readResource` to retrieve the referenced journal
+`entries` together. Single-entry references still work. Batches contain at
+most 64 sequences, return each entry once in sequence order, and fail if any
+entry is unavailable. Canonical responses retain their individual references.
+Oversized batches return an artifact reference instead of partial entries;
+the artifact's canonical response contains `result.entries`.
+
 The server's `journal.durability` setting controls performance versus durable
 history. SDK calls preserve evidence-gap warnings in either mode. Neither
 SDK changes the server's retention, durability, or target security policy.
@@ -279,6 +287,8 @@ UTF-8 and binary PTY output, resource ranges, close artifacts, and complete
 journal replay. It shuts down its servers and removes the temporary
 workspace. The check is a required CI step, separate from the small mocked
 client tests; it does not claim the complete target or deployment matrix.
+The test server permits 1,000 requests per second per principal, with no extra
+burst allowance, so the bounded matrix does not exhaust production defaults.
 
 The Python projected check also uses 1/4/8 distinct HTTP readers while a
 controller's continue request waits for target input. Historical stacks,
@@ -286,6 +296,8 @@ locals, registers, scalar/aggregate values, and partial failures must retain
 their original context without issuing additional MI commands. After input
 releases the controller, a new stop must contain the changed value while the
 old capture remains unchanged, including after close.
+Journal batches must equal their individual canonical entries, remain
+readable during pending control and after close, and reject missing entries.
 
 The check prints individual SDK call latencies, throughput, and control
 completion time after input. Reader discovery is outside these measurements;

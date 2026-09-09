@@ -75,6 +75,52 @@ fn native_projection_preserves_business_fields_and_typed_metadata() {
 }
 
 #[test]
+fn projected_evidence_keeps_all_references_in_bounded_resources() {
+    let journal = (1..=MAX_EVIDENCE_ENTRIES + 1)
+        .map(|sequence| Evidence {
+            kind: "journal-entry".into(),
+            uri: format!("gdbai://session/sess_test/event/{sequence}"),
+        })
+        .collect::<Vec<_>>();
+    let other = vec![
+        Evidence {
+            kind: "artifact".into(),
+            uri: "gdbai://artifact/sha256:test".into(),
+        },
+        Evidence {
+            kind: "journal-entry".into(),
+            uri: "gdbai://session/sess_other/event/1".into(),
+        },
+        Evidence {
+            kind: "journal-entry".into(),
+            uri: "gdbai://session/sess_test/event/invalid".into(),
+        },
+    ];
+    let original = [journal.clone(), other.clone()].concat();
+    assert_eq!(compact_evidence(original.clone(), None), original);
+    assert_eq!(
+        compact_evidence(journal[..1].to_vec(), Some("sess_test")),
+        journal[..1]
+    );
+    let compact = compact_evidence(original, Some("sess_test"));
+    assert_eq!(&compact[..other.len()], other);
+    assert_eq!(compact.len(), other.len() + 2);
+    let grouped = &compact[other.len()];
+    assert_eq!(grouped.kind, "journal-entries");
+    assert_eq!(
+        grouped.uri,
+        format!(
+            "gdbai://session/sess_test/events/{}",
+            (1..=MAX_EVIDENCE_ENTRIES)
+                .map(|sequence| sequence.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    );
+    assert_eq!(compact.last().unwrap(), journal.last().unwrap());
+}
+
+#[test]
 fn initialize_teaches_agents_the_stateful_workflow() {
     let mut phase = Phase::New;
     let mut caller = Caller::local("test");
@@ -697,6 +743,56 @@ async fn projected_tools_keep_control_without_lease_renewal() {
             .as_array()
             .map(Vec::len),
         Some(2)
+    );
+    let evidence = &evaluated["structuredContent"]["evidence"];
+    assert_eq!(evidence.as_array().unwrap().len(), 1);
+    assert_eq!(evidence[0]["kind"], "journal-entries");
+    let uri = evidence[0]["uri"].as_str().unwrap();
+    let contents = read_resource(&gateway, &caller, &sequence, &json!({"uri": uri}))
+        .await
+        .unwrap();
+    let entries: Value =
+        serde_json::from_str(contents["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(entries["entries"].as_array().unwrap().len(), 2);
+    let denied = read_resource(
+        &gateway,
+        &Caller::local("another-principal"),
+        &sequence,
+        &json!({"uri": uri}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied.data.unwrap()["gdb_ai_code"], "POLICY_DENIED");
+    let bulk_uri = format!(
+        "gdbai://session/{session_id}/events/{}",
+        (1..=MAX_EVIDENCE_ENTRIES)
+            .map(|sequence| sequence.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let oversized = read_resource(&gateway, &caller, &sequence, &json!({"uri": bulk_uri}))
+        .await
+        .unwrap();
+    let oversized: Value =
+        serde_json::from_str(oversized["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(oversized.get("entries").is_none());
+    let artifact =
+        gdb_ai_core::artifact::ArtifactStore::new(directory.path().join("artifacts")).unwrap();
+    let bytes = artifact
+        .get(
+            oversized["artifact"].as_str().unwrap(),
+            oversized["size"].as_u64().unwrap() as usize,
+        )
+        .unwrap();
+    let preserved: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        preserved["result"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["seq"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        (1..=MAX_EVIDENCE_ENTRIES as u64).collect::<Vec<_>>()
     );
     let mutated = call_tool(
         &gateway,

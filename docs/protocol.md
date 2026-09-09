@@ -67,6 +67,18 @@ the compact projection does not construct or serialize those replies.
 Root-level per-read journal sequence markers remain in detailed diagnostics
 and promoted evidence, not in newly captured item facts. Item comparisons do
 not treat these transport markers as target-state changes.
+MCP groups multiple journal references from the same session as
+`kind: "journal-entries"` with a directly readable
+`gdbai://session/<session_id>/events/<comma-separated-sequences>` URI. Each
+resource names at most 64 entries; it returns an `entries` array in sequence
+order, with duplicate sequences returned once. Any missing entry fails the
+whole read with `NOT_FOUND` or `EVENT_GAP`, never a successful partial batch.
+Oversized replies use the normal artifact reference; that artifact contains
+the complete canonical response, with the entries under `result.entries`.
+Session ownership and retention still apply, including after close. Single
+`journal-entry` URIs and canonical response evidence remain unchanged.
+Canonical `session.event` accepts exactly one of `event_seq` or `event_seqs`;
+the latter takes 1–64 positive integers and uses the same single journal scan.
 Launch/restart keep full state, command replies, and capabilities in canonical
 diagnostics; their compact projection retains startup policy, coordination
 state, requested observations, bounded output, and evidence. Other lifecycle, raw,

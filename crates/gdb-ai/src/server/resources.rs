@@ -2,7 +2,7 @@ use std::sync::atomic::AtomicU64;
 
 use gdb_ai_core::{
     gateway::{Caller, Gateway},
-    protocol::CanonicalMethod,
+    protocol::{CanonicalMethod, MAX_EVIDENCE_ENTRIES},
 };
 use serde_json::{Value, json};
 
@@ -54,6 +54,11 @@ pub(super) fn resource_templates() -> Value {
         {
             "uriTemplate": "gdbai://session/{session_id}/event/{event_seq}",
             "name": "Journal evidence entry",
+            "mimeType": "application/json"
+        },
+        {
+            "uriTemplate": "gdbai://session/{session_id}/events/{event_seqs}",
+            "name": "Journal evidence batch (1–64 comma-separated sequences)",
             "mimeType": "application/json"
         },
         {
@@ -217,6 +222,26 @@ fn parse_session_resource(uri: &str) -> Result<(String, SessionResource), RpcFau
                     .map_err(|_| RpcFault::invalid("invalid event sequence"))?
             }),
         },
+        ([_, "events", event_seqs], None) => {
+            let sequences = event_seqs
+                .split(',')
+                .take(MAX_EVIDENCE_ENTRIES + 1)
+                .map(|sequence| {
+                    sequence
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|value| *value > 0 && value.to_string() == sequence)
+                        .ok_or_else(|| RpcFault::invalid("invalid event sequence"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if sequences.len() > MAX_EVIDENCE_ENTRIES {
+                return Err(RpcFault::invalid("journal batch exceeds 64 entries"));
+            }
+            SessionResource::Json {
+                method: CanonicalMethod::SessionEvent,
+                parameters: json!({"event_seqs": sequences}),
+            }
+        }
         ([_, "breakpoints"], None) => SessionResource::Json {
             method: CanonicalMethod::BreakpointList,
             parameters: json!({}),
@@ -613,6 +638,43 @@ mod tests {
         assert!(templates.contains("output/pty?offset={offset}&length={length}"));
         assert!(templates.contains("transcript?offset={offset}&length={length}"));
         assert!(!templates.contains("/inferior/{inferior_id}/output"));
+        assert!(templates.contains("/events/{event_seqs}"));
+    }
+
+    #[test]
+    fn journal_resources_reject_invalid_or_oversized_batches() {
+        let (_, resource) =
+            parse_session_resource("gdbai://session/sess_test/events/7,1,7").unwrap();
+        assert_eq!(
+            session_resource_request(&resource).unwrap(),
+            (
+                CanonicalMethod::SessionEvent,
+                json!({"event_seqs": [7, 1, 7]})
+            )
+        );
+        let (_, resource) = parse_session_resource("gdbai://session/sess_test/event/7").unwrap();
+        assert_eq!(
+            session_resource_request(&resource).unwrap(),
+            (CanonicalMethod::SessionEvent, json!({"event_seq": 7}))
+        );
+        for sequences in [
+            "".to_owned(),
+            "0,1".into(),
+            "1,-1".into(),
+            "1,invalid".into(),
+            "01,2".into(),
+            "1,+2".into(),
+            "1,".into(),
+            "18446744073709551616".into(),
+            std::iter::repeat_n("1", MAX_EVIDENCE_ENTRIES + 1)
+                .collect::<Vec<_>>()
+                .join(","),
+        ] {
+            assert!(
+                parse_session_resource(&format!("gdbai://session/sess_test/events/{sequences}"))
+                    .is_err()
+            );
+        }
     }
 
     #[test]

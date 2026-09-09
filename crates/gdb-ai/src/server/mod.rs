@@ -11,8 +11,8 @@ use gdb_ai_core::{
     domain::SessionState,
     gateway::{Caller, Gateway},
     protocol::{
-        API_VERSION, ApiRequest, ApiResponse, CanonicalMethod, is_command_reply,
-        session_coordination_state,
+        API_VERSION, ApiRequest, ApiResponse, CanonicalMethod, Evidence, MAX_EVIDENCE_ENTRIES,
+        is_command_reply, session_coordination_state,
     },
 };
 use serde_json::{Map, Value, json};
@@ -744,7 +744,7 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
         return semantic_tool_response(response);
     }
     let ApiResponse {
-        session_id: _,
+        session_id,
         revision: _,
         mut state,
         mut result,
@@ -1053,7 +1053,10 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
     // facts an Agent requested; repeating journal URIs on every call added no
     // exploit semantics. Retain them only when diagnosing a failed operation.
     if error.is_some() && !evidence.is_empty() {
-        compact.insert("evidence".into(), json!(evidence));
+        compact.insert(
+            "evidence".into(),
+            json!(compact_evidence(evidence, session_id.as_deref())),
+        );
     }
     if let Some(error) = error {
         let mut projected = json!(error);
@@ -1095,12 +1098,60 @@ fn semantic_tool_response(response: ApiResponse) -> Value {
         projected.insert("artifacts".into(), json!(response.artifacts));
     }
     if !response.evidence.is_empty() {
-        projected.insert("evidence".into(), json!(response.evidence));
+        projected.insert(
+            "evidence".into(),
+            json!(compact_evidence(
+                response.evidence,
+                response.session_id.as_deref()
+            )),
+        );
     }
     if let Some(error) = response.error {
         projected.insert("error".into(), json!(error));
     }
     Value::Object(projected)
+}
+
+fn compact_evidence(evidence: Vec<Evidence>, session_id: Option<&str>) -> Vec<Evidence> {
+    let Some(session_id) = session_id.filter(|_| evidence.len() > 1) else {
+        return evidence;
+    };
+    // 2026-09-09: Batched facts repeated a full session URI per command.
+    // Keep every sequence in bounded, directly readable journal resources;
+    // canonical references and non-journal evidence remain unchanged.
+    let prefix = format!("gdbai://session/{session_id}/event/");
+    let mut sequences = Vec::new();
+    let mut compact = Vec::new();
+    for item in evidence {
+        if item.kind == "journal-entry"
+            && let Some(sequence) = item.uri.strip_prefix(&prefix).filter(|sequence| {
+                sequence
+                    .parse::<u64>()
+                    .is_ok_and(|value| value > 0 && value.to_string() == *sequence)
+            })
+        {
+            sequences.push(sequence.to_owned());
+        } else {
+            compact.push(item);
+        }
+    }
+    for sequences in sequences.chunks(MAX_EVIDENCE_ENTRIES) {
+        compact.push(if sequences.len() == 1 {
+            Evidence {
+                kind: "journal-entry".into(),
+                uri: format!("{prefix}{}", sequences[0]),
+            }
+        } else {
+            Evidence {
+                kind: "journal-entries".into(),
+                uri: format!(
+                    "gdbai://session/{session_id}/events/{}",
+                    sequences.join(",")
+                ),
+            }
+        });
+    }
+    compact
 }
 
 fn compact_observation_errors(result: &mut Map<String, Value>) {

@@ -102,6 +102,7 @@ def canonical(client, program):
         assert isinstance(launched["result"]["observations"]["stack"]["frames"][0]["locals"], list), launched
         assert len(launched["result"]["created_breakpoints"]) == 1, launched
         assert launched["semantics"]["context"]["stop_id"] == stop_id, launched
+        assert all(item["kind"] == "journal-entry" for item in launched["evidence"]), launched
         context = session.call("inspection.get", {"view": "stop_context"})
         assert context["result"]["stop_id"] == stop_id, context
         stack = session.call("inspection.get", {"view": "stack", "stop_id": stop_id, "limit": 4})
@@ -202,6 +203,25 @@ def projected(client, program):
         assert captured["results"]["stack"]["frames"][0]["function"] == "main", captured
         assert isinstance(captured["results"]["stack"]["frames"][0]["locals"], list), captured
         observation_id = capture_response["context"]["observation_id"]
+        evidence = capture_response["evidence"]
+        assert len(evidence) == 1 and evidence[0]["kind"] == "journal-entries", evidence
+        evidence_uri = evidence[0]["uri"]
+        contents = observer.read_resource(evidence_uri)[0]
+        assert contents["uri"] == evidence_uri, contents
+        entries = json.loads(contents["text"])["entries"]
+        snapshot_uri = f"gdbai://session/{session_id}/snapshot/{observation_id}"
+        snapshot = json.loads(observer.read_resource(snapshot_uri)[0]["text"])
+        original_entries = [json.loads(observer.read_resource(item["uri"])[0]["text"])
+                            for item in snapshot["evidence"]]
+        assert entries == sorted(original_entries, key=lambda entry: entry["seq"]), entries
+        assert {entry["seq"] for entry in entries} == {
+            int(sequence) for sequence in evidence_uri.rsplit("/", 1)[1].split(",")}, entries
+        try:
+            observer.read_resource(evidence_uri + ",18446744073709551615")
+        except RpcError as error:
+            assert error.data["gdb_ai_code"] == "NOT_FOUND", error.data
+        else:
+            raise AssertionError("missing evidence returned a successful partial batch")
         lookup = {"session_id": session_id, "view": "observation", "snapshot_id": observation_id}
         shared_response = observer.call_tool("gdb_inspect", lookup)
         assert shared_response["historical"], shared_response
@@ -220,6 +240,8 @@ def projected(client, program):
             time.sleep(0.01)
         else:
             raise AssertionError("controller never reached a running target")
+        assert json.loads(observer.read_resource(evidence_uri)[0]["text"])["entries"] == entries
+        assert not waiting.done(), "journal evidence must not release the pending controller"
         verify_history_readers(pool, readers, lookup, shared_response, waiting)
         # The independent status read proves continue was admitted before
         # submitting another request through the controller's HTTP client.
@@ -278,6 +300,7 @@ def projected(client, program):
     closed_retained = client.call_tool("gdb_inspect", new_lookup)
     assert closed_retained["context"] == retained["context"], closed_retained
     assert closed_retained["result"] == retained["result"], closed_retained
+    assert json.loads(client.read_resource(evidence_uri)[0]["text"])["entries"] == entries
 
 
 def main():

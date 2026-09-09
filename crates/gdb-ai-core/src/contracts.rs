@@ -636,7 +636,14 @@ impl CanonicalMethod {
                 optional("offset", Unsigned),
                 optional("max_bytes", Unsigned),
             ]),
-            SessionEvent => MethodContract::plain(vec![required("event_seq", Unsigned)]),
+            SessionEvent => MethodContract::plain(vec![
+                optional("event_seq", Positive),
+                optional(
+                    "event_seqs",
+                    BoundedArray(&Positive, crate::protocol::MAX_EVIDENCE_ENTRIES),
+                ),
+            ])
+            .exactly_one(&["event_seq", "event_seqs"]),
             OperationGet => MethodContract::plain(vec![required("operation_id", String)]),
             OperationCancel => MethodContract::plain(vec![
                 required("operation_id", String),
@@ -1011,6 +1018,27 @@ impl CanonicalMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journal_batches_are_bounded_and_unambiguous() {
+        let method = CanonicalMethod::SessionEvent;
+        for parameters in [json!({"event_seq": 1}), json!({"event_seqs": [7, 1, 7]})] {
+            method.validate_parameters(&parameters).unwrap();
+        }
+        for parameters in [
+            json!({}),
+            json!({"event_seq": 0}),
+            json!({"event_seqs": [0]}),
+            json!({"event_seqs": ["1"]}),
+            json!({"event_seq": 1, "event_seqs": [2]}),
+            json!({"event_seqs": vec![1; crate::protocol::MAX_EVIDENCE_ENTRIES + 1]}),
+        ] {
+            assert!(
+                method.validate_parameters(&parameters).is_err(),
+                "{parameters}"
+            );
+        }
+    }
 
     #[test]
     fn validates_method_specific_parameters() {

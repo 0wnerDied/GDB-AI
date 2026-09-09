@@ -205,16 +205,36 @@ async fn persistence_failures_preserve_debugging_unless_durability_is_required()
         if let Some(gap) = replayed.evidence_gap {
             let first = call(session, "session.event", json!({"event_seq": 1})).await;
             assert_eq!(first.result.unwrap()["type"], "session.created");
+            let retained = call(session, "session.event", json!({"event_seqs": [2, 1, 2]})).await;
+            let entries = retained.result.as_ref().unwrap()["entries"]
+                .as_array()
+                .unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| entry["seq"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                [1, 2]
+            );
             for seq in [gap.from_seq, final_seq] {
-                let missing = call(session, "session.event", json!({"event_seq": seq})).await;
-                assert_eq!(missing.error.unwrap().code, ErrorCode::EventGap);
+                for parameters in [json!({"event_seq": seq}), json!({"event_seqs": [1, seq]})] {
+                    let missing = call(session, "session.event", parameters).await;
+                    assert_eq!(missing.error.unwrap().code, ErrorCode::EventGap);
+                    assert!(missing.result.is_none());
+                }
             }
             let journal = std::fs::read_to_string(&journal_path).unwrap();
             let mut lines: Vec<_> = journal.lines().collect();
             lines.pop();
             std::fs::write(&journal_path, lines.join("\n") + "\n").unwrap();
-            let missing = call(session, "session.event", json!({"event_seq": final_seq})).await;
-            assert_eq!(missing.error.unwrap().code, ErrorCode::EventGap);
+            for parameters in [
+                json!({"event_seq": final_seq}),
+                json!({"event_seqs": [1, final_seq]}),
+            ] {
+                let missing = call(session, "session.event", parameters).await;
+                assert_eq!(missing.error.unwrap().code, ErrorCode::EventGap);
+                assert!(missing.result.is_none());
+            }
         }
         gateway.shutdown().await;
     }
