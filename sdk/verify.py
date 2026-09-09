@@ -54,9 +54,13 @@ def main():
             state = root / durability
             state.mkdir()
             config = state / "server.toml"
+            # 2026-09-09: The shared-principal matrix could exhaust the default
+            # 300-request window before the next client started. Budget this
+            # bounded verification workload without changing production limits.
             config.write_text(
                 f'[gdb]\npath = {json.dumps(args.gdb)}\n'
                 f'[journal]\ndurability = {json.dumps(durability)}\n'
+                '[server]\nrequests_per_second = 1000\nrequest_burst = 0\n'
                 '[output]\nevidence = "artifact"\n'
                 f'[security]\nworkspace_roots = {json.dumps([str(root)])}\n'
                 f'[artifacts]\npath = {json.dumps(str(state / "artifacts"))}\n'
