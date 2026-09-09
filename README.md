@@ -6,11 +6,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/0wnerDied/GDB-AI/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/0wnerDied/GDB-AI?label=release&amp;color=274c77"></a>
-  <a href="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="Cargo.toml"><img alt="Rust 1.88 or later" src="https://img.shields.io/badge/Rust-1.88%2B-8b5e3c"></a>
-  <a href="docs/compatibility.md"><img alt="GDB MI3 and MI4" src="https://img.shields.io/badge/GDB-MI3%20%2F%20MI4-415a77"></a>
-  <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-59636e"></a>
+  <a href="https://github.com/0wnerDied/GDB-AI/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/0wnerDied/GDB-AI?label=release&amp;style=flat&amp;labelColor=374151&amp;color=274c77"></a>
+  <a href="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/0wnerDied/GDB-AI/ci.yml?branch=master&amp;label=CI&amp;style=flat&amp;labelColor=374151&amp;color=596675"></a>
+  <a href="Cargo.toml"><img alt="Rust 1.88 or later" src="https://img.shields.io/badge/Rust-1.88%2B-596675?style=flat&amp;labelColor=374151"></a>
+  <a href="docs/compatibility.md"><img alt="GDB MI3 and MI4" src="https://img.shields.io/badge/GDB-MI3%20%2F%20MI4-596675?style=flat&amp;labelColor=374151"></a>
+  <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-596675?style=flat&amp;labelColor=374151"></a>
 </p>
 
 <p align="center">
@@ -20,13 +20,6 @@
   <a href="#interface">Interface</a> ·
   <a href="#scope-and-trust-boundary">Scope</a> ·
   <a href="#reproducible-verification">Verification</a>
-</p>
-
-<p align="center">
-  <a href="docs/assets/gdb-ai-agent-interface.svg">
-    <img src="docs/assets/gdb-ai-agent-interface.svg" width="900"
-         alt="An Agent sends a bounded operation through GDB/AI to GNU GDB and receives contextual evidence for its next hypothesis.">
-  </a>
 </p>
 
 GDB/AI is the **GDB Agent Interface**, a Rust server that gives software Agents
@@ -77,8 +70,8 @@ target/release/gdb-ai serve --http 127.0.0.1:8080
 
 HTTP exposes `/mcp`, `/healthz`, and `/metrics`. Bearer authentication uses
 `--auth-token-file`, and browser clients require explicit `--trusted-origin`
-values. Remote access terminates TLS at a trusted same-host proxy because
-GDB/AI binds HTTP only to loopback.
+values. For remote access, terminate TLS at a trusted same-host proxy; GDB/AI
+accepts HTTP only on loopback.
 
 ## One Agent turn
 
@@ -104,28 +97,29 @@ before execution. `program` identifies the executable and `argv` contains only
 its arguments, preserving empty values, whitespace, quotes, and shell
 characters literally.
 
-Continue, step, launch, restart, and interrupt can collect the same bounded
-inspection vocabulary. A blocked target, for example, can be interrupted with
-`inspect: [{"view": "threads", "stack_depth": 8, "include_locals": true}]`
-to return thread identities, stacks, arguments, and typed locals, including
-aggregate contents, at one stop. Independent item failures preserve successful
-siblings and mark the observation incomplete. A post-stop inspection error
-preserves the execution outcome and does not instruct the Agent to repeat it.
+Run-control operations share the same bounded inspection plans. For a blocked
+target, an interrupt with the `threads` view, `stack_depth: 8`, and
+`include_locals: true` collects thread identities, stacks, arguments, and
+typed local values, including aggregate contents, from one stop.
+
+Independent inspection failures retain successful results and mark the
+observation incomplete. Inspection errors preserve the execution outcome;
+they do not imply that the Agent should repeat the run-control operation.
 
 <p align="center">
   <a href="docs/assets/gdb-ai-operation-sequence.svg">
     <img src="docs/assets/gdb-ai-operation-sequence.svg" width="900"
-         alt="One launch request creates a session, starts GDB, runs the target, captures independent PTY output, inspects the resulting stop, and returns contextual evidence.">
+         alt="One launch request optionally creates a session, configures GDB and breakpoints, runs a local target, captures independent PTY bytes, inspects the stop, records an observation, and returns contextual evidence.">
   </a>
 </p>
-<p align="center"><em>Figure 1. A fused launch and inspection turn.</em></p>
+<p align="center"><em>Figure 1. The stop path of a fused launch and inspection turn.</em></p>
 
 The sequence records logical dependencies, not a shared clock.
 [GDB/MI][gdb-mi] state records and local inferior PTY bytes are independent
 streams. GDB/AI checks the stop ID and execution epoch before publishing the
-requested observation. A response timeout does not cancel target execution;
-the returned `operation_id` remains queryable until the caller explicitly
-interrupts or closes the session.
+requested observation. A normal exit reports exit state without a stopped
+observation. An HTTP response timeout does not cancel target execution; query
+the returned `operation_id` with `gdb_session` action `operation_status`.
 
 ## System model
 
@@ -137,26 +131,27 @@ separate control path so they do not wait behind a pending normal operation.
 <p align="center">
   <a href="docs/assets/gdb-ai-architecture.svg">
     <img src="docs/assets/gdb-ai-architecture.svg" width="900"
-         alt="Agents enter through MCP or canonical JSON-RPC, then pass through policy and typed operations to a session actor and its GDB process; evidence and PTY capture use separate paths.">
+         alt="Agents and SDK clients pass through transport adapters and the Gateway to one session actor and GDB process; control, MI reduction, evidence, and local PTY paths remain separate.">
   </a>
 </p>
-<p align="center"><em>Figure 2. Session ownership and the separation of control, target I/O, and recorded evidence.</em></p>
+<p align="center"><em>Figure 2. One-session ownership and the separate control, MI reduction, target I/O, and evidence paths.</em></p>
 
 Stop IDs and execution epochs bind observations to debugger state. Resuming a
 target invalidates earlier frame and value handles. A context change during a
 multi-command read returns a stale-context error instead of mixed evidence.
-Run inspections, batches, and snapshots can publish immutable
-`observation_id` values that authorized callers retrieve without issuing new
-GDB commands. Those observations remain available after resume or session
-close within the configured retention limits. MCP control remains with the
-creating caller until close or an explicit handoff to another caller under the
-same authenticated principal.
+Successful run-control inspection plans, batches, and snapshots publish
+immutable `observation_id` values that authorized callers retrieve without
+issuing new GDB commands. Persisted observations remain available after resume
+or session close within the configured retention limits.
 
-Every public response is bounded. Large results use pagination or
-content-addressed artifacts, and metadata describes truncation, continuation,
-and evidence gaps. Local target input and output use a PTY; GDB console,
-target, and log streams remain separate. PTY stdout and stderr share one
-terminal and cannot be attributed as distinct streams.
+MCP control remains with the creating caller until close or an explicit
+handoff to another caller under the same authenticated principal.
+
+Every public response is bounded. Large results are paged, moved to
+content-addressed artifacts, or explicitly truncated; metadata describes
+continuations and evidence gaps. Local target input and output use a PTY; GDB
+console, target, and log streams remain separate. PTY stdout and stderr share
+one terminal and cannot be attributed as distinct streams.
 
 The default `performance` journal mode keeps live debugging available when
 history storage fails and reports the evidence gap. `durable` mode requires
@@ -168,9 +163,9 @@ cancellation, and persistence invariants live in
 ## Interface
 
 MCP tools and canonical calls share the same server and operation registry.
-The canonical namespace is `gdb.ai/v1`; static [schemas](schemas) define its
-request, event, and resource contracts. The default MCP catalog groups eleven
-tools by debugging responsibility:
+The [canonical protocol](docs/protocol.md) uses the `gdb.ai/v1` namespace;
+static [schemas](schemas) define its request, event, and resource contracts.
+The default MCP catalog groups eleven tools by debugging responsibility:
 
 | Responsibility | Tools | Interface |
 | --- | --- | --- |
@@ -200,10 +195,10 @@ releases, target prerequisites, and qualification boundary.
 Linux user-space coverage includes launch, attach, cores, threads,
 breakpoints, values, registers, memory, and disassembly. Remote coverage uses
 gdbserver and QEMU RSP. Conditional Linux kernel views cover tasks, modules,
-stacks, symbols, and selected page-table operations. V8, Node.js, PHP, CGI,
-LLVM, Clang, and JIT checks exercise the native debugging capability of
-matching GDB and runtime builds; language-specific decoding still depends on
-matching symbols and caller-supplied helpers.
+stacks, symbols, and selected page-table operations. Node.js/V8, PHP, CGI,
+LLVM, Clang, and JIT checks exercise native debugging with matching GDB and
+runtime builds; language-specific decoding still depends on matching symbols
+and caller-supplied helpers.
 
 Native Windows and macOS hosts, non-stop execution, an LLDB backend, and
 restoration of a live inferior after GDB exits are outside the current
@@ -213,10 +208,11 @@ The deployment boundary is a trusted local workspace under the server's OS
 account. GDB starts with initialization files, target auto-load, debuginfod,
 and inferior function calls disabled. Workspace roots constrain structured
 target paths, and operators can configure PID and remote allowlists, resource
-limits, or bubblewrap hardening. These controls do not form a complete target
-sandbox. Place the server, GDB, helpers, and untrusted targets inside an
-external container or VM; the [security model](docs/security.md) defines the
-full contract.
+limits, or bubblewrap hardening.
+
+These controls do not form a complete target sandbox. Place the server, GDB,
+helpers, and untrusted targets inside an external container or VM; the
+[security model](docs/security.md) defines the full contract.
 
 ## Reproducible verification
 
@@ -240,17 +236,9 @@ Compatibility establishes behavior on specified configurations. Claims about
 Agent diagnostic success, interaction cost, context use, or elapsed time need
 controlled task-level trials. [Evaluation methodology](docs/evaluation.md)
 defines comparable conditions, fixed native evidence checks, metric semantics,
-and reproducible commands without embedding benchmark procedure in this
-overview.
+and reproducible commands.
 
-## Documentation and license
-
-Start with the [connection guide](docs/mcp-clients.md) for client setup. The
-[protocol](docs/protocol.md) and [schemas](schemas) define wire contracts;
-[architecture](docs/architecture.md) and [operations](docs/operations.md)
-describe state and evidence; [compatibility](docs/compatibility.md),
-[kernel debugging](docs/kernel.md), and [security](docs/security.md) define
-environmental boundaries. Contributor work belongs in [PLAN.md](PLAN.md).
+## License
 
 GDB/AI is independently versioned and requires no binutils-gdb source
 modification. It is licensed under [GPL-3.0-or-later](LICENSE).
