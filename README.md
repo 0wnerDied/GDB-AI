@@ -6,11 +6,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/0wnerDied/GDB-AI/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/0wnerDied/GDB-AI?label=release&amp;style=flat&amp;labelColor=374151&amp;color=274c77"></a>
-  <a href="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/0wnerDied/GDB-AI/ci.yml?branch=master&amp;label=CI&amp;style=flat&amp;labelColor=374151&amp;color=596675"></a>
-  <a href="Cargo.toml"><img alt="Rust 1.88 or later" src="https://img.shields.io/badge/Rust-1.88%2B-596675?style=flat&amp;labelColor=374151"></a>
-  <a href="docs/compatibility.md"><img alt="GDB MI3 and MI4" src="https://img.shields.io/badge/GDB-MI3%20%2F%20MI4-596675?style=flat&amp;labelColor=374151"></a>
-  <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-596675?style=flat&amp;labelColor=374151"></a>
+  <!-- 2026-09-09: Keep each badge's semantic color and let CI report live status. -->
+  <a href="https://github.com/0wnerDied/GDB-AI/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/0wnerDied/GDB-AI?label=release&amp;style=flat&amp;color=007ec6"></a>
+  <a href="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/0wnerDied/GDB-AI/ci.yml?branch=master&amp;label=CI&amp;style=flat"></a>
+  <a href="Cargo.toml"><img alt="Rust 1.88 or later" src="https://img.shields.io/badge/Rust-1.88%2B-ea7233?style=flat"></a>
+  <a href="docs/compatibility.md"><img alt="GDB MI3 and MI4" src="https://img.shields.io/badge/GDB-MI3%20%2F%20MI4-8a2be2?style=flat"></a>
+  <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-67ac09?style=flat"></a>
 </p>
 
 <p align="center">
@@ -18,6 +19,7 @@
   <a href="#one-agent-turn">Agent turn</a> ·
   <a href="#system-model">System model</a> ·
   <a href="#interface">Interface</a> ·
+  <a href="#documentation">Docs</a> ·
   <a href="#scope-and-trust-boundary">Scope</a> ·
   <a href="#reproducible-verification">Verification</a>
 </p>
@@ -183,6 +185,16 @@ process's host authority.
 
 The [Python and TypeScript SDKs](sdk/README.md) expose canonical sessions,
 projected MCP calls, and bounded resources over HTTP.
+
+<!-- 2026-09-09: Keep every public guide reachable from the README's primary navigation. -->
+## Documentation
+
+| Goal | Start here |
+| --- | --- |
+| Connect an Agent | [Client setup](docs/mcp-clients.md) for supported MCP clients and the first debugging turn |
+| Use the APIs | [Canonical protocol](docs/protocol.md), [schemas](schemas), and [Python and TypeScript SDKs](sdk/README.md) |
+| Operate the server | [Operations](docs/operations.md), [architecture](docs/architecture.md), and the [security model](docs/security.md) |
+| Qualify or extend | [Compatibility](docs/compatibility.md), [kernel debugging](docs/kernel.md), the [provider boundary](docs/provider-sdk.md), and [evaluation](docs/evaluation.md) |
 
 ## Scope and trust boundary
 
