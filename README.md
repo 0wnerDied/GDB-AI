@@ -483,6 +483,8 @@ cost checks on Linux x86-64, run:
 cargo build --locked --release -p gdb-ai
 python3 benchmarks/python/compare_native.py target/release/gdb-ai
 python3 benchmarks/python/compare_native.py target/release/gdb-ai --case threads
+python3 benchmarks/python/compare_native.py target/release/gdb-ai --case full-stack
+python3 benchmarks/python/compare_native.py target/release/gdb-ai --case expressions
 ```
 
 This dependency-free script rotates CLI, MI, and projected MCP execution
@@ -493,11 +495,19 @@ signal-only fixture. The thread case checks three stacks, both worker inputs,
 and lock-pointer arguments in the existing lock-order fixture at `pthread_join`;
 it requires matching pthread debug information and rejects captures missing
 either lock value. These are fixed evidence checks, not proof of deadlock or
-complete diagnostic equivalence. The script reports raw samples and minimum,
-median, and maximum costs for startup, cold capture, and same-session restart.
-Both projected cases create, launch, and inspect in one request; the thread
-case includes breakpoint setup in that call. All bootstrap costs are included
-in cold capture, with no independently measured startup row for either case.
+complete diagnostic equivalence. The full-stack case checks arguments and
+locals across three frames, including aggregate contents and MI/MCP types;
+CLI uses `bt full`. The expressions case checks 16 scalar, structure, and
+array results, allowing native CLI and MI to pipeline their commands.
+
+The script reports raw samples and minimum, median, and maximum costs for
+startup, cold capture, and same-session restart. All projected cases create,
+launch, and inspect in one request; the thread case includes breakpoint setup
+in that call. All bootstrap costs are included in cold capture, with no
+independently measured projected startup row. Timers end at the final response
+receipt, before final fact assertions. Each sample includes `response_base64`
+with the original response bytes, including native setup for cold captures.
+Closed projected journals must replay completely; replay runs outside timers.
 Debugger command counts, stdin batches, and wire bytes are separate measures;
 discovery and teardown are excluded. CLI framing bytes are included, but
 framing commands and command-line startup settings are not counted as debugger

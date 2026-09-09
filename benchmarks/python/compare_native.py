@@ -3,6 +3,7 @@
 """Measure fixed Linux x86-64 stop evidence, not Agent diagnostic success."""
 
 import argparse
+import base64
 from collections import defaultdict
 import itertools
 import json
@@ -26,6 +27,49 @@ INITIAL_COMMANDS = (
     "unset environment MALLOC_ARENA_MAX",
 )
 END = b"\nGDB_AI_SAMPLE_END\n"
+FULL_STACK = (
+    ("finish", {"total": ("int", "9")}, {"expected": ("int", "10")}),
+    ("collect", {"requested": ("int", "8")}, {
+        "counts": ("struct summary", "{accepted = 8, rejected = 1}"), "total": ("int", "9"),
+    }),
+    ("main", {}, {"requested": ("int", "8")}),
+)
+EXPRESSIONS = [
+    ("observed", "42"), ("pair", "{left = 41, right = 42}"), ("numbers", "{2, 3, 5}"),
+    ("pair.left", "41"), ("pair.right", "42"),
+    ("numbers[0]", "2"), ("numbers[1]", "3"), ("numbers[2]", "5"),
+    *[(f"observed + {index}", str(42 + index)) for index in range(8)],
+]
+
+
+def mi_variable_lists(output):
+    # ponytail: these fixtures use only flat string fields and JSON-compatible
+    # ASCII values; arbitrary MI needs the project's full parser instead.
+    lists = []
+    for record in re.findall(rb"(?m)^\d+\^done,variables=(.*)$", output):
+        variables = [
+            {key.decode(): json.loads(value) for key, value in
+             re.findall(rb'([a-z-]+)=("(?:\\.|[^"])*")', item)}
+            for item in re.findall(rb'\{(?:[a-z-]+="(?:\\.|[^"])*",?)+\}', record)
+        ]
+        assert record == b"[]" or variables, record
+        assert len({item["name"] for item in variables}) == len(variables), record
+        lists.append(variables)
+    return lists
+
+
+def verify_full_stack_cli(output):
+    frames = re.split(rb"(?m)^(?:\(gdb\) )*#\d+\s+", output)[1:]
+    assert len(frames) == len(FULL_STACK), output
+    for frame, (function, arguments, locals_) in zip(frames, FULL_STACK):
+        header, body = frame.split(b"\n", 1)
+        assert re.search(rb"\b" + function.encode() + rb"\s*\(", header), header
+        for name, (_, value) in arguments.items():
+            assert re.search(rb"\b" + name.encode() + b"=" + re.escape(value.encode())
+                             + rb"(?:,|\))", header), header
+        for name, (_, value) in locals_.items():
+            assert re.search(rb"(?m)^\s*" + name.encode() + b" = "
+                             + re.escape(value.encode()) + b"$", body), body
 
 
 def executable(name):
@@ -75,6 +119,7 @@ def combined(*parts):
 
 def native(gdb, program, interface, mi, case):
     started = time.perf_counter()
+    received_at = started
     process = subprocess.Popen(
         [gdb, "-q", "-nx", *(arg for command in INITIAL_COMMANDS for arg in ("-iex", command)),
          *([f"--interpreter={mi}"] if interface == "mi" else [])],
@@ -88,7 +133,7 @@ def native(gdb, program, interface, mi, case):
     # before accepting arbitrary targets or record grammars here.
 
     def commands(items, stopped=False):
-        nonlocal token
+        nonlocal token, received_at
         if interface == "cli":
             payload = ("\n".join([*items, "echo \\nGDB_AI_SAMPLE_END\\n"]) + "\n").encode()
             done = lambda output: END in output
@@ -99,8 +144,11 @@ def native(gdb, program, interface, mi, case):
                 numbered.append(f"{token}{item}\n")
             payload = "".join(numbered).encode()
             marker = b"*stopped," if stopped else f"{token}^done".encode()
-            done = lambda output: marker in output and output.endswith(b"\n")
+            # 2026-09-09: A failed MI command has no ^done or stop record;
+            # report its actual error instead of waiting for a false timeout.
+            done = lambda output: (marker in output or b"^error" in output) and output.endswith(b"\n")
         cost, output = exchange(process, payload, done)
+        received_at = time.perf_counter()
         assert b"^error" not in output, output
         cost["debugger_commands"] = len(items)
         return cost, output
@@ -114,8 +162,8 @@ def native(gdb, program, interface, mi, case):
         if case == "threads":
             setup += (["set breakpoint pending on", "break pthread_join"] if interface == "cli"
                       else ["-break-insert -f pthread_join"])
-        startup, _ = commands(setup)
-        startup["seconds"] = time.perf_counter() - started
+        startup, startup_output = commands(setup)
+        startup["seconds"] = received_at - started
         captures = []
         for _ in range(2):
             capture_started = time.perf_counter()
@@ -151,6 +199,60 @@ def native(gdb, program, interface, mi, case):
                 else:
                     assert len(re.findall(rb'name="argument"[^}]*value="0x0"', frames)) == 2, frames
                 assert b"pthread_join" in output, output
+            elif case == "full-stack":
+                if interface == "cli":
+                    cost, output = commands(["run", "bt full 8"])
+                    verify_full_stack_cli(output)
+                else:
+                    run, stopped = commands(["-exec-run"], stopped=True)
+                    # MI requires a thread selector with --frame; use the
+                    # actual stop identity rather than assuming thread one.
+                    thread = re.search(rb'thread-id="(\d+)"', stopped)
+                    assert thread, stopped
+                    thread = thread.group(1).decode()
+                    stack, frames = commands(["-stack-list-frames 0 7"])
+                    levels = [int(level) for level in re.findall(rb'frame=\{level="(\d+)"', frames)]
+                    assert levels == list(range(len(FULL_STACK))), frames
+                    typed, types_output = commands([
+                        f"-stack-list-variables --thread {thread} --frame {level} --simple-values" for level in levels
+                    ])
+                    types = mi_variable_lists(types_output)
+                    assert len(types) == len(levels), types_output
+                    values = dict(zip(levels, types))
+                    missing = [level for level, variables in values.items()
+                               if any("value" not in variable for variable in variables)]
+                    cost = combined(run, stack, typed)
+                    output = stopped + frames + types_output
+                    if missing:
+                        full, full_output = commands([
+                            f"-stack-list-variables --thread {thread} --frame {level} --all-values" for level in missing
+                        ])
+                        lists = mi_variable_lists(full_output)
+                        assert len(lists) == len(missing), full_output
+                        values.update(zip(missing, lists))
+                        cost = combined(cost, full)
+                        output += full_output
+                    for level, (function, arguments, locals_) in enumerate(FULL_STACK):
+                        assert re.search(f'level="{level}"[^}}]*func="{function}"'.encode(), frames), frames
+                        expected = arguments | locals_
+                        assert {item["name"]: item["type"] for item in types[level]} == {
+                            name: type_ for name, (type_, _) in expected.items()}, types[level]
+                        assert {item["name"]: item["value"] for item in values[level]} == {
+                            name: value for name, (_, value) in expected.items()}, values[level]
+                        assert {item["name"] for item in types[level] if item.get("arg") == "1"} == set(arguments), types[level]
+            elif case == "expressions":
+                if interface == "cli":
+                    cost, output = commands(["run", *[f"print {expression}" for expression, _ in EXPRESSIONS]])
+                    values = [value.decode() for value in re.findall(rb"(?m)^(?:\(gdb\) )*\$\d+ = (.*)$", output)]
+                else:
+                    run, stopped = commands(["-exec-run"], stopped=True)
+                    evaluated, output = commands([
+                        f"-data-evaluate-expression {json.dumps(expression)}" for expression, _ in EXPRESSIONS
+                    ])
+                    cost = combined(run, evaluated)
+                    output = stopped + output
+                    values = [json.loads(value) for value in re.findall(rb'\d+\^done,value=("(?:\\.|[^"])*")', output)]
+                assert values == [value for _, value in EXPRESSIONS], output
             elif interface == "cli":
                 cost, output = commands(["run", "bt 8", "info locals", "info args"])
                 for name, value in (("observed", 42), ("input", 41)):
@@ -170,14 +272,21 @@ def native(gdb, program, interface, mi, case):
                     assert re.search(f'name="{name}"[^}}]*value="{value}"'.encode(), output), output
                 for level, function in ((0, "capture_value"), (1, "main")):
                     assert re.search(f'level="{level}"[^}}]*func="{function}"'.encode(), output), output
-            if case == "signal":
+            if case != "threads":
                 assert b"SIGILL" in output, output
-            cost["seconds"] = time.perf_counter() - capture_started
+            # 2026-09-09: Growing fixture assertions inflated reported latency.
+            # End the timer at receipt, before ground-truth verification.
+            cost["seconds"] = received_at - capture_started
+            cost["response_base64"] = base64.b64encode(output).decode()
             if not captures:
-                cold_seconds = time.perf_counter() - started
+                cold_seconds = received_at - started
             captures.append(cost)
         cold = combined(startup, captures[0])
         cold["seconds"] = cold_seconds
+        cold["response_base64"] = base64.b64encode(
+            startup_output + base64.b64decode(captures[0]["response_base64"])
+        ).decode()
+        startup["response_base64"] = base64.b64encode(startup_output).decode()
         return {"startup": startup, "cold": cold, "reused": captures[1]}
     finally:
         finish(process)
@@ -197,6 +306,7 @@ def projected(server, gdb, program, state, mi, case):
     )
     with (state / "server.log").open("w+") as log:
         started = time.perf_counter()
+        received_at = started
         process = subprocess.Popen(
             [server, "--config", str(config), "serve", "--stdio"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
@@ -205,7 +315,7 @@ def projected(server, gdb, program, state, mi, case):
         sequence = 0
 
         def call(action, **arguments):
-            nonlocal sequence
+            nonlocal sequence, received_at
             sequence += 1
             payload = (json.dumps({
                 "jsonrpc": "2.0", "id": sequence, "method": "tools/call",
@@ -214,6 +324,8 @@ def projected(server, gdb, program, state, mi, case):
                                      "io.modelcontextprotocol/clientCapabilities": {}}},
             }, separators=(",", ":")) + "\n").encode()
             cost, output = exchange(process, payload, lambda output: output.endswith(b"\n"))
+            received_at = time.perf_counter()
+            cost["response_base64"] = base64.b64encode(output).decode()
             response = json.loads(output)
             assert response["id"] == sequence and "error" not in response, response
             assert not response["result"]["isError"], response
@@ -224,13 +336,19 @@ def projected(server, gdb, program, state, mi, case):
             launch = {"program": str(program)}
             if case == "threads":
                 launch["breakpoints"] = [{"function": "pthread_join"}]
+                inspect = [{"view": "threads", "stack_depth": 8}]
+            elif case == "full-stack":
+                inspect = [{"view": "stack", "limit": 8, "include_locals": True}]
+            elif case == "expressions":
+                inspect = [{"view": "evaluate", "expressions": [expression for expression, _ in EXPRESSIONS]}]
+            else:
+                inspect = [{"view": "stack", "limit": 8}, {"view": "locals"}]
             captures = []
             for action in ("launch", "restart"):
                 capture_started = time.perf_counter()
                 cost, response = call(
                     action, stop="none", **({"session_id": session} if session else {}),
-                    inspect=([{"view": "threads", "stack_depth": 8}] if case == "threads" else
-                             [{"view": "stack", "limit": 8}, {"view": "locals"}]),
+                    inspect=inspect,
                     **(launch if action == "launch" else {}),
                 )
                 if session is None:
@@ -255,6 +373,20 @@ def projected(server, gdb, program, state, mi, case):
                         values = [argument["value"] for frame in thread["frames"]
                                   for argument in frame.get("arguments", [])]
                         assert any(isinstance(value, str) and f"<{lock}>" in value for value in values), response
+                elif case == "full-stack":
+                    frames = observations["stack"]["frames"]
+                    assert len(frames) == len(FULL_STACK), response
+                    for level, (frame, (function, arguments, locals_)) in enumerate(zip(frames, FULL_STACK)):
+                        assert frame["level"] == level and frame["function"] == function, frame
+                        assert frame["frame_id"] and frame["address"] and frame["source"], frame
+                        for field, expected in (("arguments", arguments), ("locals", locals_)):
+                            assert {item["name"]: (item["type"], item["value"]) for item in frame[field]} == expected, frame
+                            assert all(item["status"] == "available" for item in frame[field]), frame
+                elif case == "expressions":
+                    assert observations["evaluate"]["results"] == [
+                        {"expression": expression, "value": value, "type": None, "status": "available"}
+                        for expression, value in EXPRESSIONS
+                    ], response
                 else:
                     assert "SIGILL" in json.dumps(response["state"]), response
                     assert [frame["function"] for frame in observations["stack"]["frames"]] == [
@@ -263,9 +395,11 @@ def projected(server, gdb, program, state, mi, case):
                                for argument in observations["stack"]["frames"][0].get("arguments", [])), response
                     values = {item["name"]: item["value"] for item in observations["locals"]["variables"]}
                     assert values == {"observed": "42", "input": "41"}, response
-                cost["seconds"] = time.perf_counter() - capture_started
+                if case != "threads":
+                    assert "SIGILL" in json.dumps(response["state"]), response
+                cost["seconds"] = received_at - capture_started
                 if not captures:
-                    cold_seconds = time.perf_counter() - started
+                    cold_seconds = received_at - started
                 captures.append(cost)
             _, closed = call("close", session_id=session)
             assert closed["result"]["clean_shutdown"] and not closed.get("warnings"), closed
@@ -295,6 +429,13 @@ def projected(server, gdb, program, state, mi, case):
     assert sum(cost["debugger_commands"] for cost in captures) == sum(
         count for phase, count in counts.items() if phase != "session.close"), counts
     captures[0]["seconds"] = cold_seconds
+    replayed = subprocess.run(
+        [server, "replay", str(state / "sessions" / session / "journal.jsonl")],
+        check=True, capture_output=True, text=True, timeout=15,
+    )
+    replay = json.loads(replayed.stdout)
+    assert replay["complete"] and replay["evidence_gap"] is None, replay
+    captures[0]["journal_replay"] = {key: replay[key] for key in ("complete", "entries", "parsed_mi_records")}
     return {"cold": captures[0], "reused": captures[1]}
 
 
@@ -304,7 +445,7 @@ def main():
     parser.add_argument("--gdb", default="gdb", type=executable)
     parser.add_argument("--cc", default="cc", type=executable)
     parser.add_argument("--mi", choices=("mi2", "mi3", "mi4"), default="mi4")
-    parser.add_argument("--case", choices=("signal", "threads"), default="signal")
+    parser.add_argument("--case", choices=("signal", "threads", "full-stack", "expressions"), default="signal")
     parser.add_argument("--samples", default=6, type=int)
     args = parser.parse_args()
     if args.samples < 1:
@@ -315,12 +456,19 @@ def main():
         root = Path(temporary)
         if args.case == "threads":
             source = Path(__file__).resolve().parents[2] / "tests/targets/c/deadlock.c"
+        elif args.case == "full-stack":
+            source = Path(__file__).resolve().parents[2] / "tests/targets/c/stack_locals.c"
         else:
-            source = root / "signal.c"
+            source = root / f"{args.case}.c"
             source.write_text(
                 "int capture_value(int input) {\n"
                 "  int observed = input + 1;\n  __builtin_trap();\n  return observed;\n}\n"
-                "int main(void) { return capture_value(41); }\n"
+                "int main(void) { return capture_value(41); }\n" if args.case == "signal" else
+                "struct pair { int left; int right; };\n"
+                "int main(void) {\n"
+                "  int observed = 42;\n  struct pair pair = {41, 42};\n"
+                "  int numbers[3] = {2, 3, 5};\n  __builtin_trap();\n"
+                "  return observed + pair.left + numbers[0];\n}\n"
             )
         program = root / args.case
         subprocess.run([args.cc, "-g", "-O0", "-fno-omit-frame-pointer", "-pthread", str(source),
@@ -329,6 +477,8 @@ def main():
             for interface in orders[sample % len(orders)]:
                 costs = (projected(args.server, args.gdb, program, root / f"state-{sample}", args.mi, args.case)
                          if interface == "projected" else native(args.gdb, program, interface, args.mi, args.case))
+                for cost in costs.values():
+                    assert len(base64.b64decode(cost["response_base64"])) == cost["response_bytes"], cost
                 samples.extend({"sample": sample, "interface": interface, "phase": phase, **cost}
                                for phase, cost in costs.items())
     grouped = defaultdict(list)
@@ -345,10 +495,14 @@ def main():
         "conditions": "Fixed stop evidence; Linux x86-64; performance journal; "
                       "thread case requires pthread debug information and both lock argument values; "
                       "cold includes process/session startup; reused restarts the same target; "
+                      "timers end at final response receipt, before final fact assertions; "
                       "discovery and teardown excluded; response bytes include CLI framing marker; "
                       "command counts cover stdin commands, excluding CLI framing and argv settings; "
                       "startup rows measure separate native setup only; "
                       "projected creation and breakpoint setup are fused into cold launch; "
+                      "full-stack checks all three frames and aggregate contents, with types in MI/MCP; "
+                      "expressions pipelines native print/evaluate commands for 16 mixed values; "
+                      "raw responses are base64 encoded and projected closed journals must replay; "
                       "script batches are not Agent calls; bytes are not tokens",
         "mi": args.mi,
         "case": args.case,
