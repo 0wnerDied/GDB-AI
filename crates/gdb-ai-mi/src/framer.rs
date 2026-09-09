@@ -105,7 +105,7 @@ impl MiFramer {
     }
 
     pub fn preview(&self, maximum: usize) -> Vec<u8> {
-        self.buffer.iter().take(maximum).copied().collect()
+        self.buffer[..self.buffer.len().min(maximum)].to_vec()
     }
 }
 

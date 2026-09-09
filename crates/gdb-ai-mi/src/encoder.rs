@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 pub fn quote_c_string(value: &[u8]) -> String {
     let mut encoded = String::with_capacity(value.len() + 2);
     encoded.push('"');
@@ -9,9 +11,11 @@ pub fn quote_c_string(value: &[u8]) -> String {
             b'\r' => encoded.push_str("\\r"),
             b'\t' => encoded.push_str("\\t"),
             0x20..=0x7e => encoded.push(char::from(*byte)),
-            // 2026-08-29: Keep the shared encoder valid under the declared
-            // Rust 1.88 Clippy gate by using captured format arguments.
-            _ => encoded.push_str(&format!("\\{byte:03o}")),
+            // 2026-09-09: Formatting each escaped byte allocated a temporary
+            // string. Write its fixed-width octal form into the shared buffer.
+            _ => {
+                let _ = write!(encoded, "\\{byte:03o}");
+            }
         }
     }
     encoded.push('"');

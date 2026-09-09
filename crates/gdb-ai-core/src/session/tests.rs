@@ -1755,8 +1755,7 @@ async fn loads_hash_pinned_python_extension() {
     let python_enabled = std::process::Command::new("gdb")
         .arg("--configuration")
         .output()
-        .ok()
-        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).contains("--with-python"));
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("--with-python"));
     if !python_enabled {
         // 2026-08-29: Required CI previously skipped extension loading when
         // its GDB lacked Python, hiding a missing release prerequisite.

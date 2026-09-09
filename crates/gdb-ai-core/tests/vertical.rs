@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::Command};
+use std::{fmt::Write as _, path::PathBuf, process::Command};
 
 use gdb_ai_core::{
     ErrorCode,
@@ -1296,7 +1296,13 @@ async fn local_debugging_vertical_slice() {
         .collect();
     let expected_arguments: Vec<String> = argv
         .iter()
-        .map(|argument| argument.bytes().map(|byte| format!("{byte:02x}")).collect())
+        .map(|argument| {
+            let mut hex = String::with_capacity(argument.len() * 2);
+            for byte in argument.bytes() {
+                let _ = write!(hex, "{byte:02x}");
+            }
+            hex
+        })
         .collect();
     assert_eq!(actual_arguments, expected_arguments);
     let evaluated = successful(
