@@ -81,7 +81,8 @@ The [fixed native comparison](benchmarks/python/compare_native.py) covers
 signal stops, thread stacks, full-stack locals, and expression batches through
 CLI, MI, and projected MCP. Preserve fact checks, native batching, raw response
 bytes, and separate cold/reused timings. Reproduce it through
-[Evaluation](README.md#evaluation); it does not replace a task-level trial.
+[evaluation methodology](docs/evaluation.md); it does not replace a task-level
+trial.
 
 ### Existing data-path gates
 

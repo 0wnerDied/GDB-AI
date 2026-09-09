@@ -1,59 +1,59 @@
-<!-- 2026-09-05: The prose rewrite lost the centered masthead and crowded
-     setup behind both figures. Keep HTML blocks complete and setup first. -->
 <h1 align="center">GDB/AI</h1>
 
 <p align="center">
-  <strong>A stateful interface to GNU GDB for Agents.</strong>
+  <strong>GDB Agent Interface</strong><br>
+  Stateful, bounded access to GNU GDB for software Agents.
 </p>
 
 <p align="center">
+  <a href="https://github.com/0wnerDied/GDB-AI/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/0wnerDied/GDB-AI?label=release&amp;color=274c77"></a>
   <a href="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/0wnerDied/GDB-AI/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-2ea44f"></a>
-  <a href="Cargo.toml"><img alt="Rust: 1.88+" src="https://img.shields.io/badge/Rust-1.88%2B-dea584"></a>
-  <a href="docs/compatibility.md"><img alt="GDB: MI3 / MI4" src="https://img.shields.io/badge/GDB-MI3%20%2F%20MI4-315d8a"></a>
+  <a href="Cargo.toml"><img alt="Rust 1.88 or later" src="https://img.shields.io/badge/Rust-1.88%2B-8b5e3c"></a>
+  <a href="docs/compatibility.md"><img alt="GDB MI3 and MI4" src="https://img.shields.io/badge/GDB-MI3%20%2F%20MI4-415a77"></a>
+  <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-59636e"></a>
 </p>
 
 <p align="center">
   <a href="#build-and-connect">Build</a> ·
-  <a href="#system-model">Architecture</a> ·
-  <a href="#agent-operations">Tools</a> ·
-  <a href="#supported-targets-and-verification-scope">Targets</a> ·
-  <a href="#reproducible-verification">Verification</a> ·
-  <a href="#evaluation">Evaluation</a>
+  <a href="#one-agent-turn">Agent turn</a> ·
+  <a href="#system-model">System model</a> ·
+  <a href="#interface">Interface</a> ·
+  <a href="#scope-and-trust-boundary">Scope</a> ·
+  <a href="#reproducible-verification">Verification</a>
 </p>
 
-GDB/AI aims to reduce the interaction, output-processing, and coordination
-costs of Agent debugging relative to direct GDB CLI or GDB/MI use, while
-preserving the information needed to establish a diagnosis.
+<p align="center">
+  <a href="docs/assets/gdb-ai-agent-interface.svg">
+    <img src="docs/assets/gdb-ai-agent-interface.svg" width="900"
+         alt="An Agent sends a bounded operation through GDB/AI to GNU GDB and receives contextual evidence for its next hypothesis.">
+  </a>
+</p>
 
-The server exposes MCP tools and a canonical JSON-RPC API. One run-control
-request can provide input, wait for a stop or exit, and return requested
-observations together with target output. Independent sessions can progress
-concurrently. Effects on debugging accuracy, token consumption, and elapsed
-time require task-level measurement; see [Evaluation](#evaluation).
+GDB/AI is the **GDB Agent Interface**, a Rust server that gives software Agents
+stateful, bounded access to GNU GDB through MCP and a canonical JSON-RPC API.
+GNU GDB retains target execution, symbols, unwinding, expressions, and JIT
+registration. GDB/AI manages sessions, typed operations, concurrency, and
+evidence around those semantics.
+
+The interface is organized around an Agent's debugging turn. A launch request
+can create a session, install breakpoints, run to a stop, and collect a
+stop-bound inspection plan. Later run-control requests can provide target input,
+wait for another stop or exit, and return requested observations. Responses
+identify their execution context and any incomplete evidence. This reduces
+protocol bookkeeping and output parsing while preserving the facts needed to
+support a diagnosis.
 
 The primary workflow is native Linux crash and blocked-thread diagnosis in a
-trusted development workspace. Start with [run and inspect](#run-and-inspect)
-for crashes and [thread diagnosis](#thread-diagnosis) for hangs. Remote,
-kernel, and runtime-specific paths have additional prerequisites described
-under [supported targets](#supported-targets-and-verification-scope).
+trusted development workspace. Attach, core, gdbserver, QEMU, Linux kernel,
+and native runtime debugging use the same interface when their documented
+prerequisites are present.
 
 ## Build and connect
 
-Running the server requires Linux and a supported GDB. Building from source
-requires Rust 1.88 or later. A C compiler is needed for native test fixtures;
-gdbserver, QEMU, runtime binaries, and cross-compilers are needed only for the
-corresponding integration tests. Python-enabled GDB is needed for helpers
-that execute Python inside GDB.
-
-The default configuration trusts the workspace and server account. Debugger
-API permissions do not isolate target programs; untrusted code requires an
-external container or VM boundary around the server, GDB, and local target.
-Review the [deployment contract](docs/security.md) before running such code.
-
-[Published releases](https://github.com/0wnerDied/GDB-AI/releases) provide
-packaged binaries and checksums. Use the README at the corresponding tag
-when running a release binary; this document describes its repository revision.
+Running GDB/AI requires Linux and a supported GNU GDB. Building from source
+requires Rust 1.88 or later. Published [releases](https://github.com/0wnerDied/GDB-AI/releases)
+provide binaries and checksums; use the README at the corresponding tag for a
+release binary.
 
 ```sh
 cargo build --locked --release -p gdb-ai
@@ -61,81 +61,30 @@ target/release/gdb-ai doctor
 target/release/gdb-ai serve --stdio
 ```
 
-Run the server from the target workspace or configure
-`security.workspace_roots` explicitly. The default root is the server's
-working directory. Build native test programs with debug information when
-source-level inspection is required. `doctor` checks the local environment;
-`--version` reports the source commit, compiler, and canonical-schema hash.
+Run the server from the target workspace or set `security.workspace_roots`
+explicitly. `doctor` checks the debugger environment, and `--version` reports
+the release, source commit, compiler, and canonical-schema hash. The
+[connection guide](docs/mcp-clients.md) provides exact MCP configuration for
+supported clients.
 
-### MCP transports
-
-Stdio serves a local MCP client. For multiple local connections, choose a
-Unix socket or loopback HTTP:
+Stdio is the direct local transport. Multiple local clients can use an
+owner-only Unix socket or loopback HTTP:
 
 ```sh
 target/release/gdb-ai serve --unix "$XDG_RUNTIME_DIR/gdb-ai.sock"
 target/release/gdb-ai serve --http 127.0.0.1:8080
 ```
 
-Choose a socket directory owned by the server account when `XDG_RUNTIME_DIR`
-is unavailable. HTTP exposes `/mcp`, `/healthz`, and `/metrics`; bearer-token
-authentication is available through `--auth-token-file`. Remote HTTP access
-requires a same-host TLS reverse proxy. Browser requests additionally need
-an explicit `--trusted-origin` entry.
+HTTP exposes `/mcp`, `/healthz`, and `/metrics`. Bearer authentication uses
+`--auth-token-file`, and browser clients require explicit `--trusted-origin`
+values. Remote access terminates TLS at a trusted same-host proxy because
+GDB/AI binds HTTP only to loopback.
 
-The [Agent connection guide](docs/mcp-clients.md) documents client setup,
-transport negotiation, and examples. MCP tools and the canonical
-`gdb.ai/call` method share the server; the canonical namespace is `gdb.ai/v1`.
-The [Python and TypeScript SDKs](sdk/README.md) provide canonical session
-clients, projected MCP tool calls, and bounded resource access over both
-supported HTTP protocol paths.
+## One Agent turn
 
-## System model
-
-Each debugging session owns a GDB process and explicit execution state.
-GDB remains responsible for target control, symbols, unwinding, expressions,
-and JIT registration; GDB/AI uses the existing [GDB/MI interface][gdb-mi].
-
-<p align="center">
-  <a href="docs/assets/gdb-ai-architecture.svg">
-    <img src="docs/assets/gdb-ai-architecture.svg" width="800"
-         alt="Agent requests reach a session actor and its GDB process; PTY capture and history storage follow separate paths.">
-  </a>
-</p>
-<p align="center"><em>Figure 1. Session ownership and separate control, I/O, and history paths.</em></p>
-
-The figure shows one session; additional sessions have independent actors
-and GDB processes within the same server. The PTY path applies to local
-launches. Remote and attached targets retain their target-specific I/O
-arrangements. Storage connections indicate recording; durability depends
-on the configured mode.
-
-| Responsibility | GDB/AI behavior |
-| --- | --- |
-| Process ownership | One GDB child per session; an actor correlates MI command tokens and owns live session state. |
-| Execution context | Stop IDs and execution epochs bind observations. Resuming invalidates previous frame and value handles. |
-| Compound operations | Session creation, breakpoint setup, launch, wait, and requested inspection can share one Agent call. Run calls can also supply input. Probes combine a temporary breakpoint, bounded capture, and cleanup. |
-| Output | Structured replies omit MI envelopes and debugger prompts. Inferior PTY bytes and GDB console, target, and log streams remain separately accessible. |
-| Large results | Pagination and artifact references bound responses. Continuation, truncation, and evidence-gap metadata identify incomplete data. |
-| Persistence | Live state belongs to the actor. Journal durability and output retention are explicit configuration choices. |
-
-## Agent operations
-
-Use `gdb_session` action `launch` without `session_id` to create a session
-and launch in one call. Retain `result.session.session_id` for later calls.
-Pass an existing `session_id` to reuse a session. Launch accepts `breakpoints`
-with up to sixteen locations, so ordinary breakpoint setup needs no separate
-call. Use `create` separately for other pre-launch configuration.
-`program` names the executable; `argv` contains
-only its arguments. Empty arguments, whitespace, quotes, and shell characters
-in `argv` are preserved literally. Use `stop: "main"` when the target has an
-appropriate main symbol, or `first_instruction` when setup must precede
-further execution. The caller supplies the intended executable, loader,
-libraries, symbols, and runtime helpers.
-
-### Run and inspect
-
-Create a session, launch, and collect crash evidence in one request:
+The shortest crash workflow creates a session, launches the program, waits for
+a stop or exit, and requests a compact crash observation. Omitting
+`session_id` performs session creation within the launch call.
 
 ```json
 {
@@ -149,274 +98,131 @@ Create a session, launch, and collect crash evidence in one request:
 }
 ```
 
-With `inspect`, launch and restart wait for a stop or exit when `stop` is
-`none`; other start policies collect at their selected startup stop. The
-response includes bounded target output and observations from that stop.
-A normal exit returns no stop observations and is not an inspection failure.
-If a new session was created before launch failed, its ID and control metadata
-remain in `error.details.session`; reuse or close it instead of creating another.
+The response contains `result.session.session_id` for later operations.
+Launch can install up to sixteen persistent software breakpoint locations
+before execution. `program` identifies the executable and `argv` contains only
+its arguments, preserving empty values, whitespace, quotes, and shell
+characters literally.
 
-For an existing stopped session with a breakpoint configured, the following
-`tools/call` parameters supply input, continue, wait, and inspect the resulting
-stop in one request:
-
-```json
-{
-  "name": "gdb_run",
-  "arguments": {
-    "action": "continue",
-    "session_id": "<session-id>",
-    "input": {"text": "1\n"},
-    "inspect": [
-      {"view": "stack", "limit": 8},
-      {"view": "registers", "roles": ["pc", "sp"]},
-      {"view": "evaluate", "expressions": ["$pc", "$sp"]}
-    ]
-  }
-}
-```
-
-Continue and step wait for a stop or exit by default. Requested views apply
-to a resulting stop; a target that exits instead is reported as exited.
-For crash triage, use `inspect: [{"view": "crash", "profile": "brief"}]`
-on `gdb_run` action `continue` to collect a bounded crash view at the stop.
-Run `inspect`, `gdb_batch` requests, and snapshot `inspect` share the same
-bounded read vocabulary, including expressions, memory, disassembly, and
-per-item thread, frame, and source selectors. Independent read failures
-preserve successful siblings and mark the observation incomplete.
-The same plan can sample configured tracking definitions or compare two
-retained observations without building a full snapshot.
-For snapshots, supplying `inspect` without `profile` collects only those
-items; an explicit profile adds its standard facts to the same bounded plan.
-An `observation_error` reports failed post-stop inspection while preserving
-the execution outcome; it does not imply that execution should be repeated.
-Use `accepted` or `running` without `inspect` for asynchronous interaction.
-A response waiter timeout does not cancel target execution: use the returned
-`operation_id` with `gdb_session` action `operation_status`, or explicitly
-interrupt or close the session.
+Continue, step, launch, restart, and interrupt can collect the same bounded
+inspection vocabulary. A blocked target, for example, can be interrupted with
+`inspect: [{"view": "threads", "stack_depth": 8, "include_locals": true}]`
+to return thread identities, stacks, arguments, and typed locals, including
+aggregate contents, at one stop. Independent item failures preserve successful
+siblings and mark the observation incomplete. A post-stop inspection error
+preserves the execution outcome and does not instruct the Agent to repeat it.
 
 <p align="center">
   <a href="docs/assets/gdb-ai-operation-sequence.svg">
-    <img src="docs/assets/gdb-ai-operation-sequence.svg" width="800"
-         alt="One continue call receives MI state events and independent PTY output, inspects the resulting stop, and returns one response.">
+    <img src="docs/assets/gdb-ai-operation-sequence.svg" width="900"
+         alt="One launch request creates a session, starts GDB, runs the target, captures independent PTY output, inspects the resulting stop, and returns contextual evidence.">
   </a>
 </p>
-<p align="center"><em>Figure 2. One continue request, from execution to stop-bound inspection.</em></p>
+<p align="center"><em>Figure 1. A fused launch and inspection turn.</em></p>
 
-The MI command result acknowledges execution control; asynchronous records
-report target-state changes, following [GDB/MI execution semantics][gdb-execution].
-MI and PTY traffic have no common ordering guarantee. The server verifies
-the stop context before returning requested views. Persistence behavior is
-governed separately by the configured mode. Both figures show logical
-relationships, without asserting measured latency or a mandatory ordering
-of all runtime events.
+The sequence records logical dependencies, not a shared clock.
+[GDB/MI][gdb-mi] state records and local inferior PTY bytes are independent
+streams. GDB/AI checks the stop ID and execution epoch before publishing the
+requested observation. A response timeout does not cancel target execution;
+the returned `operation_id` remains queryable until the caller explicitly
+interrupts or closes the session.
 
-### Tool catalog
+## System model
 
-The default MCP catalog contains eleven tools:
+Each session owns one GNU GDB process and one actor that alone writes its MI
+command stream and live reducer state. Sessions progress independently, while
+mutations within one session remain serialized. Interrupt and close use a
+separate control path so they do not wait behind a pending normal operation.
 
-| Tool | Purpose |
-| --- | --- |
-| `gdb_session` | Session creation, launch, lifecycle, controller handoff, and operation status |
-| `gdb_run` | Execution control, direct restart, input, waits, and requested views |
-| `gdb_probe` | Temporary breakpoint, optional trigger, bounded capture, and cleanup |
-| `gdb_breakpoints` | Breakpoints, watchpoints, catchpoints, conditions, and scopes |
-| `gdb_inspect` | Target, thread, stack, symbol/type, source, mapping, tracking, snapshots, and historical differences |
-| `gdb_batch` | Bounded mixed reads captured at one stop and shared by observation ID |
-| `gdb_evaluate` | Single or ordered-batch expression evaluation |
-| `gdb_memory` | Memory reads and retrieval of artifact content |
-| `gdb_disassemble` | Instructions, addresses, bytes, and available source context |
-| `gdb_io` | PTY I/O and separate GDB console, target, and log streams |
-| `gdb_events` | Bounded event waits |
+<p align="center">
+  <a href="docs/assets/gdb-ai-architecture.svg">
+    <img src="docs/assets/gdb-ai-architecture.svg" width="900"
+         alt="Agents enter through MCP or canonical JSON-RPC, then pass through policy and typed operations to a session actor and its GDB process; evidence and PTY capture use separate paths.">
+  </a>
+</p>
+<p align="center"><em>Figure 2. Session ownership and the separation of control, target I/O, and recorded evidence.</em></p>
 
-`--advanced-tools` adds remote/attach/core actions, mutation actions, variable
-objects, registers, tracking, signals, Agent operations, and kernel views.
+Stop IDs and execution epochs bind observations to debugger state. Resuming a
+target invalidates earlier frame and value handles. A context change during a
+multi-command read returns a stale-context error instead of mixed evidence.
+Run inspections, batches, and snapshots can publish immutable
+`observation_id` values that authorized callers retrieve without issuing new
+GDB commands. Those observations remain available after resume or session
+close within the configured retention limits. MCP control remains with the
+creating caller until close or an explicit handoff to another caller under the
+same authenticated principal.
 
-### Native GDB commands
+Every public response is bounded. Large results use pagination or
+content-addressed artifacts, and metadata describes truncation, continuation,
+and evidence gaps. Local target input and output use a PTY; GDB console,
+target, and log streams remain separate. PTY stdout and stderr share one
+terminal and cannot be attributed as distinct streams.
 
-`--raw-admin` independently exposes `gdb_raw` and defaults newly created
-sessions to the raw profile. Raw console calls accept native GDB commands
-and runtime helpers, returning their console, target, and log output in the
-same reply; output preceding a command error remains in `error.details`.
-Consecutive raw commands defer registry reconciliation until a structured
-operation needs the cached state. Capability responses describe target-specific
-availability. The [canonical protocol](docs/protocol.md) and
-[schemas](schemas) define the complete interface.
+The default `performance` journal mode keeps live debugging available when
+history storage fails and reports the evidence gap. `durable` mode requires
+evidence writes to succeed. Replay reconstructs recorded debugger state and
+observations without executing or restoring the inferior. Detailed ownership,
+cancellation, and persistence invariants live in
+[architecture](docs/architecture.md) and [operations](docs/operations.md).
 
-## Supported targets and verification scope
+## Interface
 
-GDB/AI runs on Linux and uses [all-stop debugging][gdb-all-stop].
-Required CI exercises x86-64 and AArch64. MI4 is preferred; an MI3 fallback
-uses a fresh GDB process. The compatibility matrix tests GDB **9.2, 10.2,
-11.2, and 12.1 with MI3**, and **13.2, 14.2, 15.2, 16.3, and 17.2 with MI4**.
-Each version runs the same local-debugging scenario, including literal
-argument preservation. This matrix does not test every runtime against every
-GDB version.
+MCP tools and canonical calls share the same server and operation registry.
+The canonical namespace is `gdb.ai/v1`; static [schemas](schemas) define its
+request, event, and resource contracts. The default MCP catalog groups eleven
+tools by debugging responsibility:
 
-| Target | Debugging interface and verification |
-| --- | --- |
-| Linux user space | Launch, attach, cores, threads, breakpoints, values, registers, memory, and disassembly. Verified by workspace integration tests and AArch64 remote/system tests. |
-| gdbserver / RSP | Remote connection and capability-dependent inspection/control. Verified with native gdbserver, QEMU user-mode, and system targets. |
-| Linux kernel | Tasks, modules, stacks, and conditional symbol/page-table views through remote GDB. Verified on pinned Debian Linux 6.1 and 6.12 x86-64, and 6.12 AArch64 under QEMU. |
-| V8 / Node.js | Native engine debugging with caller-supplied GDB helpers. Compared with native GDB at V8 isolate initialization. |
-| PHP / CGI | Native interpreter and CGI process debugging. Compared with native GDB at PHP request startup. |
-| LLVM / Clang / JIT | Native compiled code and GDB-supported JIT symbols. Verified with a Clang-compiled fixture and LLVM MCJIT comparisons. |
+| Responsibility | Tools | Interface |
+| --- | --- | --- |
+| Session and execution | `gdb_session`, `gdb_run`, `gdb_events` | Lifecycle, control, input, waits, handoff, and operation status |
+| Instrumentation | `gdb_probe`, `gdb_breakpoints` | Temporary probes and persistent breakpoints, watchpoints, or catchpoints |
+| Observation | `gdb_inspect`, `gdb_batch` | Stop-bound semantic views, snapshots, history, differences, and mixed reads |
+| Program data | `gdb_evaluate`, `gdb_memory`, `gdb_disassemble` | Expressions, exact hexadecimal bytes, artifacts, and instructions |
+| Target I/O | `gdb_io` | Inferior PTY bytes and separate GDB console, target, and log streams |
 
-For V8, PHP/CGI, and LLVM/JIT, the compatibility target is the native debugging
-capability of the **same GDB and runtime builds**. The runtime checks compare
-breakpoints, native stack frames, GDB helper output, target output, and exit
-status. Language frames, object decoding, optimized-code unwinding, and JIT
-visibility depend on matching symbols, runtime support, and supplied helpers.
-JIT integration uses [GDB's JIT interface][gdb-jit]. The MCJIT check establishes
-coverage for that JIT configuration.
+`--advanced-tools` adds attach, core, remote and mutation operations, variable
+objects, registers, tracking, signals, Agent operations, and Linux kernel
+views. `--raw-admin` separately exposes native MI and console commands,
+including caller-supplied runtime helpers. Raw commands execute with the GDB
+process's host authority.
 
-Kernel views depend on architecture, target capabilities, and available
-symbols. Typed traversal requires a matching `vmlinux`; the symbol-free
-bootstrap and page-table paths are specific to supported x86-64 QEMU targets.
-See [compatibility](docs/compatibility.md) and
-[kernel debugging](docs/kernel.md) for prerequisites and exact test commands.
+The [Python and TypeScript SDKs](sdk/README.md) expose canonical sessions,
+projected MCP calls, and bounded resources over HTTP.
 
-Native Windows/macOS hosts, non-stop execution, an LLDB backend, and live
-inferior restoration after GDB death are outside the implemented scope.
+## Scope and trust boundary
 
-## Multiple Agents and concurrent targets
+GDB/AI runs on Linux in GDB's all-stop mode. MI4 is preferred, with MI3 in a
+fresh fallback GDB process. Required CI qualifies GDB 9 through 17 on x86-64
+and exercises separate native and QEMU AArch64 lanes. The
+[compatibility matrix](docs/compatibility.md) records the exact maintenance
+releases, target prerequisites, and qualification boundary.
 
-Independent sessions can progress concurrently. Within a session, normal
-mutations are serialized, observations validate their execution context, and
-interrupt/close have a separate control path. MCP-created sessions retain a
-fixed caller controller without recurring lease renewal. Same-principal
-callers may observe within their access rights; concurrent clients do not
-automatically acquire independent mutation authority over one target.
+Linux user-space coverage includes launch, attach, cores, threads,
+breakpoints, values, registers, memory, and disassembly. Remote coverage uses
+gdbserver and QEMU RSP. Conditional Linux kernel views cover tasks, modules,
+stacks, symbols, and selected page-table operations. V8, Node.js, PHP, CGI,
+LLVM, Clang, and JIT checks exercise the native debugging capability of
+matching GDB and runtime builds; language-specific decoding still depends on
+matching symbols and caller-supplied helpers.
 
-While stopped, identical qualified read requests share a bounded per-session
-capture. Qualification covers metadata and top-frame registers, with full
-parameters, context, revision, and same-stop mutations checked before reuse.
-Expressions, memory (including volatile/MMIO), and unwound registers are not
-cached.
+Native Windows and macOS hosts, non-stop execution, an LLDB backend, and
+restoration of a live inferior after GDB exits are outside the current
+interface.
 
-Run inspections, batches, and snapshots return an immutable `observation_id`.
-Share it with an authorized observer through `gdb_inspect` view `observation`
-and `snapshot_id: "<observation-id>"`; lookup issues no new GDB commands.
-Retrieved observations are explicitly historical, even before the target
-resumes. New captures never overwrite an earlier ID, and configured snapshot
-and session retention limits still apply. The
-[SDK verification](sdk/README.md#reproducible-verification) checks mixed
-historical reads during pending control and retrieval after session close.
-
-Session create/status returns `caller_identity` and `controller`. The current
-controller can use `gdb_session` action `handoff` with `to` set to another
-same-principal caller's exact identity. SDK client names distinguish workers
-for this coordination; they are not authentication credentials.
-
-The canonical API retains explicit write leases and revision checks. In MCP,
-an omitted `stop_id` binds to the current stop; supplying a returned ID makes
-a later call reject a different stop. Frame and value handles expire on
-resume. Control transfer and cancellation semantics are documented in
-[operations](docs/operations.md).
-
-Memory reads return `data_hex` by default through MCP, including memory views
-inside run, batch, and snapshot plans. Each pair of digits is one byte in
-ascending address order; no character encoding or integer byte order is
-assumed. Large reads retain a hex preview and an exact binary artifact.
-Canonical calls keep their Base64 default; `encoding: "hex"` or `"base64"`
-selects the inline representation explicitly on either interface.
-
-### Thread diagnosis
-
-For a hang or suspected thread race, `gdb_inspect` with `view: "threads"`
-and `stack_depth: 8` returns thread identities, including available Linux
-LWP IDs, and their stacks with available frame arguments at one stop. Ordinary
-`stack` views also include arguments, using the same scalar-value rules as
-the `arguments` view. The same thread view can be included in a
-`gdb_run` interrupt request. Use `limit` and `offset` to page threads;
-returned frame offsets allow deeper stack inspection. Per-thread unwind
-failures are reported explicitly. If argument collection fails, valid frames
-remain available with `arguments_error` and the observation is incomplete.
-Argument values require matching debug information; optimized-out values stay
-explicitly unavailable. Standard and deep snapshots retain their separate
-`arguments` field without collecting or presenting those values twice.
-
-Set `include_locals: true` on `stack` or `threads` to capture each returned
-frame's typed locals, including aggregate contents, in the same turn. This
-also works inside launch, run, batch, and snapshot inspection plans. Full
-thread pages share the configured frame budget; continue with `next_offset`.
-
-If the desired stop is known before launch, install its breakpoint and collect
-the thread stacks in one call. For example, to stop at `pthread_join`:
-
-```json
-{
-  "name": "gdb_session",
-  "arguments": {
-    "action": "launch",
-    "program": "/workspace/app",
-    "stop": "none",
-    "breakpoints": [{"function": "pthread_join"}],
-    "inspect": [{"view": "threads", "stack_depth": 8}]
-  }
-}
-```
-
-These software breakpoints persist across restart; `result.created_breakpoints`
-contains their IDs for later update or deletion. Source, address, expression,
-and module-offset locations are also accepted. The requested start policy
-still applies: use `stop: "none"` to run until a breakpoint, signal, or exit.
-Other breakpoint attributes remain available through `gdb_breakpoints`.
-
-These observations support diagnosis of the captured state. All-stop
-debugging changes scheduling, and a captured stop does not establish
-deterministic reproduction of a race. Repeated trials and independent
-root-cause evidence are necessary when evaluating race-localization accuracy.
-
-## Output, persistence, and deployment boundaries
-
-### Target output
-
-Target input/output uses a dedicated PTY for local launches. Stdout and stderr
-share that terminal; they are not independently attributable streams.
-`gdb_io` stream `target` refers to GDB/MI `@` records. Byte-oriented I/O
-provides text or base64 as appropriate, offsets, and truncation metadata;
-bounded retention does not imply a complete transcript. The default output
-mode is an ephemeral ring, with bounded spooling and artifact modes available.
-Large projected replies are bounded after projection and retain their
-original session's artifact ownership.
-
-### History and replay
-
-The default `journal.durability = "performance"` coalesces full-state
-checkpoints. A history-storage failure reports an evidence gap while live
-debugging continues. `durable` mode requires evidence writes to succeed and
-fails the session on an evidence-storage failure. Replay reconstructs recorded
-debugger state and snapshots without executing or restoring the inferior.
-An incomplete journal is identified as a prefix. See
-[operations](docs/operations.md) for replay, retention, and storage maintenance.
-
-### Configuration and deployment
-
-Configuration is supplied with `--config`; see
-[gdb-ai.example.toml](gdb-ai.example.toml). Without an explicit configuration,
-persistent data is placed under `$XDG_STATE_HOME/gdb-ai` or
-`$HOME/.local/state/gdb-ai` when those variables are available.
-
-The default profile is `lab_mutation`. Workspace roots constrain structured
-target file operations; PID attach requires an allowlist entry. An empty
-remote allowlist accepts parsed GDB endpoints, while a nonempty list restricts
-them. GDB and its children inherit OS resource limits unless explicit positive
-caps are configured. Bubblewrap isolation is optional and disabled by default.
-
-Target auto-load is disabled. Explicit GDB helpers execute with the GDB
-process's host permissions; probe trigger commands execute with the server
-account and environment. Matching kernel log helpers may be loaded by an
-explicit kernel inspection. These interfaces are suitable for a trusted
-debugging workspace; untrusted-code isolation requires an external container
-or VM boundary. See the [security model](docs/security.md) for the complete
-deployment contract.
+The deployment boundary is a trusted local workspace under the server's OS
+account. GDB starts with initialization files, target auto-load, debuginfod,
+and inferior function calls disabled. Workspace roots constrain structured
+target paths, and operators can configure PID and remote allowlists, resource
+limits, or bubblewrap hardening. These controls do not form a complete target
+sandbox. Place the server, GDB, helpers, and untrusted targets inside an
+external container or VM; the [security model](docs/security.md) defines the
+full contract.
 
 ## Reproducible verification
 
-The [CI workflow](.github/workflows/ci.yml) defines required checks and
-toolchain versions. The following commands reproduce its core Rust checks
-with the pinned toolchain:
+The [CI workflow](.github/workflows/ci.yml) is the executable definition of
+required checks and toolchain versions. These commands reproduce its core
+Rust checks with the pinned toolchain:
 
 ```sh
 rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
@@ -425,136 +231,28 @@ GDB_AI_REQUIRE_INTEGRATION=1 cargo +1.88.0 test --locked --workspace --all-targe
 cargo +1.88.0 clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-Install the prerequisites listed in the workflow for the integration targets.
-The required integration flag makes missing prerequisites fail checks that
-would otherwise be skipped. Kernel artifact selection and QEMU system setup
-are separate, explicitly configured lanes.
+Install the integration prerequisites listed in the workflow. The required
+flag converts missing prerequisites from skips into failures. Compatibility,
+AArch64, runtime, kernel, SDK, schema, and bounded fuzzing lanes are documented
+beside their implementations.
 
-For a focused state/evidence regression run:
-
-```sh
-GDB_AI_REQUIRE_INTEGRATION=1 cargo +1.88.0 test --locked -p gdb-ai-core --lib session::tests
-GDB_AI_REQUIRE_INTEGRATION=1 cargo +1.88.0 test --locked -p gdb-ai-core \
-  --test operation_cancel --test storage_chaos --test chaos --test output_evidence
-```
-
-These required workspace tests cover late replies after cancellation,
-interrupt/close during waits with failed history storage, and output loss
-followed by target exit and historical lookup. They check state and evidence
-invariants, not Agent diagnostic success.
-
-### Native runtime comparisons
-
-To reproduce the native runtime comparisons, install GDB, Clang, LLVM `lli`,
-Node.js, PHP CLI, and PHP CGI, then run:
-
-```sh
-cargo build --locked -p gdb-ai
-python3 tests/runtimes/verify.py target/debug/gdb-ai
-```
-
-The script accepts explicit executable paths for each runtime and GDB. CI
-also verifies schema hashes, both SDKs, and bounded libFuzzer campaigns for
-the MI parser, MI framer, and state reducer. Compatibility jobs build
-checksum-pinned GDB releases. The legacy GDB build recipe includes an XSAVE
-buffer adjustment for current x86 hosts; see the
-[build recipe](tests/compatibility/build-gdb.sh). Kernel artifacts are pinned
-separately. Exact results and release provenance belong to
-[CI runs](https://github.com/0wnerDied/GDB-AI/actions) and release artifacts.
-
-## Evaluation
-
-Compatibility checks establish specified behavior on the tested configurations.
-They do not establish that an Agent solves arbitrary debugging tasks faster
-or more accurately. A performance comparison should define the task and an
-independent criterion for a correct diagnosis before running trials.
-
-Compare GDB/AI with both direct GDB CLI and direct GDB/MI under the same
-model, tool access, targets, symbols, host resources, and time budgets. Allow
-each interface its normal batching and scripting capabilities. Report cold
-startup separately from reused-session work, and distinguish independent
-sessions from multiple clients sharing one session.
-
-| Measure | Reporting requirement |
-| --- | --- |
-| Diagnostic success | Ground-truth criterion, number of trials, failures, and timeouts |
-| Interaction cost | Agent tool calls and backend debugger commands counted separately |
-| Context cost | Model/tokenizer, discovery overhead, and actual tokens consumed; bytes are a separate measure |
-| Elapsed time | End-to-end wall time with startup, target execution, waits, and helper costs identified |
-| Concurrency | Worker/session count, throughput, latency distribution, and resource use |
-| Race localization | Repeated trials, scheduling conditions, and evidence linking the observation to the root cause |
-
-Record exact versions and trial conditions, vary execution order, and report
-variation or uncertainty alongside aggregate results. For fixed native stop
-cost checks on Linux x86-64, run:
-
-```sh
-cargo build --locked --release -p gdb-ai
-python3 benchmarks/python/compare_native.py target/release/gdb-ai
-python3 benchmarks/python/compare_native.py target/release/gdb-ai --case threads
-python3 benchmarks/python/compare_native.py target/release/gdb-ai --case full-stack
-python3 benchmarks/python/compare_native.py target/release/gdb-ai --case expressions
-```
-
-This dependency-free script rotates CLI, MI, and projected MCP execution
-order, using the same GDB and MI version in both MI-backed arms. It defaults
-to MI4; use `--mi mi3` or `--mi mi2` with older GDB releases.
-The signal case checks stack, argument, and variable values in a generated
-signal-only fixture. The thread case checks three stacks, both worker inputs,
-and lock-pointer arguments in the existing lock-order fixture at `pthread_join`;
-it requires matching pthread debug information and rejects captures missing
-either lock value. These are fixed evidence checks, not proof of deadlock or
-complete diagnostic equivalence. The full-stack case checks arguments and
-locals across three frames, including aggregate contents and MI/MCP types;
-CLI uses `bt full`. The expressions case checks 16 scalar, structure, and
-array results, allowing native CLI and MI to pipeline their commands.
-
-The script reports raw samples and minimum, median, and maximum costs for
-startup, cold capture, and same-session restart. All projected cases create,
-launch, and inspect in one request; the thread case includes breakpoint setup
-in that call. All bootstrap costs are included in cold capture, with no
-independently measured projected startup row. Timers end at the final response
-receipt, before final fact assertions. Each sample includes `response_base64`
-with the original response bytes, including native setup for cold captures.
-Closed projected journals must replay completely; replay runs outside timers.
-Debugger command counts, stdin batches, and wire bytes are separate measures;
-discovery and teardown are excluded. CLI framing bytes are included, but
-framing commands and command-line startup settings are not counted as debugger
-commands. This is not an Agent trial or a diagnosis-success benchmark.
-
-The [evaluation utility](benchmarks/python/evaluate.py) summarizes supplied JSONL
-metrics by variant. Its [example input](benchmarks/python/example.jsonl)
-illustrates the format; it is not an empirical result or a speedup claim.
-
-```sh
-python3 benchmarks/python/evaluate.py benchmarks/python/example.jsonl
-python3 -m unittest discover -s benchmarks/python
-```
-
-`resolved` and `root_cause_localized` accept booleans or numeric `0`/`1` and
-report `successes`, observed `total`, `missing`, and `rate` (0–1). For example,
-`1,1,0` yields two successes in three trials and a rate of `0.666…`.
-Costs and per-trial rate metrics report `count`, `missing`, `median`, and
-`p90`, using linear interpolation between observed samples (inclusive
-quantiles); a single sample supplies both statistics. Missing or null values
-are excluded and counted explicitly; an entirely missing metric has null
-statistics. Record known failures and timeouts as `0`, not missing outcomes,
-and report incomplete trials before interpreting a success rate. Numeric
-metrics must be finite and nonnegative; rate metrics must lie in 0–1.
+Compatibility establishes behavior on specified configurations. Claims about
+Agent diagnostic success, interaction cost, context use, or elapsed time need
+controlled task-level trials. [Evaluation methodology](docs/evaluation.md)
+defines comparable conditions, fixed native evidence checks, metric semantics,
+and reproducible commands without embedding benchmark procedure in this
+overview.
 
 ## Documentation and license
 
-- [Agent connections and interaction recipes](docs/mcp-clients.md)
-- [Canonical protocol](docs/protocol.md) and [static schemas](schemas)
-- [Architecture](docs/architecture.md) and [operations](docs/operations.md)
-- [Compatibility](docs/compatibility.md) and [Linux kernel debugging](docs/kernel.md)
-- [Security model](docs/security.md) and [provider SDK](docs/provider-sdk.md)
+Start with the [connection guide](docs/mcp-clients.md) for client setup. The
+[protocol](docs/protocol.md) and [schemas](schemas) define wire contracts;
+[architecture](docs/architecture.md) and [operations](docs/operations.md)
+describe state and evidence; [compatibility](docs/compatibility.md),
+[kernel debugging](docs/kernel.md), and [security](docs/security.md) define
+environmental boundaries. Contributor work belongs in [PLAN.md](PLAN.md).
 
 GDB/AI is independently versioned and requires no binutils-gdb source
-modification. Contributor planning is maintained in [PLAN.md](PLAN.md).
-License: [GPL-3.0-or-later](LICENSE).
+modification. It is licensed under [GPL-3.0-or-later](LICENSE).
 
 [gdb-mi]: https://sourceware.org/gdb/current/onlinedocs/gdb.html/GDB_002fMI.html
-[gdb-execution]: https://sourceware.org/gdb/current/onlinedocs/gdb.html/GDB_002fMI-Program-Execution.html
-[gdb-all-stop]: https://sourceware.org/gdb/current/onlinedocs/gdb.html/All_002dStop-Mode.html
-[gdb-jit]: https://sourceware.org/gdb/current/onlinedocs/gdb.html/JIT-Interface.html

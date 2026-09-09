@@ -1,109 +1,120 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="930"
-     viewBox="0 0 1120 930" role="img" aria-labelledby="title description">
-  <title id="title">GDB/AI: session ownership and data paths</title>
-  <desc id="description">Agent clients reach a shared MCP or canonical JSON-RPC
-    interface and Gateway. Each session actor owns live state and a dedicated
-    GDB process. The local inferior exchanges bytes through a separate PTY
-    capture path. History and artifacts are recorded separately; performance
-    mode reports history gaps, while durable mode requires evidence writes.
-    GDB also supports attached processes, core files, and remote RSP targets.
-    Solid arrows represent live interaction; dashed arrows represent recording.</desc>
-  <!-- 2026-09-05: The old figure made leases and durable evidence universal.
-       Show caller control, actor-owned live state, and mode-dependent history. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="960"
+     viewBox="0 0 1120 960" role="img" aria-labelledby="title description">
+  <title id="title">GDB/AI session architecture</title>
+  <desc id="description">Agent clients enter the GDB/AI server through MCP or
+    canonical JSON-RPC. Requests pass through policy and typed operations to a
+    session actor. Each actor owns one GDB process and live execution state.
+    Local target bytes use a separate PTY path, while journals and artifacts
+    record evidence according to the configured durability mode.</desc>
   <defs>
-    <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="4"
-            orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,4 L0,8 Z" fill="#315d8a"/>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
+            orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#274c77"/>
     </marker>
-    <marker id="io-arrow" markerWidth="8" markerHeight="8" refX="8" refY="4"
-            orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,4 L0,8 Z" fill="#236955"/>
+    <marker id="io-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
+            orient="auto-start-reverse" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#9a5b3f"/>
     </marker>
-    <marker id="record-arrow" markerWidth="8" markerHeight="8" refX="8" refY="4"
+    <marker id="record-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
             orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,4 L0,8 Z" fill="#687281"/>
+      <path d="M0,0 L8,4 L0,8 Z" fill="#697582"/>
     </marker>
     <style>
-      text { font-family: "DejaVu Sans", Arial, sans-serif; fill: #172231; }
-      .title { font-size: 24px; font-weight: 700; }
-      .body { font-size: 19px; }
-      .note { font-size: 17px; fill: #465366; }
-      .box { fill: #fff; stroke: #728195; stroke-width: 1.6; }
-      .live { fill: #eff5fb; stroke: #537ca5; stroke-width: 1.6; }
-      .io-box { fill: #edf6f2; stroke: #397761; stroke-width: 1.6; }
-      .flow { fill: none; stroke: #315d8a; stroke-width: 2;
+      text { fill: #182433; font-family: Inter, "DejaVu Sans", Arial, sans-serif; }
+      .kicker { fill: #596675; font-size: 14px; font-weight: 700; letter-spacing: 2.2px; }
+      .heading { font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+                 font-size: 31px; font-weight: 600; }
+      .section { font-size: 15px; font-weight: 700; letter-spacing: 1.2px; }
+      .title { font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+               font-size: 22px; font-weight: 600; }
+      .body { font-size: 16px; }
+      .note { fill: #596675; font-size: 14px; }
+      .canvas { fill: #fffefa; stroke: #c7c2b8; stroke-width: 1.2; }
+      .boundary { fill: #f6f7f6; stroke: #9aa3ac; stroke-width: 1.3; }
+      .box { fill: #fffefa; stroke: #8b96a1; stroke-width: 1.3; }
+      .interface { fill: #eef3f7; stroke: #274c77; stroke-width: 1.5; }
+      .io-box { fill: #f8f0eb; stroke: #9a5b3f; stroke-width: 1.4; }
+      .flow { fill: none; stroke: #274c77; stroke-width: 1.8;
               marker-end: url(#arrow); }
-      .io { fill: none; stroke: #236955; stroke-width: 2;
-            marker-end: url(#io-arrow); }
-      .record { fill: none; stroke: #687281; stroke-width: 2;
-                stroke-dasharray: 6 5; marker-end: url(#record-arrow); }
+      .both { fill: none; stroke: #274c77; stroke-width: 1.8;
+              marker-start: url(#arrow); marker-end: url(#arrow); }
+      .io { fill: none; stroke: #9a5b3f; stroke-width: 1.8;
+            marker-start: url(#io-arrow); marker-end: url(#io-arrow); }
+      .record { fill: none; stroke: #697582; stroke-width: 1.6;
+                stroke-dasharray: 7 5; marker-end: url(#record-arrow); }
+      .history { fill: none; stroke: #697582; stroke-width: 1.6;
+                 marker-end: url(#record-arrow); }
     </style>
   </defs>
-  <rect width="1120" height="930" fill="#fff"/>
 
-  <rect class="box" x="36" y="36" width="1048" height="90" rx="6"/>
-  <text class="title" x="560" y="72" text-anchor="middle">Agent clients</text>
-  <text class="body" x="560" y="105" text-anchor="middle">MCP clients · Python / TypeScript SDKs</text>
+  <rect class="canvas" x="1" y="1" width="1118" height="958" rx="8"/>
+  <text class="kicker" x="56" y="45">SYSTEM MODEL</text>
+  <text class="heading" x="56" y="84">One session, one state owner</text>
+  <text class="note" x="1064" y="82" text-anchor="end">logical architecture</text>
+  <path d="M56 108 H1064" stroke="#c7c2b8" stroke-width="1"/>
 
-  <rect x="36" y="166" width="1048" height="468" rx="8"
-        fill="#f8fafc" stroke="#728195" stroke-width="1.6"/>
-  <text class="title" x="64" y="195">GDB/AI server</text>
-  <rect class="live" x="64" y="218" width="992" height="66" rx="5"/>
-  <text class="title" x="560" y="245" text-anchor="middle">MCP tools / canonical JSON-RPC</text>
-  <text class="body" x="560" y="271" text-anchor="middle">stdio · Unix socket · loopback HTTP</text>
-  <path class="flow" d="M560 126 V218"/>
-  <path class="flow" d="M560 218 V126"/>
+  <rect class="box" x="60" y="140" width="1000" height="80" rx="5"/>
+  <text class="title" x="90" y="176">Agent clients</text>
+  <text class="body" x="90" y="202">MCP harnesses · Python SDK · TypeScript SDK</text>
+  <text class="note" x="1030" y="188" text-anchor="end">independent callers and sessions</text>
 
-  <rect class="live" x="64" y="320" width="570" height="82" rx="5"/>
-  <text class="title" x="349" y="353" text-anchor="middle">Gateway and operations</text>
-  <text class="body" x="349" y="382" text-anchor="middle">Caller control · context checks · coordination</text>
-  <path class="flow" d="M349 284 V320"/>
-  <path class="flow" d="M349 320 V284"/>
+  <rect class="boundary" x="60" y="270" width="1000" height="410" rx="7"/>
+  <text class="section" x="90" y="300">GDB/AI SERVER</text>
 
-  <rect class="live" x="64" y="442" width="570" height="138" rx="5"/>
-  <text class="title" x="349" y="476" text-anchor="middle">Session actor</text>
-  <text class="body" x="349" y="508" text-anchor="middle">MI command queue · interrupt / close lane</text>
-  <text class="body" x="349" y="536" text-anchor="middle">Live state · stop IDs · execution epochs</text>
-  <text class="note" x="349" y="561" text-anchor="middle">One actor and one GDB process per session</text>
-  <path class="flow" d="M349 402 V442"/>
-  <path class="flow" d="M349 442 V402"/>
+  <rect class="interface" x="90" y="322" width="940" height="68" rx="4"/>
+  <text class="title" x="560" y="350" text-anchor="middle">Agent interface</text>
+  <text class="body" x="560" y="375" text-anchor="middle">MCP tools · canonical gdb.ai/v1 · stdio · Unix socket · loopback HTTP</text>
+  <path class="both" d="M560 220 V322"/>
 
-  <rect class="box" x="746" y="320" width="310" height="204" rx="5"/>
-  <text class="title" x="901" y="353" text-anchor="middle">History / artifacts</text>
-  <text class="body" x="901" y="386" text-anchor="middle">JSONL · SQLite · artifacts</text>
-  <text class="body" x="901" y="423" text-anchor="middle">Performance (default):</text>
-  <text class="body" x="901" y="449" text-anchor="middle">history gaps are reported</text>
-  <text class="body" x="901" y="490" text-anchor="middle">Durable: writes required</text>
-  <path class="record" d="M634 477 H746"/>
-  <text class="note" x="690" y="463" text-anchor="middle">record</text>
+  <rect class="box" x="90" y="432" width="270" height="104" rx="4"/>
+  <text class="title" x="225" y="464" text-anchor="middle">Gateway</text>
+  <text class="body" x="225" y="491" text-anchor="middle">identity · policy · controller</text>
+  <text class="note" x="225" y="516" text-anchor="middle">admission and audit boundary</text>
 
-  <rect class="io-box" x="746" y="558" width="310" height="64" rx="5"/>
-  <text class="title" x="901" y="585" text-anchor="middle">PTY capture</text>
-  <text class="note" x="901" y="610" text-anchor="middle">Bounded bytes / optional spool</text>
-  <path class="io" d="M634 545 H690 V590 H746"/>
-  <path class="io" d="M746 590 H690 V545 H634"/>
+  <rect class="box" x="425" y="432" width="270" height="104" rx="4"/>
+  <text class="title" x="560" y="464" text-anchor="middle">Typed operations</text>
+  <text class="body" x="560" y="491" text-anchor="middle">control · inspect · evidence</text>
+  <text class="note" x="560" y="516" text-anchor="middle">bounded plans and context checks</text>
 
-  <rect class="live" x="64" y="704" width="570" height="70" rx="5"/>
-  <text class="title" x="349" y="733" text-anchor="middle">GNU GDB</text>
-  <text class="body" x="349" y="760" text-anchor="middle">Target control · symbols · unwinding · JIT</text>
-  <path class="flow" d="M349 580 V704"/>
-  <path class="flow" d="M349 704 V580"/>
-  <text class="body" x="374" y="675">GDB/MI 3 or 4</text>
+  <rect class="interface" x="760" y="432" width="270" height="104" rx="4"/>
+  <text class="title" x="895" y="464" text-anchor="middle">Session actor</text>
+  <text class="body" x="895" y="491" text-anchor="middle">normal queue · control lane</text>
+  <text class="note" x="895" y="516" text-anchor="middle">interrupt / close · stop ID / epoch</text>
 
-  <rect class="io-box" x="746" y="704" width="310" height="70" rx="5"/>
-  <text class="title" x="901" y="733" text-anchor="middle">Launched inferior</text>
-  <text class="note" x="901" y="760" text-anchor="middle">stdin / stdout / stderr</text>
-  <path class="io" d="M901 622 V704"/>
-  <path class="io" d="M901 704 V622"/>
-  <text class="body" x="925" y="675">PTY</text>
-  <path class="flow" d="M634 739 H746"/>
-  <path class="flow" d="M746 739 H634"/>
-  <text class="note" x="690" y="724" text-anchor="middle">control</text>
+  <path class="flow" d="M560 390 V410 H225 V432"/>
+  <path class="flow" d="M360 484 H425"/>
+  <path class="flow" d="M695 484 H760"/>
 
-  <rect class="box" x="64" y="830" width="992" height="58" rx="5"/>
-  <text class="body" x="560" y="865" text-anchor="middle">Other targets: PID attach · core files · gdbserver / QEMU RSP</text>
-  <path class="flow" d="M349 774 V830"/>
-  <path class="flow" d="M349 830 V774"/>
-  <text class="note" x="374" y="812">Target access</text>
-  <text class="note" x="560" y="918" text-anchor="middle">Solid: live interaction · dashed: recording · PTY path: local launches</text>
+  <rect class="box" x="90" y="575" width="270" height="70" rx="4"/>
+  <text class="title" x="225" y="605" text-anchor="middle">History and artifacts</text>
+  <text class="note" x="225" y="630" text-anchor="middle">optional · performance / durable</text>
+
+  <rect class="io-box" x="425" y="575" width="270" height="70" rx="4"/>
+  <text class="title" x="560" y="605" text-anchor="middle">PTY capture</text>
+  <text class="note" x="560" y="630" text-anchor="middle">local launch · bounded bytes / spool</text>
+
+  <path class="record" d="M950 536 V660 H225 V645"/>
+  <path class="record" d="M425 610 H360"/>
+  <path class="history" d="M225 575 V554 H470 V536"/>
+  <text class="note" x="347" y="569" text-anchor="middle">historical read</text>
+
+  <rect class="box" x="760" y="728" width="270" height="70" rx="4"/>
+  <text class="title" x="895" y="758" text-anchor="middle">GNU GDB</text>
+  <text class="note" x="895" y="783" text-anchor="middle">symbols · execution · unwinding · JIT</text>
+  <path class="both" d="M895 536 V728"/>
+  <text class="note" x="912" y="705">GDB/MI 3 or 4</text>
+
+  <rect class="box" x="90" y="846" width="270" height="66" rx="4"/>
+  <text class="title" x="225" y="875" text-anchor="middle">Other targets</text>
+  <text class="note" x="225" y="898" text-anchor="middle">PID attach · core · gdbserver / QEMU</text>
+
+  <rect class="box" x="760" y="846" width="270" height="66" rx="4"/>
+  <text class="title" x="895" y="875" text-anchor="middle">Launched inferior</text>
+  <text class="note" x="895" y="898" text-anchor="middle">local target process</text>
+
+  <path class="both" d="M895 798 V846"/>
+  <path class="both" d="M760 763 H390 V879 H360"/>
+  <path class="io" d="M695 610 H725 V879 H760"/>
+
+  <text class="note" x="560" y="941" text-anchor="middle">blue: live control or reply · rust: local target bytes · gray: solid read, dashed record</text>
 </svg>

@@ -1,100 +1,114 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="970"
-     viewBox="0 0 1120 970" role="img" aria-labelledby="title description">
-  <title id="title">GDB/AI: one continue-and-inspect request</title>
-  <desc id="description">Illustrative successful MCP continue operation with
-    a breakpoint hit. GDB/AI issues an MI command. GDB resumes the target and
-    sends a command result and asynchronous running/stopped records. Local
-    inferior output reaches independent PTY capture. Requested stack and
-    register observations are checked against the stop context and returned
-    with bounded output in one Agent response. This is not a timing diagram;
-    it does not impose an ordering between independent MI and PTY streams.</desc>
-  <!-- 2026-09-05: The old sequence used a nonexistent execution.continue
-       method and required leases and persistence on the MCP response path.
-       Show gdb_run, stop-bound inspection, and independent PTY traffic. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="1080"
+     viewBox="0 0 1120 1080" role="img" aria-labelledby="title description">
+  <title id="title">GDB/AI fused launch and inspection turn</title>
+  <desc id="description">An Agent sends one launch request with breakpoints
+    and requested views. GDB/AI authorizes the caller, creates a session when
+    needed, starts GDB, launches the target, captures independent PTY output,
+    binds the stop context, collects the requested observations, and returns a
+    bounded response with the session and observation identities.</desc>
   <defs>
-    <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="4"
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
             orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,4 L0,8 Z" fill="#315d8a"/>
+      <path d="M0,0 L8,4 L0,8 Z" fill="#274c77"/>
     </marker>
-    <marker id="event-arrow" markerWidth="8" markerHeight="8" refX="8" refY="4"
+    <marker id="event-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
             orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,4 L0,8 Z" fill="#465366"/>
+      <path d="M0,0 L8,4 L0,8 Z" fill="#697582"/>
     </marker>
-    <marker id="io-arrow" markerWidth="8" markerHeight="8" refX="8" refY="4"
+    <marker id="io-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
             orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,4 L0,8 Z" fill="#236955"/>
+      <path d="M0,0 L8,4 L0,8 Z" fill="#9a5b3f"/>
     </marker>
     <style>
-      text { font-family: "DejaVu Sans", Arial, sans-serif; fill: #172231; }
-      .title { font-size: 23px; font-weight: 700; }
-      .label { font-size: 18px; }
-      .note { font-size: 17px; fill: #465366; }
-      .mono { font-family: "DejaVu Sans Mono", monospace; font-size: 17px; }
-      .box { fill: #eff5fb; stroke: #728195; stroke-width: 1.6; }
-      .life { stroke: #aab2be; stroke-width: 1.3; stroke-dasharray: 5 5; }
-      .flow { fill: none; stroke: #315d8a; stroke-width: 2;
+      text { fill: #182433; font-family: Inter, "DejaVu Sans", Arial, sans-serif; }
+      .kicker { fill: #596675; font-size: 14px; font-weight: 700; letter-spacing: 2.2px; }
+      .heading { font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+                 font-size: 31px; font-weight: 600; }
+      .title { font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+               font-size: 21px; font-weight: 600; }
+      .label { font-size: 16px; }
+      .note { fill: #596675; font-size: 14px; }
+      .mono { fill: #274c77; font-family: "DejaVu Sans Mono", monospace;
+              font-size: 15px; }
+      .canvas { fill: #fffefa; stroke: #c7c2b8; stroke-width: 1.2; }
+      .participant { fill: #f6f7f6; stroke: #8b96a1; stroke-width: 1.3; }
+      .interface { fill: #eef3f7; stroke: #274c77; stroke-width: 1.5; }
+      .step { fill: #fffefa; stroke: #9aa3ac; stroke-width: 1.2; }
+      .life { stroke: #aab2ba; stroke-width: 1.2; stroke-dasharray: 5 6; }
+      .activation { fill: #e4ebf1; stroke: #6f8599; stroke-width: 1.1; }
+      .flow { fill: none; stroke: #274c77; stroke-width: 1.8;
               marker-end: url(#arrow); }
-      .event { fill: none; stroke: #465366; stroke-width: 2;
+      .event { fill: none; stroke: #697582; stroke-width: 1.7;
                stroke-dasharray: 7 5; marker-end: url(#event-arrow); }
-      .io { fill: none; stroke: #236955; stroke-width: 2;
+      .io { fill: none; stroke: #9a5b3f; stroke-width: 1.8;
             marker-end: url(#io-arrow); }
     </style>
   </defs>
-  <rect width="1120" height="970" fill="#fff"/>
 
-  <rect class="box" x="40" y="40" width="220" height="66" rx="5"/>
-  <text class="title" x="150" y="81" text-anchor="middle">Agent</text>
-  <rect class="box" x="310" y="40" width="220" height="66" rx="5"/>
-  <text class="title" x="420" y="81" text-anchor="middle">GDB/AI</text>
-  <rect class="box" x="590" y="40" width="220" height="66" rx="5"/>
-  <text class="title" x="700" y="81" text-anchor="middle">GNU GDB</text>
-  <rect class="box" x="870" y="40" width="220" height="66" rx="5"/>
-  <text class="title" x="980" y="81" text-anchor="middle">Local inferior</text>
+  <rect class="canvas" x="1" y="1" width="1118" height="1078" rx="8"/>
+  <text class="kicker" x="56" y="45">SEMANTIC OPERATION</text>
+  <text class="heading" x="56" y="84">Launch and inspect in one Agent turn</text>
+  <text class="note" x="1064" y="82" text-anchor="end">illustrative success path</text>
+  <path d="M56 108 H1064" stroke="#c7c2b8" stroke-width="1"/>
 
-  <path class="life" d="M150 106 V880 M420 106 V880 M700 106 V880 M980 106 V880"/>
-  <rect x="413" y="169" width="14" height="686" fill="#e9eff6" stroke="#728195"/>
+  <rect class="participant" x="40" y="128" width="200" height="60" rx="4"/>
+  <text class="title" x="140" y="165" text-anchor="middle">Agent</text>
+  <rect class="interface" x="310" y="128" width="220" height="60" rx="4"/>
+  <text class="title" x="420" y="165" text-anchor="middle">GDB/AI</text>
+  <rect class="participant" x="590" y="128" width="220" height="60" rx="4"/>
+  <text class="title" x="700" y="165" text-anchor="middle">GNU GDB</text>
+  <rect class="participant" x="870" y="128" width="220" height="60" rx="4"/>
+  <text class="title" x="980" y="165" text-anchor="middle">Local inferior</text>
 
-  <path class="flow" d="M150 170 H413"/>
-  <text class="label" x="282" y="147" text-anchor="middle">gdb_run: continue</text>
-  <text class="note" x="282" y="194" text-anchor="middle">session + requested views</text>
+  <path class="life" d="M140 188 V1000 M420 188 V1000 M700 188 V1000 M980 188 V1000"/>
+  <rect class="activation" x="413" y="225" width="14" height="758"/>
 
-  <rect class="box" x="310" y="215" width="360" height="42" rx="4"/>
-  <text class="note" x="490" y="242" text-anchor="middle">Validate caller and stop context</text>
-  <path class="flow" d="M427 295 H700"/>
-  <text class="mono" x="563" y="283" text-anchor="middle">42-exec-continue</text>
+  <path class="flow" d="M140 230 H413"/>
+  <text class="label" x="276" y="216" text-anchor="middle">gdb_session · launch</text>
+  <text class="note" x="276" y="254" text-anchor="middle">program · breakpoints · inspect</text>
 
-  <path class="flow" d="M700 338 H980"/>
-  <text class="label" x="840" y="324" text-anchor="middle">Resume execution</text>
+  <rect class="step" x="296" y="278" width="248" height="54" rx="4"/>
+  <text class="label" x="420" y="301" text-anchor="middle">Authorize caller</text>
+  <text class="note" x="420" y="321" text-anchor="middle">create session when ID is absent</text>
 
-  <path class="flow" d="M700 388 H427"/>
-  <text class="mono" x="563" y="374" text-anchor="middle">42^running</text>
-  <text class="note" x="760" y="395">Command result</text>
-  <path class="event" d="M700 443 H427"/>
-  <text class="mono" x="563" y="429" text-anchor="middle">*running</text>
-  <text class="note" x="760" y="450">State event</text>
+  <path class="flow" d="M427 365 H700"/>
+  <text class="label" x="563" y="350" text-anchor="middle">Start MI; load executable</text>
 
-  <rect class="box" x="310" y="468" width="470" height="44" rx="4"/>
-  <text class="note" x="545" y="496" text-anchor="middle">Advance epoch; invalidate old stop handles</text>
+  <path class="flow" d="M427 425 H700"/>
+  <text class="label" x="563" y="410" text-anchor="middle">Install breakpoints; run</text>
 
-  <path class="io" d="M980 558 H427"/>
-  <text class="label" x="704" y="540" text-anchor="middle">PTY output to bounded capture</text>
+  <path class="flow" d="M700 485 H980"/>
+  <text class="label" x="840" y="470" text-anchor="middle">Resume target</text>
 
-  <path class="event" d="M700 617 H427"/>
-  <text class="mono" x="563" y="600" text-anchor="middle">*stopped</text>
-  <text class="note" x="760" y="624">Breakpoint hit</text>
+  <path class="event" d="M700 545 H427"/>
+  <text class="mono" x="563" y="530" text-anchor="middle">^running · *running</text>
+  <text class="note" x="718" y="566">MI result and state event</text>
 
-  <path class="flow" d="M427 678 H700"/>
-  <text class="label" x="563" y="662" text-anchor="middle">Stack / register queries</text>
-  <path class="flow" d="M700 732 H427"/>
-  <text class="label" x="563" y="716" text-anchor="middle">MI replies</text>
+  <path class="io" d="M980 610 H427"/>
+  <text class="label" x="704" y="594" text-anchor="middle">PTY bytes to bounded capture</text>
 
-  <rect class="box" x="310" y="758" width="470" height="44" rx="4"/>
-  <text class="note" x="545" y="786" text-anchor="middle">Verify stop ID and execution epoch</text>
+  <path class="event" d="M700 675 H427"/>
+  <text class="mono" x="563" y="660" text-anchor="middle">*stopped</text>
+  <text class="note" x="718" y="696">breakpoint, signal, or other stop</text>
 
-  <path class="flow" d="M413 855 H150"/>
-  <text class="label" x="282" y="835" text-anchor="middle">Stop + views + output</text>
-  <text class="note" x="282" y="879" text-anchor="middle">One bounded MCP response</text>
+  <rect class="step" x="296" y="714" width="248" height="54" rx="4"/>
+  <text class="label" x="420" y="737" text-anchor="middle">Bind observation context</text>
+  <text class="note" x="420" y="757" text-anchor="middle">stop ID · execution epoch</text>
 
-  <text class="note" x="560" y="920" text-anchor="middle">Illustrative order; MI and PTY are independent streams. Time is not to scale.</text>
-  <text class="note" x="560" y="948" text-anchor="middle">Solid blue: command / reply · dashed: state event · green: target bytes</text>
+  <path class="flow" d="M427 805 H700"/>
+  <text class="label" x="563" y="790" text-anchor="middle">Requested inspection plan</text>
+
+  <path class="flow" d="M700 860 H427"/>
+  <text class="label" x="563" y="845" text-anchor="middle">Typed MI replies</text>
+
+  <rect class="step" x="296" y="887" width="248" height="54" rx="4"/>
+  <text class="label" x="420" y="910" text-anchor="middle">Verify and publish</text>
+  <text class="note" x="420" y="930" text-anchor="middle">bounded immutable observation</text>
+
+  <path class="flow" d="M413 975 H140"/>
+  <text class="label" x="276" y="960" text-anchor="middle">Session · stop · evidence · output</text>
+  <text class="note" x="276" y="998" text-anchor="middle">observation ID · context · completeness</text>
+
+  <text class="note" x="560" y="1025" text-anchor="middle">A normal exit returns exit state without a stopped observation.</text>
+  <text class="note" x="560" y="1050" text-anchor="middle">blue: command or reply · dashed: MI state event · rust: independent target bytes · time not to scale</text>
 </svg>

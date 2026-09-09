@@ -142,10 +142,10 @@ Clients that accept the common `mcpServers` JSON shape can use:
 }
 ```
 
-<!-- 2026-09-08: The README heading changed; keep the setup link on its
-     transport instructions rather than the obsolete anchor. -->
+<!-- 2026-09-09: Keep this link on the stable build section so README
+     subsection changes cannot strand the HTTP setup instructions. -->
 If a client accepts only Streamable HTTP, start the loopback server described
-in the [README](../README.md#mcp-transports) and connect it to
+in the [README](../README.md#build-and-connect) and connect it to
 `http://127.0.0.1:8080/mcp`. Do not expose plaintext HTTP outside the host.
 
 ## Verify tool discovery
