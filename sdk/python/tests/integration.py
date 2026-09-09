@@ -2,9 +2,13 @@
 """Real HTTP/GDB SDK contract check, launched by sdk/verify.py."""
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import statistics
 import sys
+import time
+from urllib.request import urlopen
 
 from gdb_ai import ApiError, Client, RpcError, Session
 
@@ -40,6 +44,46 @@ def verify_close(client, response, expected):
     assert manifest["size"] == len(expected) and manifest["sha256"] == digest, manifest
     page = client.read_resource(f"{uri}?offset=0&length={len(expected)}")[0]
     assert base64.b64decode(page["blob"], validate=True) == expected, page
+
+
+def verify_history_readers(pool, readers, lookup, expected, waiting):
+    def command_count():
+        endpoint = readers[0].endpoint.removesuffix("/mcp")
+        with urlopen(f"{endpoint}/metrics", timeout=5) as response:
+            return next(int(line.split()[1]) for line in response.read().decode().splitlines()
+                        if line.startswith("gdbai_commands_total "))
+
+    def read(peer):
+        durations = []
+        for _ in range(16):
+            started = time.perf_counter()
+            response = peer.call_tool("gdb_inspect", lookup)
+            durations.append(time.perf_counter() - started)
+            assert response["historical"], response
+            assert response["complete"] == expected["complete"], response
+            assert response["context"] == expected["context"], response
+            assert response["result"] == expected["result"], response
+        return durations
+
+    for concurrency in (1, 4, 8):
+        assert not waiting.done(), "control must remain pending during historical reads"
+        before = command_count()
+        started = time.perf_counter()
+        futures = [pool.submit(read, peer) for peer in readers[:concurrency]]
+        durations = [duration for future in futures for duration in future.result(timeout=10)]
+        elapsed = time.perf_counter() - started
+        extra_commands = command_count() - before
+        assert extra_commands == 0, extra_commands
+        assert not waiting.done(), "reads must complete without releasing the pending controller"
+        print(json.dumps({"mixed_history": {
+            "protocol": readers[0].protocol_version, "readers": concurrency,
+            "reads": len(durations), "seconds": elapsed,
+            "reads_per_second": len(durations) / elapsed,
+            "latency_seconds": {"min": min(durations), "median": statistics.median(durations),
+                                "max": max(durations)},
+            "latency_samples_seconds": durations,
+            "extra_mi_commands": extra_commands,
+        }}), flush=True)
 
 
 def canonical(client, program):
@@ -92,7 +136,7 @@ def canonical(client, program):
 def projected(client, program):
     launched = client.call_tool("gdb_session", {
         "action": "launch", "program": program, "stop": "none",
-        "breakpoints": [{"function": "main"}],
+        "breakpoints": [{"function": "main"}, {"function": "report_input"}],
         "inspect": [{"view": "stack", "limit": 4}],
         "environment": {"GDB_AI_TEST_ENV": "sdk-世界"}})
     assert "api_version" not in launched and "revision" not in launched, launched
@@ -103,6 +147,9 @@ def projected(client, program):
     expected = "environment: sdk-世界\nmarker reached\ninput received: \0\n".encode()
     observer = Client(client.endpoint, protocol_version=client.protocol_version,
                       client_name="python-observer")
+    readers = [Client(client.endpoint, protocol_version=client.protocol_version,
+                      client_name=f"python-history-{index}", timeout=5) for index in range(8)]
+    pool = ThreadPoolExecutor(max_workers=9)
     controller = client
 
     def call(name, **arguments):
@@ -110,8 +157,14 @@ def projected(client, program):
 
     try:
         observer.connect()
+        identities = set()
+        for reader in readers:
+            reader.connect()
+            status = reader.call_tool("gdb_session", {"action": "status", "session_id": session_id})
+            identities.add(status["result"]["caller_identity"])
+        assert len(identities) == len(readers) and created["controller"] not in identities, identities
         assert launched["state"]["stop_id"], launched
-        assert len(launched["result"]["created_breakpoints"]) == 1, launched
+        assert len(launched["result"]["created_breakpoints"]) == 2, launched
         assert launched["result"]["observations"]["stack"]["frames"][0]["function"] == "main", launched
         assert "backend" not in launched["state"], launched
         stack = call("gdb_inspect", view="stack", limit=4)
@@ -129,11 +182,14 @@ def projected(client, program):
             assert "revision" not in error.response, error.response
         else:
             raise AssertionError("stale projected stop was accepted")
-        capture_response = call("gdb_batch", requests=[
+        read_plan = [
             {"view": "registers", "roles": ["pc", "sp"]},
             {"view": "evaluate", "expression": "$pc"},
             {"name": "missing", "view": "evaluate", "expression": "gdb_ai_missing_sdk_symbol"},
-        ])
+            {"view": "stack", "limit": 4, "include_locals": True},
+            {"name": "values", "view": "evaluate", "expressions": ["global_value", "global_pair"]},
+        ]
+        capture_response = call("gdb_batch", requests=read_plan)
         assert not capture_response["complete"], capture_response
         captured = capture_response["result"]
         assert captured["failures"]["missing"]["code"] == "GDB_ERROR", captured
@@ -141,14 +197,53 @@ def projected(client, program):
         assert captured["results"]["evaluate"]["status"] == "available", captured
         assert "command" not in captured["results"]["evaluate"], captured
         assert "record" not in captured["failures"]["missing"].get("details", {}), captured
+        assert [item["value"] for item in captured["results"]["values"]["results"]] == [
+            "7", "{left = 1, right = 2}"]
+        assert captured["results"]["stack"]["frames"][0]["function"] == "main", captured
+        assert isinstance(captured["results"]["stack"]["frames"][0]["locals"], list), captured
         observation_id = capture_response["context"]["observation_id"]
         lookup = {"session_id": session_id, "view": "observation", "snapshot_id": observation_id}
         shared_response = observer.call_tool("gdb_inspect", lookup)
         assert shared_response["historical"], shared_response
         assert shared_response["context"]["observation_id"] == observation_id, shared_response
         shared = shared_response["result"]
-        assert shared["results"]["evaluate"] == captured["results"]["evaluate"], shared
+        assert shared["results"] == captured["results"], shared
         assert shared["failures"] == captured["failures"], shared
+        waiting = pool.submit(call, "gdb_run", action="continue", inspect=read_plan,
+                              wait={"until": "settled", "timeout_ms": 10000})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            running = observer.call_tool("gdb_session", {"action": "status", "session_id": session_id})
+            if running["result"].get("status") == "RUNNING":
+                break
+            assert not waiting.done(), waiting.result()
+            time.sleep(0.01)
+        else:
+            raise AssertionError("controller never reached a running target")
+        verify_history_readers(pool, readers, lookup, shared_response, waiting)
+        # The independent status read proves continue was admitted before
+        # submitting another request through the controller's HTTP client.
+        released = time.perf_counter()
+        call("gdb_io", action="write", data_base64="AAo=")
+        stopped = waiting.result(timeout=10)
+        after_input_seconds = time.perf_counter() - released
+        assert stopped["context"]["stop_id"] != capture_response["context"]["stop_id"], stopped
+        assert (stopped["context"]["execution_epoch"]
+                > capture_response["context"]["execution_epoch"]), stopped
+        fresh = stopped["result"]["observations"]
+        assert fresh["stack"]["frames"][0]["function"] == "report_input", stopped
+        assert [item["value"] for item in fresh["values"]["results"]] == [
+            "42", "{left = 1, right = 2}"]
+        assert observer.call_tool("gdb_inspect", lookup)["result"] == shared
+        new_lookup = {**lookup, "snapshot_id": stopped["context"]["observation_id"]}
+        retained = observer.call_tool("gdb_inspect", new_lookup)
+        assert retained["historical"] and retained["context"] == stopped["context"], retained
+        assert retained["result"]["results"] == fresh, retained
+        print(json.dumps({"mixed_control": {
+            "protocol": client.protocol_version, "after_input_seconds": after_input_seconds,
+            "before": capture_response["context"], "after": stopped["context"],
+            "historical_results_unchanged": True,
+        }}), flush=True)
         peer_status = observer.call_tool("gdb_session", {"action": "status", "session_id": session_id})
         peer_identity = peer_status["result"]["caller_identity"]
         assert peer_identity != created["controller"], peer_status
@@ -161,7 +256,7 @@ def projected(client, program):
             assert error.code == "WRITE_LEASE_REQUIRED", error.response
         else:
             raise AssertionError("former controller retained mutation authority")
-        exited = call("gdb_run", action="continue", input={"data_base64": "AAo="})
+        exited = call("gdb_run", action="continue")
         assert exited["result"]["settled_by"] == "exited", exited
         assert exited["state"]["exit_code"] == 0, exited
         output = call("gdb_io", action="read", after_offset=0, max_bytes=4096)
@@ -172,9 +267,17 @@ def projected(client, program):
         try:
             closed = call("gdb_session", action="close")
         finally:
+            # Close the target first so a failed assertion cannot leave pool
+            # shutdown waiting behind the controller's input-blocked request.
+            pool.shutdown(wait=True, cancel_futures=True)
+            for reader in readers:
+                reader.disconnect()
             observer.disconnect()
     verify_close(client, closed, expected)
     assert client.call_tool("gdb_inspect", lookup)["result"] == shared
+    closed_retained = client.call_tool("gdb_inspect", new_lookup)
+    assert closed_retained["context"] == retained["context"], closed_retained
+    assert closed_retained["result"] == retained["result"], closed_retained
 
 
 def main():

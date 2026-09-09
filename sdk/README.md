@@ -279,3 +279,16 @@ UTF-8 and binary PTY output, resource ranges, close artifacts, and complete
 journal replay. It shuts down its servers and removes the temporary
 workspace. The check is a required CI step, separate from the small mocked
 client tests; it does not claim the complete target or deployment matrix.
+
+The Python projected check also uses 1/4/8 distinct HTTP readers while a
+controller's continue request waits for target input. Historical stacks,
+locals, registers, scalar/aggregate values, and partial failures must retain
+their original context without issuing additional MI commands. After input
+releases the controller, a new stop must contain the changed value while the
+old capture remains unchanged, including after close.
+
+The check prints individual SDK call latencies, throughput, and control
+completion time after input. Reader discovery is outside these measurements;
+call latency includes HTTP and JSON decoding, and throughput also includes
+client assertions and scheduling. These are bounded fixture measurements,
+not server capacity limits or comparisons with native GDB or real Agents.
