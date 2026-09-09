@@ -7,6 +7,81 @@ use crate::{
     domain::SessionState,
 };
 
+#[test]
+fn agent_memory_defaults_preserve_explicit_formats_and_other_views() {
+    let memory = json!({"view": "memory", "address": "0x1000", "length": 1});
+    for method in [
+        CanonicalMethod::MemoryRead,
+        CanonicalMethod::InspectionGet,
+        CanonicalMethod::InspectionBatch,
+        CanonicalMethod::TargetLaunch,
+        CanonicalMethod::TargetRestart,
+        CanonicalMethod::ExecutionControl,
+        CanonicalMethod::ExecutionWait,
+        CanonicalMethod::InspectionSnapshot,
+    ] {
+        let direct = matches!(
+            method,
+            CanonicalMethod::MemoryRead | CanonicalMethod::InspectionGet
+        );
+        let field = if method == CanonicalMethod::InspectionBatch {
+            "requests"
+        } else {
+            "inspect"
+        };
+        let mut request = ApiRequest {
+            api_version: API_VERSION.into(),
+            request_id: "encoding".into(),
+            session_id: Some("sess_test".into()),
+            method,
+            expected_revision: None,
+            idempotency_key: None,
+            parameters: if direct {
+                memory.clone()
+            } else {
+                json!({(field): [memory, {"view": "locals"}]})
+            },
+        };
+        if method == CanonicalMethod::MemoryRead {
+            request.parameters.as_object_mut().unwrap().remove("view");
+        }
+        for explicit in [
+            None,
+            Some(json!("base64")),
+            Some(json!("hex")),
+            Some(json!(null)),
+            Some(json!("utf-8")),
+        ] {
+            let mut candidate = request.clone();
+            let parameters = if direct {
+                &mut candidate.parameters
+            } else {
+                &mut candidate.parameters[field][0]
+            };
+            if let Some(encoding) = &explicit {
+                parameters["encoding"] = encoding.clone();
+            }
+            default_agent_memory_encoding(&mut candidate);
+            let result = if direct {
+                &candidate.parameters
+            } else {
+                &candidate.parameters[field][0]
+            };
+            assert_eq!(
+                result["encoding"],
+                explicit.unwrap_or(json!("hex")),
+                "{method}"
+            );
+            if !direct {
+                assert_eq!(candidate.parameters[field][1], json!({"view": "locals"}));
+            }
+            let unchanged = candidate.parameters.clone();
+            default_agent_memory_encoding(&mut candidate);
+            assert_eq!(candidate.parameters, unchanged);
+        }
+    }
+}
+
 #[tokio::test]
 async fn historical_diffs_survive_unknown_outcomes_and_a_stopped_actor() {
     if !crate::test_support::require_commands(&["gdb"]) {

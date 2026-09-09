@@ -206,6 +206,17 @@ tool-response byte budget for serialized facts and keys. Expressions,
 memory, disassembly, source files, unwound registers, and stateful tracking
 are never memoized across requests.
 
+Inline `memory.read` and `view: "memory"` results contain exactly one of
+`data_hex` and `data_base64`. The optional `encoding` parameter accepts `hex`
+or `base64`; MCP defaults memory reads and explicit memory observation items
+to `hex`, while canonical calls retain their `base64` default. Hex uses two
+lowercase digits per byte in ascending address order, without interpreting
+text or integer byte order. Lengths and SHA-256 describe the original bytes.
+Reads exceeding `limits.inline_memory_bytes` still return `preview_hex` and
+an exact binary artifact. Stored observations keep the encoding captured at
+creation, including when another Agent reads them after resume or close.
+This option does not change binary I/O, tracked samples, or artifact resources.
+
 Completed and partially successful captures have an immutable
 `observation_id`, also accepted as `snapshot_id` by
 `inspection.snapshot_get` (MCP `gdb_inspect` view `observation`). A lookup

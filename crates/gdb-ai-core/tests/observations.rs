@@ -1,5 +1,6 @@
 use std::{process::Command, sync::Arc};
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use gdb_ai_core::{
     ErrorCode,
     config::{ArtifactConfig, Config, PersistenceConfig},
@@ -21,6 +22,251 @@ fn metric_value(metrics: &str, name: &str) -> u64 {
             (metric == name).then(|| value.parse().unwrap())
         })
         .unwrap()
+}
+
+#[tokio::test]
+async fn memory_encodings_preserve_exact_bytes_and_shared_captures() {
+    if !support::require_commands(&["gdb", "cc"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("bytes.c");
+    let executable = directory.path().join("bytes");
+    std::fs::write(
+        &source,
+        "unsigned char bytes[4096];\nint main(void) {\n\
+         for (unsigned i = 0; i < sizeof(bytes); ++i) bytes[i] = i;\n\
+         __builtin_trap();\nreturn 0;\n}\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.limits.inline_memory_bytes = 256;
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("memory-encoding/mcp:writer");
+    let launched = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "launch",
+                    None,
+                    "target.launch",
+                    None,
+                    json!({
+                        "program": executable, "stop": "none",
+                        "inspect": [{"view": "memory", "address_expression": "&bytes", "length": 256}]
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    let session = launched.session_id.as_deref().unwrap();
+    let expected = (0..=255u8).collect::<Vec<_>>();
+    let expected_hex = expected
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let memory = &launched.result.as_ref().unwrap()["observations"]["memory"];
+    assert_eq!(memory["data_hex"], expected_hex);
+    assert!(memory.get("data_base64").is_none());
+    let context = launched
+        .semantics
+        .as_ref()
+        .unwrap()
+        .context
+        .as_ref()
+        .unwrap();
+    let parameters =
+        json!({"stop_id": context.stop_id, "address": memory["address"], "length": 256});
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let canonical = successful(
+        gateway
+            .dispatch(
+                request(
+                    "canonical",
+                    Some(session),
+                    "memory.read",
+                    None,
+                    parameters.clone(),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(
+        canonical.result.as_ref().unwrap()["data_base64"],
+        BASE64.encode(&expected)
+    );
+    assert!(canonical.result.as_ref().unwrap().get("data_hex").is_none());
+    let native = successful(
+        gateway
+            .dispatch_agent(
+                request("native", Some(session), "memory.read", None, parameters),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(native.result.as_ref().unwrap()["data_hex"], expected_hex);
+    assert_eq!(native.result.as_ref().unwrap()["sha256"], memory["sha256"]);
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total") - before,
+        2
+    );
+    for (method, parameters, path) in [
+        (
+            "inspection.get",
+            json!({"stop_id": context.stop_id, "view": "memory", "address": memory["address"], "length": 256}),
+            "",
+        ),
+        (
+            "inspection.batch",
+            json!({"stop_id": context.stop_id, "requests": [
+                {"view": "memory", "address": memory["address"], "length": 256}
+            ]}),
+            "/results/memory",
+        ),
+        (
+            "inspection.snapshot",
+            json!({"stop_id": context.stop_id, "inspect": [
+                {"view": "memory", "address": memory["address"], "length": 256}
+            ]}),
+            "/observations/memory",
+        ),
+    ] {
+        let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+        let response = successful(
+            gateway
+                .dispatch_agent(
+                    request(method, Some(session), method, None, parameters),
+                    &caller,
+                )
+                .await,
+        );
+        let result = response.result.as_ref().unwrap().pointer(path).unwrap();
+        assert_eq!(result["data_hex"], expected_hex, "{method}");
+        assert!(result.get("data_base64").is_none(), "{method}");
+        assert_eq!(result["sha256"], memory["sha256"]);
+        assert_eq!(
+            metric_value(&gateway.metrics(), "gdbai_commands_total") - before,
+            1
+        );
+    }
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    for encoding in [json!("utf-8"), json!(null), json!(1)] {
+        let response = gateway
+            .dispatch_agent(
+                request("invalid", Some(session), "memory.read", None,
+                    json!({"stop_id": context.stop_id, "address": memory["address"], "length": 256, "encoding": encoding})),
+                &caller,
+            )
+            .await;
+        assert_eq!(response.error.unwrap().code, ErrorCode::InvalidArgument);
+    }
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total"),
+        before
+    );
+    let large = successful(
+        gateway
+            .dispatch_agent(
+                request("large", Some(session), "memory.read", None,
+                    json!({"stop_id": context.stop_id, "address": memory["address"], "length": 4096})),
+                &caller,
+            )
+            .await,
+    );
+    let large = large.result.as_ref().unwrap();
+    assert_eq!(large["read_length"], 4096);
+    assert_eq!(large["preview_hex"], &expected_hex[..128]);
+    assert!(large.get("data_hex").is_none() && large.get("data_base64").is_none());
+    successful(
+        gateway
+            .dispatch_agent(
+                request("close", Some(session), "session.close", None, json!({})),
+                &caller,
+            )
+            .await,
+    );
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let retained = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "shared",
+                    Some(session),
+                    "inspection.snapshot_get",
+                    None,
+                    json!({"snapshot_id": context.observation_id}),
+                ),
+                &Caller::local("memory-encoding/mcp:reader"),
+            )
+            .await,
+    );
+    assert_eq!(
+        retained.result.as_ref().unwrap()["results"]["memory"],
+        *memory
+    );
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total"),
+        before
+    );
+    let artifact = successful(
+        gateway
+            .dispatch(
+                request(
+                    "artifact",
+                    None,
+                    "artifact.get",
+                    None,
+                    json!({"uri": large["artifact"]}),
+                ),
+                &Caller::local("memory-encoding/mcp:reader"),
+            )
+            .await,
+    );
+    assert_eq!(
+        BASE64
+            .decode(
+                artifact.result.as_ref().unwrap()["data_base64"]
+                    .as_str()
+                    .unwrap()
+            )
+            .unwrap(),
+        expected.repeat(16)
+    );
+    let replay = gdb_ai_core::replay::replay(
+        directory
+            .path()
+            .join("sessions")
+            .join(session)
+            .join("journal.jsonl"),
+        gdb_ai_core::domain::SessionId(session.into()),
+    )
+    .unwrap();
+    assert!(replay.complete, "{replay:?}");
 }
 
 #[tokio::test]

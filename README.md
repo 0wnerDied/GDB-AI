@@ -314,6 +314,13 @@ a later call reject a different stop. Frame and value handles expire on
 resume. Control transfer and cancellation semantics are documented in
 [operations](docs/operations.md).
 
+Memory reads return `data_hex` by default through MCP, including memory views
+inside run, batch, and snapshot plans. Each pair of digits is one byte in
+ascending address order; no character encoding or integer byte order is
+assumed. Large reads retain a hex preview and an exact binary artifact.
+Canonical calls keep their Base64 default; `encoding: "hex"` or `"base64"`
+selects the inline representation explicitly on either interface.
+
 ### Thread diagnosis
 
 For a hang or suspected thread race, `gdb_inspect` with `view: "threads"`

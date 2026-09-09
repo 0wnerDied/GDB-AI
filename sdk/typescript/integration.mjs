@@ -60,6 +60,11 @@ async function canonical(client, program) {
     assert.ok(stack.result.frames.length);
     assert.equal(stack.semantics.projection, "detailed");
     assert.equal(stack.semantics.context.stop_id, stopId);
+    const memory = (await session.call("memory.read", {
+      stop_id: stopId, address_expression: "&large_buffer", length: 4,
+    })).result;
+    assert.equal(memory.data_base64, "WgAAAA==");
+    assert.equal(memory.data_hex, undefined);
     await assert.rejects(session.inspect({ view: "stack", stop_id: "stale" }),
       (error) => error instanceof ApiError && error.code === "STALE_CONTEXT" && error.response.revision !== undefined);
     // I/O accepts the latest revision, so this keyed replay does not change
@@ -124,6 +129,16 @@ async function projected(client, program) {
     assert.ok(restarted.complete && restarted.evidence.length);
     assert.equal(restarted.result.command, undefined);
     assert.equal(restarted.result.capabilities, undefined);
+    const memory = (await call("gdb_memory", {
+      action: "read", address_expression: "&large_buffer", length: 4,
+    })).result;
+    assert.equal(memory.data_hex, "5a000000");
+    assert.equal(memory.data_base64, undefined);
+    const binary = (await call("gdb_memory", {
+      action: "read", address: memory.address, length: 4, encoding: "base64",
+    })).result;
+    assert.equal(binary.data_base64, "WgAAAA==");
+    assert.equal(binary.data_hex, undefined);
     const statusUri = `gdbai://session/${sessionId}/status`;
     assert.ok((await client.listResources()).some((resource) => resource.uri === statusUri));
     const status = JSON.parse((await client.readResource(statusUri))[0].text);
@@ -134,6 +149,7 @@ async function projected(client, program) {
       { view: "registers", roles: ["pc", "sp"] },
       { view: "evaluate", expression: "$pc" },
       { name: "missing", view: "evaluate", expression: "gdb_ai_missing_sdk_symbol" },
+      { view: "memory", address_expression: "&large_buffer", length: 4 },
     ] });
     assert.equal(captureResponse.complete, false);
     const captured = captureResponse.result;
@@ -142,6 +158,8 @@ async function projected(client, program) {
     assert.equal(captured.results.evaluate.status, "available");
     assert.equal(captured.results.evaluate.command, undefined);
     assert.equal(captured.failures.missing.details?.record, undefined);
+    assert.equal(captured.results.memory.data_hex, "5a000000");
+    assert.equal(captured.results.memory.data_base64, undefined);
     lookup = { session_id: sessionId, view: "observation", snapshot_id: captureResponse.context.observation_id };
     const sharedResponse = await observer.callTool("gdb_inspect", lookup);
     assert.equal(sharedResponse.historical, true);

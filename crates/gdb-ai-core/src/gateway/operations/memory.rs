@@ -307,6 +307,17 @@ pub(super) fn find_memory_result(
 
 impl Gateway {
     pub(super) async fn memory_read(&self, request: &ApiRequest) -> Result<Value> {
+        let hexadecimal = match request.parameters.get("encoding") {
+            None => false,
+            Some(Value::String(encoding)) if encoding == "hex" => true,
+            Some(Value::String(encoding)) if encoding == "base64" => false,
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "memory encoding must be hex or base64",
+                ));
+            }
+        };
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
@@ -381,12 +392,17 @@ impl Gateway {
                 "evidence_seq": evidence_seq
             }))
         } else {
+            let (field, data) = if hexadecimal {
+                ("data_hex", hex_encode(&bytes))
+            } else {
+                ("data_base64", BASE64.encode(&bytes))
+            };
             Ok(json!({
                 "stop_id": state.stop_id,
                 "address": address,
                 "requested_length": length,
                 "read_length": bytes.len(),
-                "data_base64": BASE64.encode(&bytes),
+                (field): data,
                 "sha256": sha256,
                 "partial": partial,
                 "truncated": false,

@@ -234,7 +234,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_memory",
-        description: "Read memory by literal address or GDB address expression, or page an artifact; advanced: write/search/compare.",
+        description: "Read exact memory as hex by default, using a literal address or GDB address expression, or page a binary artifact; advanced: write/search/compare.",
         discriminator: Some("action"),
         actions: MEMORY_ACTIONS,
         read_only: false,

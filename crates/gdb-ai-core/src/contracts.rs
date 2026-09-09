@@ -440,6 +440,7 @@ const INSPECTION_BATCH_ITEM_FIELDS: &[ParameterField] = &[
     optional("address_expression", ParameterKind::String),
     optional("length", ParameterKind::Positive),
     optional("allow_partial", ParameterKind::Boolean),
+    optional("encoding", ParameterKind::Enum(&["hex", "base64"])),
     optional("before_snapshot_id", ParameterKind::String),
     optional("after_snapshot_id", ParameterKind::String),
 ];
@@ -791,6 +792,7 @@ impl CanonicalMethod {
                 optional("address_expression", String),
                 optional("length", Positive),
                 optional("allow_partial", Boolean),
+                optional("encoding", Enum(&["hex", "base64"])),
                 optional("before_snapshot_id", String),
                 optional("after_snapshot_id", String),
             ]),
@@ -832,6 +834,7 @@ impl CanonicalMethod {
                 optional("address_expression", String),
                 required("length", Unsigned),
                 optional("allow_partial", Boolean),
+                optional("encoding", Enum(&["hex", "base64"])),
                 optional("acknowledge_target_effects", Boolean),
                 optional("volatile", Boolean),
             ])

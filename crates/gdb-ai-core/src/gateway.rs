@@ -42,6 +42,46 @@ pub enum RequestMode {
     Agent,
 }
 
+fn default_agent_memory_encoding(request: &mut ApiRequest) {
+    // 2026-09-09: Base64 memory forced Agents to decode bytes before reading
+    // them. Default only known memory requests to hex; keep explicit encodings,
+    // canonical defaults and immutable historical captures unchanged.
+    let default = |parameters: &mut Value| {
+        if let Some(parameters) = parameters.as_object_mut() {
+            parameters
+                .entry("encoding")
+                .or_insert_with(|| Value::String("hex".into()));
+        }
+    };
+    if request.method == CanonicalMethod::MemoryRead
+        || (request.method == CanonicalMethod::InspectionGet
+            && request.parameters["view"] == "memory")
+    {
+        default(&mut request.parameters);
+        return;
+    }
+    let field = match request.method {
+        CanonicalMethod::InspectionBatch => "requests",
+        CanonicalMethod::TargetLaunch
+        | CanonicalMethod::TargetRestart
+        | CanonicalMethod::ExecutionControl
+        | CanonicalMethod::ExecutionWait
+        | CanonicalMethod::InspectionSnapshot => "inspect",
+        _ => return,
+    };
+    if let Some(items) = request
+        .parameters
+        .get_mut(field)
+        .and_then(Value::as_array_mut)
+    {
+        for item in items {
+            if item["view"] == "memory" {
+                default(item);
+            }
+        }
+    }
+}
+
 impl Caller {
     pub fn local(identity: impl Into<String>) -> Self {
         Self {
@@ -402,6 +442,9 @@ impl Gateway {
         // their Gateway-owned task dispatches the same immutable request.
         if !admitted {
             self.validate_request(request)?;
+        }
+        if mode == RequestMode::Agent {
+            default_agent_memory_encoding(request);
         }
         self.check_rate(&caller.identity).await?;
 

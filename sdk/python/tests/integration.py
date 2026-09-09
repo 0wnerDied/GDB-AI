@@ -109,6 +109,10 @@ def canonical(client, program):
         assert stack["result"]["frames"], stack
         assert stack["semantics"]["projection"] == "detailed", stack
         assert stack["semantics"]["context"]["stop_id"] == stop_id, stack
+        memory = session.call("memory.read", {
+            "stop_id": stop_id, "address_expression": "&large_buffer", "length": 4,
+        })["result"]
+        assert memory["data_base64"] == "WgAAAA==" and "data_hex" not in memory, memory
         try:
             session.call("inspection.get", {"view": "stack", "stop_id": "stale"})
         except ApiError as error:
@@ -172,6 +176,11 @@ def projected(client, program):
         assert stack["result"]["frames"], stack
         assert stack["context"]["stop_id"] == launched["state"]["stop_id"], stack
         assert stack["complete"] and stack["evidence"], stack
+        memory = call("gdb_memory", action="read", address_expression="&large_buffer", length=4)["result"]
+        assert memory["data_hex"] == "5a000000" and "data_base64" not in memory, memory
+        binary = call("gdb_memory", action="read", address=memory["address"], length=4,
+                      encoding="base64")["result"]
+        assert binary["data_base64"] == "WgAAAA==" and "data_hex" not in binary, binary
         status_uri = f"gdbai://session/{session_id}/status"
         assert status_uri in {resource["uri"] for resource in client.list_resources()}
         status = json.loads(client.read_resource(status_uri)[0]["text"])
@@ -189,6 +198,7 @@ def projected(client, program):
             {"name": "missing", "view": "evaluate", "expression": "gdb_ai_missing_sdk_symbol"},
             {"view": "stack", "limit": 4, "include_locals": True},
             {"name": "values", "view": "evaluate", "expressions": ["global_value", "global_pair"]},
+            {"view": "memory", "address_expression": "&large_buffer", "length": 4},
         ]
         capture_response = call("gdb_batch", requests=read_plan)
         assert not capture_response["complete"], capture_response
@@ -202,6 +212,8 @@ def projected(client, program):
             "7", "{left = 1, right = 2}"]
         assert captured["results"]["stack"]["frames"][0]["function"] == "main", captured
         assert isinstance(captured["results"]["stack"]["frames"][0]["locals"], list), captured
+        assert captured["results"]["memory"]["data_hex"] == "5a000000", captured
+        assert "data_base64" not in captured["results"]["memory"], captured
         observation_id = capture_response["context"]["observation_id"]
         evidence = capture_response["evidence"]
         assert len(evidence) == 1 and evidence[0]["kind"] == "journal-entries", evidence

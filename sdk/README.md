@@ -239,6 +239,13 @@ key or retries a mutation after an ambiguous transport failure.
 
 ## Bounded output and evidence
 
+Memory reads through `call_tool`/`callTool`, including explicit memory views
+in observation plans, default to `data_hex`. Canonical `call` and `Session`
+calls retain `data_base64`; pass `encoding: "hex"` or `"base64"` to choose.
+Only one representation is returned. Hex pairs follow ascending byte addresses,
+not host integer byte order, and historical captures retain their chosen format.
+Large reads still use a hex preview and a binary artifact.
+
 I/O and transcript results contain exactly one lossless representation:
 `text` for readable UTF-8, or `data_base64` for binary/control bytes. Resource
 contents use `text` or `blob` respectively. Offsets and lengths count bytes,
