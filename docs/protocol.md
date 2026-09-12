@@ -149,6 +149,17 @@ existing bounded tracking history. `view: "diff"` accepts
 `before_snapshot_id` and `after_snapshot_id` and compares retained facts;
 its result is explicitly historical and preserves both observation IDs.
 
+`source` with `path` reads a workspace file through the requested line window,
+using `line` (default 1), `before_lines` (default 5), and `after_lines`
+(default 10). Each context count is capped at 100. Reads scan from the start
+through at most 1 MiB of source, with one extra byte to detect the limit or
+remaining content. A file larger than 1 MiB can supply an early excerpt;
+reaching the requested window beyond that scan budget returns `OUTPUT_LIMIT`.
+Only the scanned prefix must be valid UTF-8. Returned lines retain their
+original numbers, and `partial` indicates omitted lines before or after the
+window. A line beyond EOF selects the final line when EOF is within budget.
+Workspace and source-map checks apply on every read; excerpts are not cached.
+
 `stack` with `include_locals: true` captures arguments and local variables
 for every returned frame, including aggregate values while retaining types.
 Variable identities must agree before type and value reads are combined.

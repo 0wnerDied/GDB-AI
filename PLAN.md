@@ -86,6 +86,10 @@ trial.
 
 ### Existing data-path gates
 
+- [x] Read workspace source only through the requested excerpt, retaining
+  bounded prefix scanning, UTF-8 checks, line numbering, and EOF semantics.
+  Large files may supply early windows without a full read. Keep line indexes
+  deferred until repeated deep reads justify file-identity invalidation.
 - [x] Prefer native MI3 breakpoint-script correction and narrowly normalize
   legacy command lists in both live parsing and replay.
 - [x] Verify saved transcript semantics against independent ASTs, cover all

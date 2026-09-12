@@ -53,6 +53,38 @@ struct FrameVariables {
     error: Option<ApiError>,
 }
 
+const MAX_SOURCE_SCAN_BYTES: usize = 1024 * 1024;
+
+fn read_source_prefix(input: impl std::io::Read, end_line: u64) -> Result<(String, bool)> {
+    use std::io::BufRead as _;
+
+    // 2026-09-12: Whole-file reads rejected small excerpts from large source
+    // files. Stop at the requested window while keeping all read-ahead bounded.
+    // ponytail: Scan at most 1 MiB from the start; add sparse line offsets only
+    // if repeated deep excerpts justify an index and its invalidation cost.
+    let mut input = std::io::BufReader::new(input.take((MAX_SOURCE_SCAN_BYTES + 1) as u64));
+    let mut bytes = Vec::new();
+    for _ in 0..end_line {
+        if input.read_until(b'\n', &mut bytes)? == 0 {
+            break;
+        }
+        if bytes.len() > MAX_SOURCE_SCAN_BYTES {
+            return Err(Error::new(
+                ErrorCode::OutputLimit,
+                "source excerpt scan exceeds 1 MiB",
+            ));
+        }
+    }
+    let has_more = !input.fill_buf()?.is_empty();
+    let source = String::from_utf8(bytes).map_err(|_| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            "source prefix is not valid UTF-8",
+        )
+    })?;
+    Ok((source, has_more))
+}
+
 fn disassembly_architecture(reply: Result<CommandReply>) -> Result<&'static str> {
     // 2026-09-08: Optional architecture metadata swallowed control failures
     // after disassembly. Only independent read errors may degrade to unknown.
@@ -1777,52 +1809,12 @@ impl Gateway {
             .unwrap_or(requested);
         let path = self.workspace_path(&mapped.to_string_lossy(), false)?;
         let source_path = path.clone();
-        // 2026-08-31: A workspace entry could change after path validation,
-        // and synchronous FIFO or filesystem reads blocked the async Gateway.
-        // Verify that the opened descriptor is regular and cap its
-        // blocking-pool read.
-        let source = tokio::task::spawn_blocking(move || -> Result<String> {
-            use std::{io::Read as _, os::unix::fs::OpenOptionsExt as _};
-
-            const MAX_SOURCE_BYTES: usize = 1024 * 1024;
-            let mut file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-                .open(source_path)?;
-            if !file.metadata()?.is_file() {
-                return Err(Error::new(
-                    ErrorCode::InvalidArgument,
-                    "source path is not a regular file",
-                ));
-            }
-            let mut bytes = Vec::new();
-            file.by_ref()
-                .take((MAX_SOURCE_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() > MAX_SOURCE_BYTES {
-                return Err(Error::new(
-                    ErrorCode::OutputLimit,
-                    "source file exceeds 1 MiB",
-                ));
-            }
-            String::from_utf8(bytes).map_err(|_| {
-                Error::new(ErrorCode::InvalidArgument, "source file is not valid UTF-8")
-            })
-        })
-        .await
-        .map_err(|error| {
-            Error::new(
-                ErrorCode::Internal,
-                format!("source read task failed: {error}"),
-            )
-        })??;
-        let lines = source.lines().collect::<Vec<_>>();
-        let center = request
+        let line = request
             .parameters
             .get("line")
             .and_then(Value::as_u64)
             .unwrap_or(1)
-            .clamp(1, lines.len().max(1) as u64) as usize;
+            .max(1);
         let before = request
             .parameters
             .get("before_lines")
@@ -1835,6 +1827,34 @@ impl Gateway {
             .and_then(Value::as_u64)
             .unwrap_or(10)
             .min(100) as usize;
+        // 2026-08-31: A workspace entry could change after path validation,
+        // and synchronous FIFO or filesystem reads blocked the async Gateway.
+        // Verify that the opened descriptor is regular and cap its
+        // blocking-pool read.
+        let (source, has_more) = tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+                .open(source_path)?;
+            if !file.metadata()?.is_file() {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "source path is not a regular file",
+                ));
+            }
+            read_source_prefix(file, line.saturating_add(after as u64))
+        })
+        .await
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::Internal,
+                format!("source read task failed: {error}"),
+            )
+        })??;
+        let lines = source.lines().collect::<Vec<_>>();
+        let center = line.min(lines.len().max(1) as u64) as usize;
         let start = center.saturating_sub(before + 1);
         let end = center.saturating_add(after).min(lines.len());
         let excerpt = lines[start..end]
@@ -1847,7 +1867,7 @@ impl Gateway {
             "start_line": start + 1,
             "end_line": end,
             "lines": excerpt,
-            "partial": start > 0 || end < lines.len(),
+            "partial": start > 0 || has_more,
             "source": {"provider": "linux-userland", "mechanism": "workspace-file"}
         }))
     }
@@ -1856,6 +1876,114 @@ impl Gateway {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_prefix_stops_early_and_enforces_scan_and_encoding_limits() {
+        let source = format!("first\nsecond\n{}", "tail\n".repeat(256 * 1024));
+        let mut input = std::io::Cursor::new(source);
+        assert_eq!(
+            read_source_prefix(&mut input, 2).unwrap(),
+            ("first\nsecond\n".into(), true)
+        );
+        assert!(
+            input.position() <= 8192,
+            "a short excerpt must not read the whole file"
+        );
+
+        for source in ["", "a", "a\r", "a\r\n", "\n"] {
+            assert_eq!(
+                read_source_prefix(source.as_bytes(), 1).unwrap(),
+                (source.into(), false)
+            );
+        }
+        assert_eq!(
+            read_source_prefix(&b"ok\n\xff"[..], 1).unwrap(),
+            ("ok\n".into(), true)
+        );
+        assert_eq!(
+            read_source_prefix(&b"\xff\n"[..], 1).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+
+        let mut limit = vec![b'a'; MAX_SOURCE_SCAN_BYTES];
+        assert_eq!(
+            read_source_prefix(limit.as_slice(), 1).unwrap().0.len(),
+            MAX_SOURCE_SCAN_BYTES
+        );
+        limit.push(b'\n');
+        assert_eq!(
+            read_source_prefix(limit.as_slice(), 1).unwrap_err().code,
+            ErrorCode::OutputLimit
+        );
+        limit[MAX_SOURCE_SCAN_BYTES - 1] = b'\n';
+        let (prefix, has_more) = read_source_prefix(limit.as_slice(), 1).unwrap();
+        assert_eq!(prefix.len(), MAX_SOURCE_SCAN_BYTES);
+        assert!(has_more);
+    }
+
+    #[tokio::test]
+    async fn source_excerpt_reads_large_files_within_a_bounded_prefix() {
+        use crate::config::{ArtifactConfig, Config, PersistenceConfig};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.c");
+        let mut config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        config.security.workspace_roots = vec![directory.path().to_owned()];
+        let gateway = Gateway::new(config).unwrap();
+        let mut request: ApiRequest = serde_json::from_value(json!({
+            "api_version": "gdb.ai/v1", "request_id": "source",
+            "method": "inspection.get",
+            "parameters": {"view": "source", "path": path, "line": 2,
+                           "before_lines": 1, "after_lines": 0}
+        }))
+        .unwrap();
+
+        let source = format!("first\r\n第二行\n{}", "tail\n".repeat(256 * 1024));
+        std::fs::write(&path, source).unwrap();
+        let excerpt = gateway.source_excerpt(&request).await.unwrap();
+        assert_eq!(excerpt["start_line"], 1);
+        assert_eq!(excerpt["end_line"], 2);
+        assert_eq!(excerpt["partial"], true);
+        assert_eq!(
+            excerpt["lines"],
+            json!([
+                {"line": 1, "text": "first"}, {"line": 2, "text": "第二行"}
+            ])
+        );
+
+        request.parameters["line"] = json!(u64::MAX);
+        assert_eq!(
+            gateway.source_excerpt(&request).await.unwrap_err().code,
+            ErrorCode::OutputLimit
+        );
+        std::fs::write(&path, "first\r\n第二行\nlast\r").unwrap();
+        let excerpt = gateway.source_excerpt(&request).await.unwrap();
+        assert_eq!(excerpt["start_line"], 2);
+        assert_eq!(excerpt["end_line"], 3);
+        assert_eq!(excerpt["partial"], true);
+        assert_eq!(
+            excerpt["lines"],
+            json!([
+                {"line": 2, "text": "第二行"}, {"line": 3, "text": "last\r"}
+            ])
+        );
+
+        std::fs::write(&path, []).unwrap();
+        let excerpt = gateway.source_excerpt(&request).await.unwrap();
+        assert_eq!(excerpt["start_line"], 1);
+        assert_eq!(excerpt["end_line"], 0);
+        assert_eq!(excerpt["lines"], json!([]));
+        assert_eq!(excerpt["partial"], false);
+    }
 
     #[test]
     fn stack_variable_errors_keep_evidence_and_detailed_diagnostics() {
