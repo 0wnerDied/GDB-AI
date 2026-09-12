@@ -243,7 +243,7 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_registers",
-        description: "Read semantic register roles or write one authorized register.",
+        description: "Read target register names or semantic pc/sp/fp/return and argument_0..argument_7 roles; write one authorized register.",
         discriminator: Some("action"),
         actions: REGISTER_ACTIONS,
         read_only: false,

@@ -410,24 +410,26 @@ pub(super) fn register_values(record: &MiRecord) -> BTreeMap<usize, Value> {
         .collect()
 }
 
+// 2026-09-12: Common ABI shorthand was rejected despite naming an
+// unambiguous existing semantic role; keep those spellings equivalent.
 pub(super) fn register_role_candidates(role: &str) -> Option<&'static [&'static str]> {
     Some(match role {
         "pc" => &["rip", "pc"],
-        "sp" => &["rsp", "sp"],
-        "fp" => &["rbp", "x29", "fp"],
-        "return" => &["rax", "x0"],
+        "sp" | "stack" | "stack_pointer" => &["rsp", "sp"],
+        "fp" | "bp" | "frame_pointer" => &["rbp", "x29", "fp"],
+        "return" | "ret" | "retval" => &["rax", "x0"],
         "flags" => &["eflags", "cpsr"],
         "syscall_number" => &["orig_rax", "x8"],
         "syscall_return" => &["rax", "x0"],
         "tls" => &["fs_base", "tpidr_el0"],
-        "argument_0" => &["rdi", "x0"],
-        "argument_1" => &["rsi", "x1"],
-        "argument_2" => &["rdx", "x2"],
-        "argument_3" => &["rcx", "x3"],
-        "argument_4" => &["r8", "x4"],
-        "argument_5" => &["r9", "x5"],
-        "argument_6" => &["x6"],
-        "argument_7" => &["x7"],
+        "argument_0" | "argument0" | "arg0" | "a0" => &["rdi", "x0"],
+        "argument_1" | "argument1" | "arg1" => &["rsi", "x1"],
+        "argument_2" | "argument2" | "arg2" => &["rdx", "x2"],
+        "argument_3" | "argument3" | "arg3" => &["rcx", "x3"],
+        "argument_4" | "argument4" | "arg4" => &["r8", "x4"],
+        "argument_5" | "argument5" | "arg5" => &["r9", "x5"],
+        "argument_6" | "argument6" | "arg6" => &["x6"],
+        "argument_7" | "argument7" | "arg7" => &["x7"],
         _ => return None,
     })
 }
@@ -486,6 +488,29 @@ pub(super) fn valid_integer_literal(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolves_raw_registers_and_common_role_spellings() {
+        let names = ["rax", "rsp", "rbp", "rdi"].map(str::to_owned).to_vec();
+        for (requested, expected) in [
+            ("rax", "rax"),
+            ("bp", "rbp"),
+            ("stack_pointer", "rsp"),
+            ("arg0", "rdi"),
+            ("retval", "rax"),
+        ] {
+            assert_eq!(
+                super::resolve_register_name(requested, &names).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            super::resolve_register_name("argument_7", &names)
+                .unwrap_err()
+                .code,
+            crate::ErrorCode::CapabilityMissing
+        );
+    }
+
     #[test]
     fn locals_and_arguments_share_lossless_value_semantics() {
         let record = gdb_ai_mi::parse_record(

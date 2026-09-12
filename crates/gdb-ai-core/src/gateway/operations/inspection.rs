@@ -18,8 +18,8 @@ use super::{
     mi::{
         disassembly_instructions, frame_summary, normalized_arguments, normalized_frame_variables,
         normalized_frames, normalized_modules, normalized_source_files, normalized_symbols,
-        normalized_threads, register_role_candidates, register_values, resolve_register_name,
-        result_string_list, result_text, target_architecture, valid_integer_literal,
+        normalized_threads, register_values, resolve_register_name, result_string_list,
+        result_text, target_architecture, valid_integer_literal,
     },
     observation::{
         ObservationKind, parse_observation_requests, snapshot_requests,
@@ -1579,18 +1579,18 @@ impl Gateway {
             });
         let mut role_numbers = BTreeMap::new();
         for role in requested_roles {
-            let candidates = register_role_candidates(&role).ok_or_else(|| {
-                Error::new(
-                    ErrorCode::InvalidArgument,
-                    format!("unknown register role {role}"),
-                )
-            })?;
-            if let Some((number, _)) = names
-                .iter()
-                .enumerate()
-                .find(|(_, name)| candidates.contains(&name.as_str()))
-            {
-                role_numbers.insert(role, number);
+            // 2026-09-12: Reads rejected valid architecture register names
+            // even though writes already resolved both names and roles.
+            match resolve_register_name(&role, &names) {
+                Ok(register) => {
+                    let number = names
+                        .iter()
+                        .position(|name| name == &register)
+                        .expect("resolved register must come from the register name list");
+                    role_numbers.insert(role, number);
+                }
+                Err(error) if error.code == ErrorCode::CapabilityMissing => {}
+                Err(error) => return Err(error),
             }
         }
         let architecture = target_architecture(&names);
