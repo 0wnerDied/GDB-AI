@@ -282,7 +282,8 @@ pub(super) fn parse_observation_requests(
     let mut expression_budget = 0;
     let mut requests = Vec::with_capacity(items.len());
     for item in items {
-        let request = ObservationRequest::parse(
+        let explicitly_named = item.get("name").is_some();
+        let mut request = ObservationRequest::parse(
             item,
             stop_id,
             &mut memory_budget,
@@ -291,10 +292,24 @@ pub(super) fn parse_observation_requests(
             defaults,
         )?;
         if !names.insert(request.name.clone()) {
-            return Err(Error::new(
-                ErrorCode::Conflict,
-                "observation request names must be unique",
-            ));
+            if explicitly_named {
+                return Err(Error::new(
+                    ErrorCode::Conflict,
+                    "observation request names must be unique",
+                ));
+            }
+            // 2026-09-12: Repeated unnamed views inherited the same output
+            // key and rejected otherwise independent batch reads.
+            let base = request.name.clone();
+            let mut suffix = 2;
+            loop {
+                let name = format!("{base}_{suffix}");
+                if names.insert(name.clone()) {
+                    request.name = name;
+                    break;
+                }
+                suffix += 1;
+            }
         }
         requests.push(request);
     }
@@ -408,5 +423,34 @@ mod tests {
         .unwrap();
         assert_eq!(replaced.parameters["thread_id"], "thread_b");
         assert!(replaced.parameters.get("frame_level").is_none());
+    }
+
+    #[test]
+    fn names_repeated_unnamed_views_but_rejects_explicit_duplicates() {
+        let stop_id = StopId("s1".into());
+        let requests = parse_observation_requests(
+            &json!([
+                {"view": "evaluate", "expression": "first"},
+                {"view": "evaluate", "expression": "second"}
+            ]),
+            &stop_id,
+            16,
+            &Value::Null,
+        )
+        .unwrap();
+        assert_eq!(requests[0].name(), "evaluate");
+        assert_eq!(requests[1].name(), "evaluate_2");
+
+        let error = parse_observation_requests(
+            &json!([
+                {"name": "value", "view": "evaluate", "expression": "first"},
+                {"name": "value", "view": "evaluate", "expression": "second"}
+            ]),
+            &stop_id,
+            16,
+            &Value::Null,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Conflict);
     }
 }
