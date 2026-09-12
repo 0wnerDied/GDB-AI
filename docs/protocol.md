@@ -85,8 +85,11 @@ state, requested observations, bounded output, and evidence. Other lifecycle, ra
 and specialized provider responses remain compatible.
 
 Stdio and Unix stream clients may attach `_meta.progressToken` to a request.
-GDB/AI emits ordered `notifications/progress` records before and after the
-operation while continuing to accept cancellation and I/O requests.
+GDB/AI emits ordered `notifications/progress` records before and after a
+successful operation while continuing to accept cancellation and I/O requests.
+An error response is itself terminal and has no trailing progress notification.
+Progress notifications are suppressed for Claude Code because that client can
+mistake them for a transport error and restart the stateful stdio server.
 Canonical operations expose `operation.get` through `gdb_session` action
 `operation_status`. Actor-scoped target cancellation uses `operation.cancel`;
 waiter detachment and target control are distinct operations.
