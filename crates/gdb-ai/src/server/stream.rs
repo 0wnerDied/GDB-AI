@@ -38,6 +38,14 @@ struct StreamPending {
     stateless: bool,
 }
 
+fn stream_progress_enabled(caller: &Caller) -> bool {
+    // 2026-09-12: Claude Code attaches progress tokens but races its own token
+    // cleanup against notifications, treating valid progress as a transport
+    // error and restarting the MCP server. Progress is optional; suppress it
+    // for that client so stateful debugging sessions survive tool calls.
+    !caller.identity.ends_with("/mcp:claude-code")
+}
+
 pub(crate) async fn serve_stdio(
     config: Config,
     raw_admin: bool,
@@ -180,12 +188,16 @@ where
                         continue;
                     }
                 };
-                let progress_token = match progress_token(&params) {
-                    Ok(progress_token) => progress_token,
-                    Err(error) => {
-                        write_rpc(&mut output, rpc_fault(id, error)).await?;
-                        continue;
+                let progress_token = if stream_progress_enabled(&request_caller) {
+                    match progress_token(&params) {
+                        Ok(progress_token) => progress_token,
+                        Err(error) => {
+                            write_rpc(&mut output, rpc_fault(id, error)).await?;
+                            continue;
+                        }
                     }
+                } else {
+                    None
                 };
                 if let Some(token) = &progress_token {
                     write_rpc(
@@ -253,21 +265,27 @@ where
                 // Gateway future after a worker had accepted a mutation. Keep
                 // dispatch detached so idempotency and audit still complete.
                 let handle = tokio::spawn(async move {
-                    let response = match operation.await {
+                    let (response, completed) = match operation.await {
                         Ok(result) => result.map_or_else(
-                            |error| rpc_fault(id.clone(), error),
+                            |error| (rpc_fault(id.clone(), error), false),
                             |result| {
+                                let completed = result["isError"] != true
+                                    && result.get("error").is_none();
                                 let result = if stateless {
                                     stateless_result(&response_method, result)
                                 } else {
                                     result
                                 };
-                                rpc_result(id.clone(), result)
+                                (rpc_result(id.clone(), result), completed)
                             },
                         ),
-                        Err(error) => rpc_error(id, -32603, error.to_string()),
+                        Err(error) => (rpc_error(id, -32603, error.to_string()), false),
                     };
-                    if let Some(token) = progress_token {
+                    // 2026-09-12: Claude Code retires a request's progress token
+                    // as soon as it receives an error result. A terminal progress
+                    // notification races that teardown and makes Claude restart
+                    // the stdio server, losing every live debugging session.
+                    if completed && let Some(token) = progress_token {
                         let _ = responses
                             .send((
                                 None,
@@ -775,6 +793,16 @@ mod tests {
         assert!(pending.is_empty());
     }
 
+    #[test]
+    fn claude_code_progress_is_disabled() {
+        assert!(!stream_progress_enabled(&Caller::local(
+            "mcp-stdio/mcp:claude-code"
+        )));
+        assert!(stream_progress_enabled(&Caller::local(
+            "mcp-stdio/mcp:stream-test"
+        )));
+    }
+
     #[tokio::test]
     async fn stream_protocol_runs_over_a_unix_compatible_byte_stream() {
         let directory = tempdir().unwrap();
@@ -795,7 +823,7 @@ mod tests {
         let serving = tokio::spawn(serve_stream(
             gateway.clone(),
             Caller::local("stream-test"),
-            false,
+            true,
             server_input,
             server_output,
         ));
@@ -842,6 +870,56 @@ mod tests {
         assert_eq!(completed["params"]["progress"], 1);
         let tools = read_json_line(&mut client_input).await.unwrap();
         assert!(tools["result"]["tools"].as_array().is_some());
+        write_rpc(
+            &mut client_output,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "gdb_session",
+                    "arguments": {"action": "create"}
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let created = read_json_line(&mut client_input).await.unwrap();
+        let session_id = created["result"]["structuredContent"]["result"]["session_id"]
+            .as_str()
+            .unwrap();
+        write_rpc(
+            &mut client_output,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "gdb_registers",
+                    "arguments": {
+                        "action": "read",
+                        "session_id": session_id
+                    },
+                    "_meta": {"progressToken": "error-progress"}
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let started = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(started["method"], "notifications/progress");
+        assert_eq!(started["params"]["progressToken"], "error-progress");
+        let failed = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(failed["id"], 4);
+        assert_eq!(failed["result"]["isError"], true, "{failed}");
+        write_rpc(
+            &mut client_output,
+            json!({"jsonrpc": "2.0", "id": 5, "method": "ping", "params": {}}),
+        )
+        .await
+        .unwrap();
+        let pong = read_json_line(&mut client_input).await.unwrap();
+        assert_eq!(pong["id"], 5);
         client_output.shutdown().await.unwrap();
         drop(client_output);
         serving.await.unwrap().unwrap();
