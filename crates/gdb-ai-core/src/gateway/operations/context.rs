@@ -306,7 +306,19 @@ fn resolve_command_context(
             .stopped_thread_id
             .as_ref()
             .map(|thread| current_backend_thread(state, &thread.0))
-            .transpose()?;
+            .transpose()?
+            .or_else(|| {
+                // 2026-09-12: Core-file stops omit the selected thread even
+                // when their stopped inferior has exactly one known thread.
+                let stopped = state.stopped_inferior_id.as_ref()?;
+                let inferior = state
+                    .inferiors
+                    .values()
+                    .find(|inferior| &inferior.id == stopped)?;
+                let mut threads = inferior.threads.values();
+                let thread = threads.next()?.backend_id.clone();
+                threads.next().is_none().then_some(thread)
+            });
         // 2026-09-08: Inferior selectors were ignored, and response context
         // always named the default frame. Resolve selection once for both MI
         // and semantic attribution; contradictory handles must never alias.

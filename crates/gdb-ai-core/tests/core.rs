@@ -112,5 +112,19 @@ async fn opens_and_inspects_core_without_execution() {
         )
         .await;
     assert!(stack.error.is_none(), "{:?}", stack.error);
+    let registers = gateway
+        .dispatch(
+            request(
+                "registers",
+                Some(&session_id),
+                "register.read",
+                None,
+                json!({"stop_id": stop_id, "roles": ["pc"]}),
+            ),
+            &caller,
+        )
+        .await;
+    assert!(registers.error.is_none(), "{:?}", registers.error);
+    assert!(registers.result.unwrap()["roles"]["pc"].is_string());
     gateway.shutdown().await;
 }
