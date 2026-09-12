@@ -439,7 +439,9 @@ fn projected_schema(tool: &ToolProjection, include_advanced: bool, admin: bool) 
     if branches.len() == 1 {
         branches.into_iter().next().unwrap()
     } else {
-        json!({"oneOf": branches})
+        // 2026-09-12: MCP clients reject union input schemas without the
+        // required root object type, hiding every multi-action tool.
+        json!({"type": "object", "oneOf": branches})
     }
 }
 
@@ -590,6 +592,13 @@ fn add_discriminator(schema: &mut Value, discriminator: &str, action_names: &[&s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projects_mcp_object_input_schemas() {
+        for tool in tools(true, true) {
+            assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
+        }
+    }
 
     #[test]
     fn projects_canonical_parameter_contracts() {
