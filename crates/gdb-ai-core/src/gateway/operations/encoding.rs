@@ -89,20 +89,32 @@ pub(super) fn gdb_c_string(value: &str) -> String {
 }
 
 pub(super) fn parse_address(value: &str) -> Result<u64> {
-    let value = value
-        .split_whitespace()
-        .next()
-        .unwrap_or(value)
-        .trim_matches(|character: char| matches!(character, '(' | ')' | ','));
     // 2026-09-04: Bare register expressions use GDB's decimal output radix,
     // so requiring a 0x prefix rejected valid pointer-sized addresses during
     // same-stop memory capture. Accept the two lossless unsigned forms GDB
     // emits while keeping canonical API addresses hexadecimal.
-    let (digits, radix) = value
+    // 2026-09-14: Function evaluations prefix addresses with a braced C type.
+    // Scan that bounded value so disassembly still receives its numeric focus.
+    let mut words = value.split_whitespace();
+    let first = words.next().unwrap_or(value);
+    let first = first.trim_matches(|character: char| matches!(character, '(' | ')' | ','));
+    let (digits, radix) = first
         .strip_prefix("0x")
-        .map_or((value, 10), |digits| (digits, 16));
+        .map_or((first, 10), |digits| (digits, 16));
     u64::from_str_radix(digits, radix)
-        .map_err(|_| Error::new(ErrorCode::GdbError, format!("invalid GDB address: {value}")))
+        .ok()
+        .or_else(|| {
+            if !first.starts_with('{') {
+                return None;
+            }
+            words.find_map(|word| {
+                let digits = word
+                    .trim_matches(|character: char| matches!(character, '(' | ')' | ','))
+                    .strip_prefix("0x")?;
+                u64::from_str_radix(digits, 16).ok()
+            })
+        })
+        .ok_or_else(|| Error::new(ErrorCode::GdbError, format!("invalid GDB address: {value}")))
 }
 
 pub(super) fn input_bytes(parameters: &Value) -> Result<Vec<u8>> {
@@ -147,6 +159,11 @@ mod tests {
             0x5555555c1010
         );
         assert_eq!(parse_address("93824992677904").unwrap(), 0x5555555c1010);
+        assert_eq!(
+            parse_address("{int (void)} 0x5555555c1010 <member>").unwrap(),
+            0x5555555c1010
+        );
+        assert!(parse_address("{1, 2, 3}").is_err());
         assert!(parse_address("-1").is_err());
     }
 
