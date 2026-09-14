@@ -23,7 +23,7 @@ async fn opens_and_inspects_core_without_execution() {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/targets/c/crash.c");
     assert!(
         Command::new("cc")
-            .args(["-g", "-O0"])
+            .args(["-g", "-O0", "-pthread"])
             .arg(source)
             .arg("-o")
             .arg(&executable)
@@ -90,6 +90,20 @@ async fn opens_and_inspects_core_without_execution() {
         )
         .await;
     assert!(opened.error.is_none(), "{:?}", opened.error);
+    let opened_state = opened.state.as_ref().unwrap();
+    let stopped_inferior = opened_state.stopped_inferior_id.as_ref().unwrap();
+    let threads = opened_state
+        .inferiors
+        .values()
+        .find(|inferior| &inferior.id == stopped_inferior)
+        .unwrap()
+        .threads
+        .len();
+    assert!(
+        threads >= 2,
+        "multi-threaded core fixture exposed {threads} thread(s)"
+    );
+    assert!(opened_state.stopped_thread_id.is_some());
     let stop_id = opened
         .state
         .as_ref()

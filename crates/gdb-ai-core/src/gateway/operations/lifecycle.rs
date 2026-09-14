@@ -12,7 +12,7 @@ use super::{
     context::{WaitSpec, apply_wait, apply_wait_baseline, wait_if_requested, wait_spec},
     encoding::byte_content,
     execution::{append_turn_output, validate_turn_inspection},
-    mi::frame_summary,
+    mi::{frame_summary, result_text},
     request::{parameters, required_session, string, unsigned},
 };
 use crate::{
@@ -1052,6 +1052,13 @@ impl Gateway {
             .handle
             .command(MiCommand::new("-stack-info-frame")?)
             .await?;
+        // 2026-09-14: Multi-threaded core files do not emit a stopped thread.
+        // Preserve GDB's selected thread so frame-scoped MI always has focus.
+        let thread_reply = entry
+            .handle
+            .command(MiCommand::new("-thread-info")?)
+            .await?;
+        let backend_thread = result_text(&thread_reply.record, "current-thread-id");
         let backend_id = entry.handle.with_state(|state| {
             state
                 .inferiors
@@ -1064,7 +1071,7 @@ impl Gateway {
             .handle
             .record_event(DomainEvent::TargetStopped {
                 backend_inferior: Some(backend_id.clone()),
-                backend_thread: None,
+                backend_thread,
                 reason: "core".into(),
                 reason_detail: Some(StopReason::Core),
                 frame: frame_summary(&frame_reply.record),
