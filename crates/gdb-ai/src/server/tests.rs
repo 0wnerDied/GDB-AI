@@ -329,6 +329,51 @@ fn maps_tool_metadata_outside_canonical_parameters() {
     assert_eq!(direct_restart.method, CanonicalMethod::TargetRestart);
     assert_eq!(direct_restart.parameters["stop"], "none");
 
+    let direct_launch = map_tool(
+        "gdb_session",
+        json!({
+            "action": "launch",
+            "program": "/bin/true",
+            "breakpoints": [{"function": "main"}]
+        }),
+        false,
+        false,
+        6,
+    )
+    .unwrap();
+    assert_eq!(direct_launch.parameters["stop"], "none");
+    assert_eq!(direct_launch.parameters["wait"]["until"], "settled");
+    let staged_launch = map_tool(
+        "gdb_session",
+        json!({
+            "action": "launch",
+            "program": "/bin/true",
+            "breakpoints": [{"function": "main"}],
+            "stop": "first_instruction"
+        }),
+        false,
+        false,
+        7,
+    )
+    .unwrap();
+    assert_eq!(staged_launch.parameters["stop"], "first_instruction");
+
+    let inspect_alias = map_tool(
+        "gdb_inspect",
+        json!({
+            "action": "stack",
+            "session_id": "sess_test",
+            "limit": 4
+        }),
+        false,
+        false,
+        8,
+    )
+    .unwrap();
+    assert_eq!(inspect_alias.method, CanonicalMethod::InspectionGet);
+    assert_eq!(inspect_alias.parameters["view"], "stack");
+    assert!(inspect_alias.parameters.get("action").is_none());
+
     let observed_wait = map_tool(
         "gdb_run",
         json!({

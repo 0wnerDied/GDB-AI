@@ -591,6 +591,14 @@ fn map_tool(
     let expected_revision = take_u64(&mut parameters, "expected_revision")?;
     let idempotency_key = take_string(&mut parameters, "idempotency_key")?;
     let _ = take_string(&mut parameters, "cancel_mode")?;
+    // 2026-09-21: Agents copied the common `action` discriminator to inspect,
+    // causing otherwise valid bounded view requests to fail and retry.
+    if name == "gdb_inspect"
+        && !parameters.contains_key("view")
+        && let Some(view) = parameters.remove("action")
+    {
+        parameters.insert("view".into(), view);
+    }
     let discriminator = discriminator_for_tool(name);
     let action = discriminator
         .map(|field| take_required_string(&mut parameters, field))
@@ -619,6 +627,20 @@ fn map_tool(
         ));
     }
     match (name, method, action.as_deref()) {
+        ("gdb_session", CanonicalMethod::TargetLaunch, Some("launch"))
+            if !parameters.contains_key("stop")
+                && parameters
+                    .get("breakpoints")
+                    .and_then(Value::as_array)
+                    .is_some_and(|breakpoints| !breakpoints.is_empty()) =>
+        {
+            // 2026-09-21: Inline breakpoints previously inherited starti, so
+            // Agents needed another turn to continue from the loader.
+            parameters.insert("stop".into(), Value::String("none".into()));
+            parameters
+                .entry("wait")
+                .or_insert_with(|| json!({"until": "settled"}));
+        }
         ("gdb_run", CanonicalMethod::TargetRestart, Some("restart")) => {
             parameters
                 .entry("stop")
