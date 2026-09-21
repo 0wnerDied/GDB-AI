@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use super::{
     context::{context_options, observation_context, require_stopped_context},
     encoding::{byte_content, hex_encode, parse_address},
-    evaluation::safe_evaluate_command,
+    evaluation::{safe_evaluate_command, validate_expression},
     memory::read_memory_bytes,
     mi::{
         disassembly_instructions, frame_summary, normalized_arguments, normalized_frame_variables,
@@ -31,7 +31,7 @@ use super::{
 use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
-    domain::{DomainEvent, SessionId, StopId, TrackingDefinition},
+    domain::{DomainEvent, SessionId, SessionState, StopId, TrackingDefinition},
     gateway::{Gateway, SessionEntry},
     protocol::{
         ApiError, ApiRequest, FactAvailability, ObservationContext, ObservationResult,
@@ -54,6 +54,27 @@ struct FrameVariables {
 }
 
 const MAX_SOURCE_SCAN_BYTES: usize = 1024 * 1024;
+
+async fn resolve_disassembly_address(
+    entry: &SessionEntry,
+    state: &SessionState,
+    parameters: &Value,
+    expression: &str,
+) -> Result<u64> {
+    validate_expression(expression)?;
+    let reply = safe_evaluate_command(
+        &entry.handle,
+        context_options(
+            MiCommand::new("-data-evaluate-expression")?.string(expression),
+            parameters,
+            state,
+        )?,
+    )
+    .await?;
+    let address = result_text(&reply.record, "value")
+        .ok_or_else(|| Error::new(ErrorCode::GdbError, "address expression returned no value"))?;
+    parse_address(&address)
+}
 
 fn read_source_prefix(input: impl std::io::Read, end_line: u64) -> Result<(String, bool)> {
     use std::io::BufRead as _;
@@ -1692,57 +1713,60 @@ impl Gateway {
         let entry = self.entry(required_session(request)?).await?;
         let state = entry.handle.state();
         require_stopped_context(&request.parameters, &state)?;
-        let (start, end, current, around_limit) = if let Some(range) =
-            request.parameters.get("range")
-        {
-            let start = crate::domain::Address::parse(&string(range, "start")?)?;
-            let end = crate::domain::Address::parse(&string(range, "end")?)?;
-            let start_number = parse_address(start.as_str())?;
-            let end_number = parse_address(end.as_str())?;
-            if end_number <= start_number || end_number - start_number > 64 * 1024 {
-                return Err(Error::new(
-                    ErrorCode::InvalidArgument,
-                    "disassembly range must be positive and at most 64 KiB",
-                ));
-            }
-            (start_number, end_number, None, None)
-        } else {
-            let around = request
-                .parameters
-                .get("around")
-                .unwrap_or(&request.parameters);
-            let expression = around
-                .get("expression")
-                .and_then(Value::as_str)
-                .unwrap_or("$pc");
-            let reply = entry
-                .handle
-                .command(context_options(
-                    MiCommand::new("-data-evaluate-expression")?.string(expression),
-                    &request.parameters,
+        let (start, end, current, around_limit) =
+            if let Some(range) = request.parameters.get("range") {
+                // 2026-09-21: Requiring canonical hexadecimal ranges forced Agents
+                // to evaluate symbols first or abandon structured disassembly.
+                let start_number = resolve_disassembly_address(
+                    &entry,
                     &state,
-                )?)
+                    &request.parameters,
+                    &string(range, "start")?,
+                )
                 .await?;
-            let address = result_text(&reply.record, "value")
-                .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB did not return an address"))?;
-            let address = parse_address(&address)?;
-            let before = around
-                .get("before_instructions")
-                .and_then(Value::as_u64)
-                .unwrap_or(8)
-                .min(64);
-            let after = around
-                .get("after_instructions")
-                .and_then(Value::as_u64)
-                .unwrap_or(16)
-                .min(64);
-            (
-                address.saturating_sub(before * 16),
-                address.saturating_add(after * 16 + 16),
-                Some(address),
-                Some((before as usize, after as usize)),
-            )
-        };
+                let end_number = resolve_disassembly_address(
+                    &entry,
+                    &state,
+                    &request.parameters,
+                    &string(range, "end")?,
+                )
+                .await?;
+                if end_number <= start_number || end_number - start_number > 64 * 1024 {
+                    return Err(Error::new(
+                        ErrorCode::InvalidArgument,
+                        "disassembly range must be positive and at most 64 KiB",
+                    ));
+                }
+                (start_number, end_number, None, None)
+            } else {
+                let around = request
+                    .parameters
+                    .get("around")
+                    .unwrap_or(&request.parameters);
+                let expression = around
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .unwrap_or("$pc");
+                let address =
+                    resolve_disassembly_address(&entry, &state, &request.parameters, expression)
+                        .await?;
+                let before = around
+                    .get("before_instructions")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(8)
+                    .min(64);
+                let after = around
+                    .get("after_instructions")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(16)
+                    .min(64);
+                (
+                    address.saturating_sub(before * 16),
+                    address.saturating_add(after * 16 + 16),
+                    Some(address),
+                    Some((before as usize, after as usize)),
+                )
+            };
         let include_source = bool_value(&request.parameters, "include_source", true);
         let include_bytes = bool_value(&request.parameters, "include_bytes", true);
         let mode = match (include_source, include_bytes) {

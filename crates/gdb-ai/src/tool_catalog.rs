@@ -252,7 +252,9 @@ const TOOLS: &[ToolProjection] = &[
     },
     ToolProjection {
         name: "gdb_disassemble",
-        description: "Read instructions around an address.",
+        // 2026-09-21: Address-only wording made Agents pre-evaluate symbols or
+        // send them to a hexadecimal-only range and retry after rejection.
+        description: "Read instructions around a safe GDB expression; range start/end also accept safe expressions such as symbol+offset.",
         discriminator: None,
         actions: DISASSEMBLY_ACTIONS,
         read_only: true,

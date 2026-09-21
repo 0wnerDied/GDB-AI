@@ -1102,6 +1102,30 @@ async fn local_debugging_vertical_slice() {
             .all(|instruction| instruction.get("source").is_none()
                 && instruction.get("bytes").is_none())
     );
+    let symbolic_disassembly = successful(
+        gateway
+            .dispatch(
+                request(
+                    "symbolic-disassembly",
+                    Some(&session_id),
+                    "disassembly.read",
+                    None,
+                    json!({
+                        "range": {"start": "marker", "end": "marker+0x40"},
+                        "include_source": false,
+                        "include_bytes": false,
+                        "stop_id": second_stop
+                    }),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert!(
+        symbolic_disassembly.result.as_ref().unwrap()["instructions"]
+            .as_array()
+            .is_some_and(|instructions| !instructions.is_empty())
+    );
 
     let stable_memory = gateway.dispatch(
         request(
