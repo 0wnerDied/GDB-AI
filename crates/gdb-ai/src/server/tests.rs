@@ -168,6 +168,7 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "gdb_probe",
         "trigger.command after arming",
         "gdb_inspect view=crash profile=brief",
+        "timeout_ms within the server command budget",
         "non-retryable error cannot succeed unchanged",
         "gdb_run action=wait on the same session",
         "gdb_session action=operation_status",

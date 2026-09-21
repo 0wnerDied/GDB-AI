@@ -454,6 +454,30 @@ impl Gateway {
         }
         if mode == RequestMode::Agent {
             default_agent_memory_encoding(request);
+            // 2026-09-21: Agent-supplied waits blocked a debugger turn for up
+            // to five minutes. Keep synchronous waits within the command
+            // budget so callers can recover through attributed operations.
+            let timeout_ms = request
+                .parameters
+                .pointer("/wait/timeout_ms")
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    (request.method == CanonicalMethod::InferiorIoWrite)
+                        .then(|| request.parameters.get("timeout_ms").and_then(Value::as_u64))
+                        .flatten()
+                });
+            if timeout_ms.is_some_and(|timeout| timeout > self.config.server.command_timeout_ms) {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "Agent synchronous timeout exceeds the server command budget of {} ms",
+                        self.config.server.command_timeout_ms
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "maximum_timeout_ms": self.config.server.command_timeout_ms
+                })));
+            }
         }
         self.check_rate(&caller.identity).await?;
 

@@ -83,6 +83,69 @@ fn agent_memory_defaults_preserve_explicit_formats_and_other_views() {
 }
 
 #[tokio::test]
+async fn bounds_agent_synchronous_timeouts_without_narrowing_canonical_calls() {
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.server.command_timeout_ms = 10;
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("timeout/mcp:controller");
+    let request = |method, parameters| ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: format!("timeout-{method}"),
+        session_id: Some("sess_missing".into()),
+        method,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters,
+    };
+
+    let long_wait = request(
+        CanonicalMethod::ExecutionWait,
+        json!({"wait": {"until": "settled", "timeout_ms": 11}}),
+    );
+    let rejected = gateway.dispatch_agent(long_wait.clone(), &caller).await;
+    assert_eq!(
+        rejected.error.as_ref().unwrap().code,
+        ErrorCode::InvalidArgument
+    );
+    assert_eq!(
+        rejected.error.unwrap().details.unwrap()["maximum_timeout_ms"],
+        10
+    );
+    assert_eq!(
+        gateway
+            .dispatch(long_wait, &caller)
+            .await
+            .error
+            .unwrap()
+            .code,
+        ErrorCode::NotFound
+    );
+    let long_write = request(
+        CanonicalMethod::InferiorIoWrite,
+        json!({"text": "x", "timeout_ms": 11}),
+    );
+    assert_eq!(
+        gateway
+            .dispatch_agent(long_write, &caller)
+            .await
+            .error
+            .unwrap()
+            .code,
+        ErrorCode::InvalidArgument
+    );
+}
+
+#[tokio::test]
 async fn historical_diffs_survive_unknown_outcomes_and_a_stopped_actor() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;
