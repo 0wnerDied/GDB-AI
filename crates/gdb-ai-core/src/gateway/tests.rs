@@ -1587,6 +1587,40 @@ fn bounds_the_complete_response_envelope() {
 }
 
 #[test]
+fn spills_projected_responses_before_the_agent_context_limit() {
+    let directory = tempdir().unwrap();
+    let gateway = Gateway::new(Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    })
+    .unwrap();
+
+    assert!(
+        gateway
+            .spill_response(None, &json!({"data": "x".repeat(60 * 1024)}))
+            .unwrap()
+            .is_none()
+    );
+    let artifact = gateway
+        .spill_response(None, &json!({"data": "x".repeat(70 * 1024)}))
+        .unwrap()
+        .unwrap();
+    assert!(
+        artifact["artifact"]
+            .as_str()
+            .unwrap()
+            .starts_with("gdbai://")
+    );
+    assert!(artifact["size"].as_u64().unwrap() > 64 * 1024);
+}
+
+#[test]
 fn removes_nested_exact_state_duplicates_before_bounding() {
     let directory = tempdir().unwrap();
     let mut request = ApiRequest {

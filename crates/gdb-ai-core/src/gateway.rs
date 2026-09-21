@@ -137,6 +137,8 @@ struct RateWindow {
     requests: u64,
 }
 
+const MAX_AGENT_INLINE_RESPONSE_BYTES: usize = 64 * 1024;
+
 fn has_sqlite_evidence_gap(state: &SessionState) -> bool {
     state
         .limitations
@@ -1411,7 +1413,15 @@ impl Gateway {
         response: &Value,
     ) -> Result<Option<Value>> {
         let bytes = serde_json::to_vec(response)?;
-        if bytes.len() <= self.config.limits.tool_response_bytes {
+        // 2026-09-21: Projected debugger results below the canonical limit
+        // still exhausted Agent context. Spill them before client-side limits
+        // hide the complete result, while retaining the configured lower cap.
+        let maximum = self
+            .config
+            .limits
+            .tool_response_bytes
+            .min(MAX_AGENT_INLINE_RESPONSE_BYTES);
+        if bytes.len() <= maximum {
             return Ok(None);
         }
         self.metrics.response_truncated();
