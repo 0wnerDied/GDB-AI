@@ -56,6 +56,26 @@ fn response_wrappers_transfer_owned_json_payloads() {
 }
 
 #[test]
+fn error_summaries_preserve_retry_guidance_within_the_bound() {
+    for (retryable, guidance) in [
+        (false, "do not retry unchanged"),
+        (true, "retry after changing state or waiting"),
+    ] {
+        let tool = projected_tool_result(json!({
+            "error": {
+                "code": "TEST",
+                "message": "错".repeat(MAX_TOOL_SUMMARY_BYTES),
+                "retryable": retryable
+            }
+        }));
+        let summary = tool["content"][0]["text"].as_str().unwrap();
+        assert!(summary.len() <= MAX_TOOL_SUMMARY_BYTES);
+        assert!(summary.ends_with(guidance));
+        assert_eq!(tool["structuredContent"]["error"]["retryable"], retryable);
+    }
+}
+
+#[test]
 fn native_projection_preserves_business_fields_and_typed_metadata() {
     let response: ApiResponse = serde_json::from_value(json!({
         "api_version": API_VERSION, "request_id": "native",
@@ -148,6 +168,10 @@ fn initialize_teaches_agents_the_stateful_workflow() {
         "gdb_probe",
         "trigger.command after arming",
         "gdb_inspect view=crash profile=brief",
+        "non-retryable error cannot succeed unchanged",
+        "gdb_run action=wait on the same session",
+        "gdb_session action=operation_status",
+        "use force_abort only when close fails",
     ] {
         assert!(instructions.contains(required), "missing {required}");
     }

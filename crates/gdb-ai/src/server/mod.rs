@@ -100,12 +100,14 @@ impl RpcFault {
 // loader and immediately continued. Distinguish one-time setup from a direct
 // exploit-trial relaunch in the Agent instructions.
 // 2026-09-09: Teach optional creation so startup does not cost a separate turn.
+// 2026-09-21: Ambiguous timeout recovery and silent non-retryable failures
+// made Agents repeat control calls or query the wrong operation registry.
 const AGENT_INSTRUCTIONS: &str = "Use tools/list. launch without session_id creates a session; keep result.session.session_id and reuse it; add breakpoint locations with breakpoints, or create separately for other pre-launch setup. argv \
 excludes program; patch the interpreter/library path before launch when needed; launch uses the program unchanged; use first_instruction only for pre-run setup. MCP keeps caller control without lease renewal. stop_id pins later evidence; omit it for current-stop reads. gdb_run waits for \
 stop/exit after continue or step when wait is omitted; input feeds byte-exact PTY data and inspect is same-stop only. Use \
 accepted/running only for later I/O. Use gdb_io write steps with wait_for for prompt-driven \
 menus. Reuse the session; gdb_run restart relaunches directly, while gdb_probe restart=true replaces separate restart/continue before arming, batches input or starts trigger.command after arming and returns its bounded stdout/stderr, skips ignore_count hits, and captures memory plus inspect views; continue_to_stop moves those views to the next crash/exit. Use gdb_batch for other current-stop views and gdb_inspect view=crash \
-profile=brief for triage. gdb_evaluate batches related expressions and side_effects=allow permits inferior calls or assignments in one request. Query a returned operation_id after timeout. Close when done.";
+profile=brief for triage. gdb_evaluate batches related expressions and side_effects=allow permits inferior calls or assignments in one request. A non-retryable error cannot succeed unchanged; change the call or stop. A gdb_run timeout operation_id resumes with gdb_run action=wait on the same session; a transport deadline operation_id uses gdb_session action=operation_status. Do not resend the run action. Before finishing, close each session with gdb_session action=close; use force_abort only when close fails.";
 
 fn initialize(params: &Value, phase: &mut Phase, caller: &mut Caller) -> Result<Value, RpcFault> {
     if *phase != Phase::New {
@@ -723,29 +725,41 @@ fn tool_result(response: ApiResponse, method: CanonicalMethod) -> Value {
 fn projected_tool_result(structured: Value) -> Value {
     let is_error = structured.get("error").is_some();
     let mut summary = structured.get("error").map(|error| {
-        format!(
-            "{}: {}",
-            error["code"].as_str().unwrap_or("INTERNAL"),
-            error["message"].as_str().unwrap_or("operation failed")
+        let guidance = match error["retryable"].as_bool() {
+            Some(false) => "; do not retry unchanged",
+            Some(true) => "; retry after changing state or waiting",
+            None => "",
+        };
+        (
+            format!(
+                "{}: {}",
+                error["code"].as_str().unwrap_or("INTERNAL"),
+                error["message"].as_str().unwrap_or("operation failed")
+            ),
+            guidance,
         )
     });
     // 2026-08-31: MCP text duplicated potentially large structured errors.
     // Keep a short compatibility summary and preserve the full error below.
-    if let Some(summary) = &mut summary
-        && summary.len() > MAX_TOOL_SUMMARY_BYTES
-    {
-        let mut end = MAX_TOOL_SUMMARY_BYTES - 3;
-        while !summary.is_char_boundary(end) {
-            end -= 1;
+    // 2026-09-21: The short text omitted retryability, so Agents repeated
+    // deterministic failures even though structured details rejected retries.
+    if let Some((summary, guidance)) = &mut summary {
+        let maximum = MAX_TOOL_SUMMARY_BYTES.saturating_sub(guidance.len());
+        if summary.len() > maximum {
+            let mut end = maximum.saturating_sub(3);
+            while !summary.is_char_boundary(end) {
+                end -= 1;
+            }
+            summary.truncate(end);
+            summary.push_str("...");
         }
-        summary.truncate(end);
-        summary.push_str("...");
+        summary.push_str(guidance);
     }
     // 2026-09-01: A blind trace paid a redundant `ok` text block on every
     // successful structured result. MCP permits an empty content array; keep
     // text only for errors that need a compatibility summary.
     let content = summary
-        .map(|text| json!({"type": "text", "text": text}))
+        .map(|(text, _)| json!({"type": "text", "text": text}))
         .into_iter()
         .collect::<Vec<_>>();
     // 2026-09-09: Serializing an owned Value into its envelope deep-copied
