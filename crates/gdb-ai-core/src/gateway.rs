@@ -14,7 +14,7 @@ use crate::{
     Error, ErrorCode, Result,
     artifact::ArtifactStore,
     config::Config,
-    domain::{Address, TargetOrigin, WriteLease, require_revision},
+    domain::{Address, SessionState, TargetOrigin, WriteLease, require_revision},
     metrics::Metrics,
     persistence::{ArtifactLimits, StorageLock, Store, prune_retained_sessions},
     policy::{Effect, Profile, effect_for_method},
@@ -135,6 +135,13 @@ pub struct Gateway {
 struct RateWindow {
     started: std::time::Instant,
     requests: u64,
+}
+
+fn has_sqlite_evidence_gap(state: &SessionState) -> bool {
+    state
+        .limitations
+        .iter()
+        .any(|reason| reason.starts_with("evidence gap: SQLite "))
 }
 
 fn effect_for_request(request: &ApiRequest) -> Effect {
@@ -1204,11 +1211,7 @@ impl Gateway {
     // that closes the actor must share the same post-shutdown retirement.
     async fn retire_session(&self, session_id: &str, entry: &Arc<SessionEntry>) -> Option<String> {
         let state = entry.handle.state();
-        if state
-            .limitations
-            .iter()
-            .any(|reason| reason.starts_with("evidence gap: SQLite "))
-        {
+        if has_sqlite_evidence_gap(&state) {
             // 2026-09-05: A failed final SQLite update made a closed GDB look
             // active again after retirement. Retain the actual final state
             // within the existing closed-history count, without holding a slot.
@@ -1250,6 +1253,27 @@ impl Gateway {
             tracing::warn!(%error, "closed session retention failed");
         }
         lease_warning
+    }
+
+    async fn retire_finished_sessions(&self) {
+        // 2026-09-21: A worker that exited on its own kept its capacity slot
+        // forever. Reclaim only after actor cleanup and durable evidence finish.
+        let finished = self
+            .sessions
+            .read()
+            .await
+            .values()
+            .filter(|entry| {
+                entry.handle.is_finished() && !entry.handle.with_state(has_sqlite_evidence_gap)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for entry in finished {
+            let session_id = entry.handle.id().0.clone();
+            if let Some(error) = self.retire_session(&session_id, &entry).await {
+                tracing::warn!(%error, %session_id, "finished session lease cleanup failed");
+            }
+        }
     }
 
     async fn retained_session_state(

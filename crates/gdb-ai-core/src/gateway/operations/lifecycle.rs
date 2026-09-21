@@ -69,11 +69,21 @@ impl Gateway {
                 "selecting a non-default profile requires an administrative caller",
             ));
         }
-        let slot = self
-            .session_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Error::new(ErrorCode::Conflict, "maximum sessions reached"))?;
+        let slot = match self.session_slots.clone().try_acquire_owned() {
+            Ok(slot) => slot,
+            Err(_) => {
+                self.retire_finished_sessions().await;
+                self.session_slots
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| {
+                        Error::new(
+                            ErrorCode::Conflict,
+                            "maximum sessions reached; list and close or force_abort an unused session before retrying",
+                        )
+                    })?
+            }
+        };
         let handle = SessionHandle::start(
             self.config.clone(),
             profile,

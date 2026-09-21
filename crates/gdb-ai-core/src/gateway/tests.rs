@@ -1347,14 +1347,74 @@ async fn concurrent_creates_respect_the_session_limit() {
         gateway.dispatch(create("second"), &caller)
     );
     assert_eq!(gateway.sessions.read().await.len(), 1);
-    assert_eq!(
-        [first, second]
-            .into_iter()
-            .filter_map(|response| response.error)
-            .map(|error| error.code)
-            .collect::<Vec<_>>(),
-        vec![ErrorCode::Conflict]
-    );
+    let error = [first, second]
+        .into_iter()
+        .find_map(|response| response.error)
+        .unwrap();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.message.contains("close or force_abort"));
+    gateway.shutdown().await;
+}
+
+#[tokio::test]
+async fn finished_workers_release_session_capacity() {
+    if !crate::test_support::require_commands(&["gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.server.max_sessions = 1;
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("finished-worker-test");
+    let create = |request_id: &str| ApiRequest {
+        api_version: API_VERSION.into(),
+        request_id: request_id.into(),
+        session_id: None,
+        method: CanonicalMethod::SessionCreate,
+        expected_revision: None,
+        idempotency_key: None,
+        parameters: json!({}),
+    };
+    let first = gateway.dispatch(create("first"), &caller).await;
+    let first_id = first.session_id.unwrap();
+    let entry = gateway.entry(&first_id).await.unwrap();
+    entry.handle.close().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !entry.handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let second = gateway.dispatch(create("second"), &caller).await;
+    assert!(second.error.is_none(), "{:?}", second.error);
+    assert!(gateway.entry(&first_id).await.is_err());
+    let retained = gateway
+        .dispatch(
+            ApiRequest {
+                api_version: API_VERSION.into(),
+                request_id: "retained".into(),
+                session_id: Some(first_id),
+                method: CanonicalMethod::SessionGet,
+                expected_revision: None,
+                idempotency_key: None,
+                parameters: json!({}),
+            },
+            &caller,
+        )
+        .await;
+    assert!(retained.error.is_none(), "{:?}", retained.error);
+    assert_eq!(retained.result.unwrap()["lifecycle"], "CLOSED");
     gateway.shutdown().await;
 }
 

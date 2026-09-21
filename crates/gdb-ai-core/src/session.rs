@@ -355,6 +355,12 @@ impl SessionHandle {
         self.state.borrow().clone()
     }
 
+    pub(crate) fn is_finished(&self) -> bool {
+        // 2026-09-21: FAILED state can precede backend and evidence cleanup.
+        // Closed worker channels prove the actor has completed that ownership.
+        self.requests.is_closed() && self.controls.is_closed()
+    }
+
     // 2026-08-30: Reading one coordination scalar used to clone growing
     // breakpoint, thread, module, and signal registries. Keep the watch borrow
     // inside a synchronous closure so callers cannot hold it across an await.
