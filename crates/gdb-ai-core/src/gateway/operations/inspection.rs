@@ -62,15 +62,17 @@ async fn resolve_disassembly_address(
     expression: &str,
 ) -> Result<u64> {
     validate_expression(expression)?;
-    let reply = safe_evaluate_command(
-        &entry.handle,
-        context_options(
+    // 2026-09-21: Reusing the mutation-safe evaluation transaction added four
+    // GDB setting turns to every disassembly address. Syntax validation and
+    // the session's call guard keep this address-only evaluation read-only.
+    let reply = entry
+        .handle
+        .command(context_options(
             MiCommand::new("-data-evaluate-expression")?.string(expression),
             parameters,
             state,
-        )?,
-    )
-    .await?;
+        )?)
+        .await?;
     let address = result_text(&reply.record, "value")
         .ok_or_else(|| Error::new(ErrorCode::GdbError, "address expression returned no value"))?;
     parse_address(&address)
