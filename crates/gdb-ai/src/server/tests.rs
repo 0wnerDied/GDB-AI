@@ -1170,9 +1170,11 @@ fn tool_results_compact_status_and_preserve_explicit_target_state() {
     );
     let listed = &listed["structuredContent"]["result"][0];
     assert_eq!(listed["session_id"], "sess_test");
-    assert_eq!(listed["revision"], 7);
-    assert_eq!(listed["breakpoints"].as_object().unwrap().len(), 64);
-    assert_eq!(listed["limitations"][0], "large repeated diagnostic");
+    assert_eq!(listed["pid"], 7);
+    assert_eq!(listed["frame"]["function"], "main");
+    assert!(listed.get("revision").is_none());
+    assert!(listed.get("breakpoints").is_none());
+    assert!(listed.get("limitations").is_none());
 }
 
 #[test]

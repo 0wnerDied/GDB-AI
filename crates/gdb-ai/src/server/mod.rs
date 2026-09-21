@@ -806,6 +806,19 @@ fn compact_tool_response(response: ApiResponse, method: CanonicalMethod) -> Valu
                 }),
         );
     }
+    // 2026-09-21: Agent session discovery serialized every retained registry,
+    // spilling the whole list before a caller could choose one session.
+    if method == CanonicalMethod::SessionList
+        && let Some(Value::Array(sessions)) = result.as_mut()
+    {
+        for listed in sessions {
+            if let Ok(session) = serde_json::from_value::<SessionState>(listed.clone()) {
+                let mut summary = session_coordination_state(&session);
+                summary["session_id"] = Value::String(session.session_id.0);
+                *listed = summary;
+            }
+        }
+    }
     // 2026-08-31: Remove only byte-identical nested command state here;
     // field-name removal also stripped explicitly requested target data.
     if let Some(Value::Object(result)) = result.as_mut() {
