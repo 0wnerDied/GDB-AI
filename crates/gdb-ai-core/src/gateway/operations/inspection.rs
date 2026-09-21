@@ -938,29 +938,29 @@ impl Gateway {
                 .failures
                 .insert("@snapshot.arguments".into(), serde_json::from_value(error)?);
         }
-        if matches!(profile, "standard" | "deep") {
-            if let Some(stack) = observation.results.get_mut("@snapshot.stack") {
-                // Keep the established profile layout without querying or
-                // presenting arguments a second time beside the same stack.
-                let arguments = stack["frames"]
-                    .as_array_mut()
-                    .unwrap()
-                    .iter_mut()
-                    .map(|frame| {
-                        let level = frame["level"].clone();
-                        let arguments = frame.as_object_mut().unwrap().remove("arguments");
-                        json!({"level": level, "arguments": arguments})
-                    })
-                    .collect::<Vec<_>>();
-                observation
-                    .availability
-                    .entry("@snapshot.arguments".into())
-                    .or_insert(FactAvailability::Captured);
-                observation.results.insert(
-                    "@snapshot.arguments".into(),
-                    json!({"arguments": arguments}),
-                );
-            }
+        if matches!(profile, "standard" | "deep")
+            && let Some(stack) = observation.results.get_mut("@snapshot.stack")
+        {
+            // Keep the established profile layout without querying or
+            // presenting arguments a second time beside the same stack.
+            let arguments = stack["frames"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .map(|frame| {
+                    let level = frame["level"].clone();
+                    let arguments = frame.as_object_mut().unwrap().remove("arguments");
+                    json!({"level": level, "arguments": arguments})
+                })
+                .collect::<Vec<_>>();
+            observation
+                .availability
+                .entry("@snapshot.arguments".into())
+                .or_insert(FactAvailability::Captured);
+            observation.results.insert(
+                "@snapshot.arguments".into(),
+                json!({"arguments": arguments}),
+            );
         }
         let mut snapshot = json!({
             "stop_id": observation.context.stop_id,

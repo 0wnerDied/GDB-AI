@@ -208,10 +208,10 @@ impl ObservationRequest {
         let Some(result) = result.as_object_mut() else {
             return;
         };
-        if self.kind == ObservationKind::Evaluate {
-            if let Some(expression) = self.parameters.get("expression") {
-                result.insert("expression".into(), expression.clone());
-            }
+        if self.kind == ObservationKind::Evaluate
+            && let Some(expression) = self.parameters.get("expression")
+        {
+            result.insert("expression".into(), expression.clone());
         }
 
         let selection: serde_json::Map<_, _> =

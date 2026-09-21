@@ -838,13 +838,12 @@ mod tests {
             .release_delivered_operation(&ticket.operation_id.0, &caller)
             .await;
 
-        let error = match gateway
+        let Err(error) = gateway
             .operations
             .entry(&ticket.operation_id.0, &caller)
             .await
-        {
-            Ok(_) => panic!("delivered operation remained in the registry"),
-            Err(error) => error,
+        else {
+            panic!("delivered operation remained in the registry");
         };
         assert_eq!(error.code, ErrorCode::NotFound);
     }
