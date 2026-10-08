@@ -1174,15 +1174,19 @@ impl Gateway {
             .transaction(setup, policy.command()?, Vec::new())
             .await
         {
-            // 2026-10-08: Missing main rejected valid stripped programs.
+            // 2026-10-08: Missing main rejected valid stripped programs;
+            // GDB versions also differ on "No symbol table [is] loaded".
             // Bootstrap with starti, then use the relocated ELF AT_ENTRY;
             // a loader's _start must not be mistaken for the program entry.
             Err(error)
                 if matches!(policy, StartPolicy::Main)
                     && error.code == ErrorCode::GdbError
-                    && (error.message == "Function \"main\" not defined."
-                        || error.message
-                            == "No symbol table is loaded.  Use the \"file\" command.") =>
+                    && matches!(
+                        error.message.as_str(),
+                        "Function \"main\" not defined."
+                            | "No symbol table loaded.  Use the \"file\" command."
+                            | "No symbol table is loaded.  Use the \"file\" command."
+                    ) =>
             {
                 (
                     entry
