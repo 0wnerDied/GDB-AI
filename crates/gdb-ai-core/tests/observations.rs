@@ -463,6 +463,35 @@ async fn shared_library_frames_keep_their_origin_without_source_symbols() {
             .await,
     );
     let session = stopped.session_id.as_deref().unwrap();
+    let stop_id = &stopped
+        .semantics
+        .as_ref()
+        .unwrap()
+        .context
+        .as_ref()
+        .unwrap()
+        .stop_id;
+    for frame_level in [0, 1] {
+        let locals = gateway
+            .dispatch_agent(
+                request(
+                    format!("frame-locals-{frame_level}"),
+                    Some(session),
+                    "inspection.get",
+                    None,
+                    json!({"view": "locals", "stop_id": stop_id, "frame_level": frame_level}),
+                ),
+                &caller,
+            )
+            .await;
+        if frame_level == 0 {
+            assert_eq!(locals.error.unwrap().code, ErrorCode::CapabilityMissing);
+        } else {
+            let locals = successful(locals);
+            assert!(locals.semantics.as_ref().unwrap().complete);
+            assert_eq!(locals.result.as_ref().unwrap()["variables"], json!([]));
+        }
+    }
     successful(
         gateway
             .dispatch_agent(

@@ -572,6 +572,13 @@ impl Gateway {
         entry: &SessionEntry,
         request: &ApiRequest,
     ) -> Result<FrameVariables> {
+        let context = entry
+            .handle
+            .with_state(|state| {
+                require_stopped_context(&request.parameters, state)?;
+                observation_context(&request.parameters, state)
+            })?
+            .expect("stopped frame variables have an observation context");
         // 2026-09-09: Standalone locals skipped aggregates and forced guarded
         // expression follow-ups. Share ordered typed reads with full stacks;
         // only missing values need a second query at the caller's fenced stop.
@@ -586,6 +593,35 @@ impl Gateway {
         let mut variables = normalized_frame_variables(&types.record, None)?;
         let mut evidence_seq = types.evidence_seq;
         let mut error = None;
+        if variables.is_empty() {
+            // 2026-10-08: MI returned [] for both empty scopes and missing
+            // debug information. Ask GDB at the original frame and stop before
+            // treating an empty variable list as a complete observation.
+            let mut scope = request.clone();
+            scope.parameters["stop_id"] = json!(context.stop_id);
+            if let Some(frame_id) = context.frame_id {
+                scope.parameters["frame_id"] = json!(frame_id);
+            }
+            let diagnostic = self
+                .inspection_command(
+                    entry,
+                    &scope,
+                    "-interpreter-exec",
+                    vec![("bare", "console".into()), ("string", "info locals".into())],
+                )
+                .await?;
+            if diagnostic.stream_records.iter().any(|record| {
+                matches!(record, MiRecord::ConsoleStream(bytes)
+                    if bytes == b"No symbol table info available.\n")
+            }) {
+                return Err(Error::new(
+                    ErrorCode::CapabilityMissing,
+                    "GDB has no symbol table information for this frame",
+                )
+                .with_details(json!({"evidence_seq": diagnostic.evidence_seq})));
+            }
+            evidence_seq = diagnostic.evidence_seq;
+        }
         if variables
             .iter()
             .any(|(_, variable)| variable["status"] == "not_collected")

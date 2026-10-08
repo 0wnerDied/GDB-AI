@@ -166,6 +166,195 @@ async fn rejects_missing_main_before_running_but_keeps_explicit_pending_breakpoi
 }
 
 #[tokio::test]
+async fn distinguishes_empty_locals_from_missing_frame_debug_information() {
+    if !support::require_commands(&["gdb", "cc", "strip", "objcopy"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("scope.c");
+    let executable = directory.path().join("scope");
+    let debug_file = directory.path().join("scope.debug");
+    std::fs::write(
+        &source,
+        "__attribute__((noinline)) void empty(void) { __builtin_trap(); }\n\
+         int main(void) { volatile int value = 7; empty(); return value != 7; }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0", "-fPIE", "-pie"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("objcopy")
+            .arg("--only-keep-debug")
+            .arg(&executable)
+            .arg(&debug_file)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("frame-debug-info/mcp:writer");
+    for (name, strip, separate_debug, available) in [
+        ("debug", None, false, true),
+        ("symbols-only", Some("--strip-debug"), false, false),
+        ("stripped", Some("--strip-all"), false, false),
+        ("separate-debug", Some("--strip-all"), true, true),
+    ] {
+        let binary = directory.path().join(name);
+        std::fs::copy(&executable, &binary).unwrap();
+        if let Some(option) = strip {
+            assert!(
+                Command::new("strip")
+                    .arg(option)
+                    .arg(&binary)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        if separate_debug {
+            assert!(
+                Command::new("objcopy")
+                    .arg(format!("--add-gnu-debuglink={}", debug_file.display()))
+                    .arg(&binary)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let launched = successful(gateway.dispatch_agent(
+            request(name, None, "target.launch", None, json!({
+                "program": binary, "stop": "none", "inspect": [
+                    {"view": "locals"}, {"view": "stack", "limit": 2, "include_locals": true},
+                    {"view": "registers", "roles": ["pc"]}
+                ]
+            })), &caller,
+        ).await);
+        let facts = launched.result.as_ref().unwrap();
+        assert_eq!(
+            launched.semantics.as_ref().unwrap().complete,
+            available,
+            "{name}"
+        );
+        assert!(facts["observations"]["registers"]["roles"]["pc"].is_string());
+        let frames = facts["observations"]["stack"]["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 2, "{name}");
+        if available {
+            assert_eq!(facts["observations"]["locals"]["variables"], json!([]));
+            assert_eq!(frames[0]["locals"], json!([]));
+            assert!(
+                frames[1]["locals"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|variable| variable["name"] == "value" && variable["value"] == "7")
+            );
+        } else {
+            assert_eq!(
+                facts["observation_failures"]["locals"]["code"],
+                "CAPABILITY_MISSING"
+            );
+            assert_eq!(facts["observation_availability"]["locals"], "unavailable");
+            assert!(
+                frames
+                    .iter()
+                    .all(|frame| frame["variables_error"]["code"] == "CAPABILITY_MISSING")
+            );
+        }
+        let session = launched.session_id.as_deref().unwrap();
+        let stop_id = &launched
+            .semantics
+            .as_ref()
+            .unwrap()
+            .context
+            .as_ref()
+            .unwrap()
+            .stop_id;
+        let dispatch = |id: &str, method: &str, parameters| {
+            gateway.dispatch_agent(
+                request(id, Some(session), method, None, parameters),
+                &caller,
+            )
+        };
+        let before = gateway.metrics();
+        let locals = dispatch(
+            "caller-locals",
+            "inspection.get",
+            json!({"view": "locals", "frame_level": 1, "stop_id": stop_id}),
+        )
+        .await;
+        if available {
+            let locals = successful(locals);
+            assert!(
+                locals.result.as_ref().unwrap()["variables"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|variable| variable["name"] == "value" && variable["value"] == "7")
+            );
+            let commands = |metrics: &str| {
+                metrics
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("gdbai_commands_total ")
+                            .map(|value| value.parse::<u64>().unwrap())
+                    })
+                    .unwrap()
+            };
+            assert_eq!(
+                commands(&gateway.metrics()) - commands(&before),
+                1,
+                "nonempty locals must stay one MI read"
+            );
+        } else {
+            assert_eq!(locals.error.unwrap().code, ErrorCode::CapabilityMissing);
+            assert!(!locals.evidence.is_empty());
+        }
+        let snapshot = successful(
+            dispatch(
+                "snapshot",
+                "inspection.snapshot",
+                json!({"profile": "brief", "stop_id": stop_id}),
+            )
+            .await,
+        );
+        assert_eq!(
+            snapshot.semantics.as_ref().unwrap().complete,
+            available,
+            "{name}"
+        );
+        if !available {
+            assert_eq!(
+                snapshot.result.as_ref().unwrap()["failures"]["locals"]["code"],
+                "CAPABILITY_MISSING"
+            );
+        }
+        successful(dispatch("close", "session.close", json!({})).await);
+    }
+}
+
+#[tokio::test]
 async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
     if !support::require_commands(&["gdb", "cc", "nm", "readelf", "strip"]) {
         return;
