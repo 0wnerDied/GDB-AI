@@ -409,6 +409,8 @@ pub(super) fn current_backend_thread(
         .ok_or_else(|| Error::new(ErrorCode::StaleContext, "thread handle is not current"))
 }
 
+// 2026-10-08: Structured console reads inherited GDB's previous selection.
+// Bind them to the same stop focus and top-frame defaults as MI reads.
 pub(super) fn command_uses_stop_focus(command: &str) -> bool {
     matches!(
         command,
@@ -423,6 +425,7 @@ pub(super) fn command_uses_stop_focus(command: &str) -> bool {
             | "-stack-list-variables"
             | "-stack-list-arguments"
             | "-data-evaluate-expression"
+            | "-interpreter-exec"
             | "-data-list-register-values"
             | "-var-create"
     )
@@ -434,6 +437,7 @@ pub(super) fn command_uses_top_frame(command: &str) -> bool {
         "-stack-info-frame"
             | "-stack-list-variables"
             | "-data-evaluate-expression"
+            | "-interpreter-exec"
             | "-data-list-register-values"
             | "-var-create"
     )
@@ -657,6 +661,28 @@ mod tests {
             focused.encoded(2),
             b"2-data-evaluate-expression --thread 2 --frame 0 \"$pc\"\n"
         );
+        for (selection, expected) in [
+            (
+                json!({"stop_id": stop}),
+                b"3-interpreter-exec --thread 2 --frame 0 console \"info locals\"\n".as_slice(),
+            ),
+            (
+                json!({"stop_id": stop, "frame_level": 3}),
+                b"3-interpreter-exec --thread 2 --frame 3 console \"info locals\"\n".as_slice(),
+            ),
+        ] {
+            let console = context_options(
+                MiCommand::new("-interpreter-exec")
+                    .unwrap()
+                    .bare("console")
+                    .unwrap()
+                    .string("info locals"),
+                &selection,
+                state,
+            )
+            .unwrap();
+            assert_eq!(console.encoded(3), expected);
+        }
         let selection = json!({"stop_id": stop, "frame_id": frame});
         let context = observation_context(&selection, state).unwrap().unwrap();
         assert_eq!(context.thread_id.as_ref(), Some(stopped_thread));
