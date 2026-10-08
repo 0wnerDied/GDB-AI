@@ -425,6 +425,11 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
         directory.path().to_owned(),
         loader.parent().unwrap().to_owned(),
     ];
+    // 2026-10-08: The version matrix qualified one GDB but this test started
+    // an absent system binary. Use the same debugger as its prerequisite check.
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller::local("stripped-test");
     let created = gateway
