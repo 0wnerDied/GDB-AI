@@ -1548,6 +1548,206 @@ async fn stale_snapshot_commit_leaves_no_snapshot() {
 }
 
 #[tokio::test]
+async fn module_rebind_stop_waits_for_breakpoint_identity() {
+    use std::io::Write;
+
+    use crate::domain::{Consistency, SnapshotStatus, StopReason, TargetOrigin};
+
+    for cleanup_fails in [false, true] {
+        let directory = tempdir().unwrap();
+        let release_path = directory.path().join("release");
+        nix::unistd::mkfifo(
+            &release_path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        let mut release = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&release_path)
+            .unwrap();
+        let backend_path = directory.path().join("gdb");
+        std::fs::write(
+            &backend_path,
+            format!(
+                r#"#!/bin/sh
+printf '(gdb) \n'
+while IFS= read -r line; do
+    token=${{line%%-*}}
+    case "$line" in
+        *-break-insert*)
+            printf '*stopped,reason="breakpoint-hit",bkptno="2",thread-id="1",thread-group="i1"\n'
+            IFS= read -r release < '{}'
+            printf '%s^done,bkpt={{number="2"}}\n' "$token"
+            ;;
+        *-break-delete*)
+            printf '~"cleanup pending\\n"\n'
+            IFS= read -r release < '{}'
+            if [ "$release" = error ]; then
+                printf '%s^error,msg="cleanup refused"\n' "$token"
+            else
+                printf '%s^done\n' "$token"
+            fi
+            ;;
+        *-gdb-exit*) exit 0 ;;
+        *) printf '%s^done\n' "$token" ;;
+    esac
+done
+"#,
+                release_path.display(),
+                release_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&backend_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        config.gdb.path = backend_path;
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let session = SessionHandle::start(
+            Arc::new(config),
+            Profile::DebugControl,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+        for event in [
+            DomainEvent::TargetConfigured {
+                origin: TargetOrigin::Local,
+            },
+            DomainEvent::InferiorAdded {
+                backend_id: "i1".into(),
+                pid: Some(u64::from(std::process::id())),
+            },
+            DomainEvent::BreakpointCreated {
+                backend_number: "1".into(),
+                enabled: true,
+                pending: true,
+            },
+        ] {
+            session.record_event(event).await.unwrap();
+        }
+        let breakpoint_id = session.state().breakpoints["1"].id.clone();
+        let mut events = session.subscribe();
+        session
+            .register_pending_module_breakpoint(PendingModuleBreakpoint {
+                id: breakpoint_id.clone(),
+                backend_number: "1".into(),
+                module: std::env::current_exe().unwrap().display().to_string(),
+                offset: 0,
+                enabled: true,
+                command: MiCommand::new("-break-insert").unwrap(),
+            })
+            .await
+            .unwrap();
+        let stopped_event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped_event.event,
+            DomainEvent::TargetStopped { .. }
+        ));
+        // Admission uses the control lane while the ordinary MI result is held;
+        // its acknowledgment also ensures stop publication has finished.
+        session.record_api(serde_json::json!({})).await.unwrap();
+        let pending = session.state();
+        release.write_all(b"release\n").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                assert!(!matches!(&event.event, DomainEvent::SnapshotReady { .. }));
+                if matches!(
+                    event.event,
+                    DomainEvent::Output { ref bytes, .. } if bytes == b"cleanup pending\n"
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        session.record_api(serde_json::json!({})).await.unwrap();
+        let cleanup = session.state();
+        release
+            .write_all(if cleanup_fails {
+                b"error\n"
+            } else {
+                b"release\n"
+            })
+            .unwrap();
+        session.flush_journal().await.unwrap();
+        let completed = if cleanup_fails {
+            session.state()
+        } else {
+            session
+                .wait(WaitUntil::Snapshot, Duration::from_secs(5))
+                .await
+                .unwrap()
+        };
+        let snapshot_id = session.snapshots.read().unwrap().back().unwrap().0.clone();
+        let snapshot = session.snapshot(snapshot_id).await.unwrap();
+        let remaining_events = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        session.close().await.unwrap();
+
+        assert_eq!(
+            completed.snapshot.as_ref().unwrap().status,
+            if cleanup_fails {
+                SnapshotStatus::Failed
+            } else {
+                SnapshotStatus::Ready
+            }
+        );
+        if cleanup_fails {
+            assert_eq!(completed.consistency, Consistency::ManagedDirty);
+            assert!(!wait_satisfied(&completed, WaitUntil::Snapshot, None));
+            assert!(
+                !remaining_events
+                    .iter()
+                    .any(|event| matches!(&event.event, DomainEvent::SnapshotReady { .. }))
+            );
+            assert!(remaining_events.iter().any(|event| matches!(
+                &event.event,
+                DomainEvent::SnapshotFailed { stop_id } if Some(stop_id) == completed.stop_id.as_ref()
+            )));
+            assert!(remaining_events.iter().any(|event| matches!(
+                &event.event,
+                DomainEvent::ConsistencyDirty { reason } if reason.contains("cleanup refused")
+            )));
+        }
+        assert_eq!(pending.snapshot.unwrap().status, SnapshotStatus::Building);
+        assert_eq!(cleanup.snapshot.unwrap().status, SnapshotStatus::Building);
+        assert_eq!(cleanup.breakpoints["2"].id, breakpoint_id);
+        assert_eq!(pending.inferiors["i1"].status, InferiorStatus::Stopped);
+        assert!(matches!(
+            pending.stop_reason_detail,
+            Some(StopReason::Breakpoint { backend_number: Some(ref number), .. }) if number == "2"
+        ));
+        assert_eq!(completed.stop_id, pending.stop_id);
+        assert_eq!(completed.breakpoints["2"].id, breakpoint_id);
+        assert!(!completed.breakpoints.contains_key("1"));
+        assert_eq!(snapshot["stop_id"], pending.stop_id.as_ref().unwrap().0);
+        assert_eq!(
+            snapshot["evidence"][0]["uri"],
+            format!(
+                "gdbai://session/{}/event/{}",
+                session.id(),
+                stopped_event.event_seq
+            )
+        );
+    }
+}
+
+#[tokio::test]
 async fn live_snapshot_cache_evicts_in_fifo_order() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;

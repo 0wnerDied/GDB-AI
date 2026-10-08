@@ -229,6 +229,8 @@ pub(super) struct SessionWorker {
     pending_module_breakpoints: BTreeMap<String, PendingModuleBreakpoint>,
     active_resume_operation: Option<OperationId>,
     module_rebind_needed: bool,
+    replacing_module_breakpoint: bool,
+    deferred_snapshot_ready: Option<(StopId, String, bool)>,
     tracking_memory_limit: usize,
     snapshot_limit: usize,
     artifact_limit: usize,
@@ -385,6 +387,8 @@ impl SessionWorker {
             pending_module_breakpoints: BTreeMap::new(),
             active_resume_operation: None,
             module_rebind_needed: false,
+            replacing_module_breakpoint: false,
+            deferred_snapshot_ready: None,
             tracking_memory_limit: config.limits.memory_read_bytes,
             snapshot_limit: config.storage.max_snapshots_per_session,
             artifact_limit: config.limits.session_artifact_bytes,
@@ -1533,43 +1537,71 @@ impl SessionWorker {
         address: Option<String>,
         deadline: tokio::time::Instant,
     ) -> Result<()> {
-        let old_backend_number = breakpoint.backend_number.clone();
-        let reply = self.execute_until(command, deadline).await?;
-        let new_backend_number = breakpoint_number(&reply.record)?;
-        if !enabled {
-            self.execute_until(
-                MiCommand::new("-break-disable")?.bare(new_backend_number.clone())?,
-                deadline,
-            )
-            .await?;
-        }
-        self.apply_event(DomainEvent::BreakpointRebound {
-            id: breakpoint.id.clone(),
-            old_backend_number: old_backend_number.clone(),
-            new_backend_number: new_backend_number.clone(),
-            enabled,
-            address,
-        })?;
-        self.pending_module_breakpoints.remove(&old_backend_number);
-        breakpoint.backend_number.clone_from(&new_backend_number);
-        breakpoint.enabled = enabled;
-        self.pending_module_breakpoints
-            .insert(new_backend_number.clone(), breakpoint);
-        if let Err(error) = self
-            .execute_until(
-                MiCommand::new("-break-delete")?.bare(old_backend_number.clone())?,
-                deadline,
-            )
-            .await
-        {
-            self.apply_event(DomainEvent::ConsistencyDirty {
-                reason: format!(
-                    "module breakpoint moved to {new_backend_number}, but old breakpoint {old_backend_number} could not be deleted: {error}"
-                ),
+        // 2026-10-08: A hit can precede the insertion result, publishing a
+        // ready snapshot while its stable breakpoint ID still names the old
+        // number. Keep stop evidence and controls immediate; only successful
+        // replacement and cleanup may certify the snapshot as ready.
+        self.replacing_module_breakpoint = true;
+        let result = async {
+            let old_backend_number = breakpoint.backend_number.clone();
+            let reply = self.execute_until(command, deadline).await?;
+            let new_backend_number = breakpoint_number(&reply.record)?;
+            if !enabled {
+                self.execute_until(
+                    MiCommand::new("-break-disable")?.bare(new_backend_number.clone())?,
+                    deadline,
+                )
+                .await?;
+            }
+            self.apply_event(DomainEvent::BreakpointRebound {
+                id: breakpoint.id.clone(),
+                old_backend_number: old_backend_number.clone(),
+                new_backend_number: new_backend_number.clone(),
+                enabled,
+                address,
             })?;
-            return Err(error);
+            self.pending_module_breakpoints.remove(&old_backend_number);
+            breakpoint.backend_number.clone_from(&new_backend_number);
+            breakpoint.enabled = enabled;
+            self.pending_module_breakpoints
+                .insert(new_backend_number.clone(), breakpoint);
+            if let Err(error) = self
+                .execute_until(
+                    MiCommand::new("-break-delete")?.bare(old_backend_number.clone())?,
+                    deadline,
+                )
+                .await
+            {
+                self.apply_event(DomainEvent::ConsistencyDirty {
+                    reason: format!(
+                        "module breakpoint moved to {new_backend_number}, but old breakpoint {old_backend_number} could not be deleted: {error}"
+                    ),
+                })?;
+                return Err(error);
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+        self.replacing_module_breakpoint = false;
+        let published = if let Some((stop_id, snapshot_id, partial)) =
+            self.deferred_snapshot_ready.take()
+            && !self.fatal
+            && self.state.borrow().stop_id.as_ref() == Some(&stop_id)
+        {
+            let event = if result.is_ok() {
+                DomainEvent::SnapshotReady {
+                    stop_id,
+                    snapshot_id: Some(snapshot_id),
+                    partial,
+                }
+            } else {
+                DomainEvent::SnapshotFailed { stop_id }
+            };
+            self.apply_event(event)
+        } else {
+            Ok(())
+        };
+        result.and(published)
     }
 
     fn require_known_outcome(&self, command: &MiCommand) -> Result<()> {
@@ -2373,11 +2405,15 @@ impl SessionWorker {
                 }
             };
             let snapshot_id = observation_id(&snapshot)?.to_owned();
-            self.apply_event(DomainEvent::SnapshotReady {
-                stop_id,
-                snapshot_id: Some(snapshot_id),
-                partial: frame.is_none(),
-            })?;
+            if self.replacing_module_breakpoint {
+                self.deferred_snapshot_ready = Some((stop_id, snapshot_id, frame.is_none()));
+            } else {
+                self.apply_event(DomainEvent::SnapshotReady {
+                    stop_id,
+                    snapshot_id: Some(snapshot_id),
+                    partial: frame.is_none(),
+                })?;
+            }
             self.metrics.snapshot(
                 snapshot_started.elapsed().as_micros() as u64,
                 frame.is_none(),
