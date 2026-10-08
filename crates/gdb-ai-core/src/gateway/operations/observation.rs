@@ -5,7 +5,7 @@ use serde_json::Value;
 use super::{encoding::parse_address, evaluation::validate_expression};
 use crate::{
     Error, ErrorCode, Result,
-    domain::StopId,
+    domain::{Address, StopId},
     protocol::{ApiRequest, CanonicalMethod},
 };
 
@@ -161,13 +161,22 @@ impl ObservationRequest {
                     validate_expression(expression)?;
                 }
                 if let Some(range) = parameters.get("range") {
-                    let start = parse_address(range["start"].as_str().unwrap())?;
-                    let end = parse_address(range["end"].as_str().unwrap())?;
-                    if end <= start || end - start > 64 * 1024 {
-                        return Err(Error::new(
-                            ErrorCode::InvalidArgument,
-                            "disassembly range must be positive and at most 64 KiB",
-                        ));
+                    // 2026-10-08: Compound reads rejected symbolic ranges
+                    // accepted by standalone disassembly. Validate syntax now;
+                    // resolved ranges retain their capture-time byte limit.
+                    let start = range["start"].as_str().unwrap();
+                    let end = range["end"].as_str().unwrap();
+                    validate_expression(start)?;
+                    validate_expression(end)?;
+                    if let (Ok(start), Ok(end)) = (Address::parse(start), Address::parse(end)) {
+                        let start = parse_address(start.as_str())?;
+                        let end = parse_address(end.as_str())?;
+                        if end <= start || end - start > 64 * 1024 {
+                            return Err(Error::new(
+                                ErrorCode::InvalidArgument,
+                                "disassembly range must be positive and at most 64 KiB",
+                            ));
+                        }
                     }
                 }
             }
@@ -396,6 +405,8 @@ mod tests {
             json!({"view": "evaluate", "expression": "value"}),
             json!({"view": "memory", "address_expression": "&value", "length": 4}),
             json!({"view": "disassembly", "around": {"expression": "$pc"}}),
+            json!({"view": "disassembly", "range": {"start": "marker", "end": "marker+0x40"}}),
+            json!({"view": "disassembly", "range": {"start": "0x1000+0x10", "end": "0x1000+0x20"}}),
         ] {
             ObservationRequest::parse(&request, &stop_id, &mut 0, &mut 0, 16, &Value::Null)
                 .unwrap();
@@ -423,6 +434,35 @@ mod tests {
         .unwrap();
         assert_eq!(replaced.parameters["thread_id"], "thread_b");
         assert!(replaced.parameters.get("frame_level").is_none());
+    }
+
+    #[test]
+    fn rejects_unsafe_and_oversized_disassembly_ranges_before_capture() {
+        for (range, code) in [
+            (
+                json!({"start": "marker()", "end": "marker+0x40"}),
+                ErrorCode::PolicyDenied,
+            ),
+            (
+                json!({"start": "0x1000", "end": "0x11001"}),
+                ErrorCode::InvalidArgument,
+            ),
+            (
+                json!({"start": "0x1000", "end": "0x1000"}),
+                ErrorCode::InvalidArgument,
+            ),
+        ] {
+            let error = ObservationRequest::parse(
+                &json!({"view": "disassembly", "range": range}),
+                &StopId("s1".into()),
+                &mut 0,
+                &mut 0,
+                16,
+                &Value::Null,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, code);
+        }
     }
 
     #[test]

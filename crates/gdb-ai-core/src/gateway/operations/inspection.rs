@@ -61,6 +61,11 @@ async fn resolve_disassembly_address(
     parameters: &Value,
     expression: &str,
 ) -> Result<u64> {
+    // 2026-10-08: Literal ranges incurred two unnecessary MI evaluations.
+    // Only complete address literals bypass GDB expression resolution.
+    if let Ok(address) = crate::domain::Address::parse(expression) {
+        return parse_address(address.as_str());
+    }
     validate_expression(expression)?;
     // 2026-09-21: Reusing the mutation-safe evaluation transaction added four
     // GDB setting turns to every disassembly address. Syntax validation and

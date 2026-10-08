@@ -1085,6 +1085,7 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
                         "wait": {"until": "snapshot", "timeout_ms": 5000},
                         "inspect": [
                             {"view": "stack", "limit": 1},
+                            {"view": "disassembly", "range": {"start": "main", "end": "main+0x20"}, "include_source": false},
                             {"name": "missing", "view": "evaluate", "expression": "missing_symbol"}
                         ]
                     }),
@@ -1115,6 +1116,32 @@ async fn unifies_bounded_turn_batch_and_snapshot_observations() {
     );
     assert!(launch_result["command"]["record"].is_object());
     assert!(launch_result["capabilities"].is_object());
+    let disassembly = &launch_result["observations"]["disassembly"];
+    assert!(!disassembly["instructions"].as_array().unwrap().is_empty());
+    let before = metric_value(&gateway.metrics(), "gdbai_commands_total");
+    let literal = successful(
+        gateway
+            .dispatch_agent(
+                request(
+                    "literal-disassembly",
+                    Some(&session_id),
+                    "disassembly.read",
+                    None,
+                    json!({"stop_id": first_stop, "range": disassembly["range"], "include_source": false}),
+                ),
+                &caller,
+            )
+            .await,
+    );
+    assert_eq!(
+        literal.result.as_ref().unwrap()["instructions"],
+        disassembly["instructions"]
+    );
+    assert_eq!(
+        metric_value(&gateway.metrics(), "gdbai_commands_total") - before,
+        2,
+        "literal ranges need only disassembly and architecture metadata"
+    );
     let tracked = successful(
         gateway
             .dispatch(
