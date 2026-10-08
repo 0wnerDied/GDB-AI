@@ -531,6 +531,35 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
             &caller,
         )
         .await;
+    // 2026-10-08: Failed rebinds lost their MI ordering when the temporary
+    // session was removed. Retain debugger evidence from this self-made target.
+    if probed.error.is_some() {
+        gateway.shutdown().await;
+        let journal = directory
+            .path()
+            .join("sessions")
+            .join(&session_id)
+            .join("journal.jsonl");
+        if let Ok(contents) = std::fs::read_to_string(journal) {
+            use base64::{Engine, engine::general_purpose::STANDARD};
+            use gdb_ai_core::journal::JournalEntry;
+
+            for entry in contents
+                .lines()
+                .filter_map(|line| serde_json::from_str::<JournalEntry>(line).ok())
+                .filter(|entry| matches!(entry.kind.as_str(), "mi.input" | "mi.output"))
+            {
+                let raw = entry.data["raw_base64"].as_str().unwrap();
+                let bytes = STANDARD.decode(raw).unwrap();
+                eprintln!(
+                    "{} {} {}",
+                    entry.seq,
+                    entry.kind,
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+        }
+    }
     assert!(probed.error.is_none(), "{:?}", probed.error);
     assert_eq!(probed.result.as_ref().unwrap()["capture_count"], 1);
     assert!(
