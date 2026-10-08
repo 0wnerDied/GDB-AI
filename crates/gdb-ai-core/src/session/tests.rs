@@ -1748,6 +1748,162 @@ done
 }
 
 #[tokio::test]
+async fn failed_module_insertion_cleans_created_breakpoint_before_retry() {
+    use crate::domain::{Consistency, StopReason, TargetOrigin};
+
+    for error_names_existing in [false, true] {
+        let directory = tempdir().unwrap();
+        let backend_path = directory.path().join("gdb");
+        let commands_path = directory.path().join("commands");
+        std::fs::write(
+            &backend_path,
+            format!(
+                r#"#!/bin/sh
+inserts=0
+orphan={}
+printf '(gdb) \n'
+while IFS= read -r line; do
+    token=${{line%%-*}}
+    case "$line" in
+        *-break-insert*|*-break-delete*) printf '%s\n' "$line" >> '{}' ;;
+    esac
+    case "$line" in
+        *-break-insert*)
+            inserts=$((inserts + 1))
+            if [ "$inserts" = 1 ]; then
+                printf '=library-loaded,id="retry",host-name="retry",symbols-loaded="0"\n'
+                printf '%s^error,msg="Warning:\\nCannot insert breakpoint 2.\\nCannot access memory at address 0x1234\\n"\n' "$token"
+            else
+                printf '%s^done,bkpt={{number="3"}}\n' "$token"
+            fi
+            ;;
+        *-break-delete\ 2)
+            orphan=0
+            printf '%s^done\n' "$token"
+            ;;
+        *-break-delete\ 1)
+            printf '%s^done\n' "$token"
+            if [ "$orphan" = 1 ]; then hit=2; else hit=3; fi
+            printf '*stopped,reason="breakpoint-hit",bkptno="%s",thread-id="1",thread-group="i1"\n' "$hit"
+            ;;
+        *-gdb-exit*) exit 0 ;;
+        *) printf '%s^done\n' "$token" ;;
+    esac
+done
+"#,
+                usize::from(!error_names_existing),
+                commands_path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&backend_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config = Config {
+            artifacts: ArtifactConfig {
+                path: directory.path().join("artifacts"),
+            },
+            persistence: PersistenceConfig {
+                sqlite: directory.path().join("state.sqlite"),
+                sessions: directory.path().join("sessions"),
+            },
+            ..Config::default()
+        };
+        config.gdb.path = backend_path;
+        let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+        let session = SessionHandle::start(
+            Arc::new(config),
+            Profile::DebugControl,
+            store,
+            Arc::new(Metrics::default()),
+        )
+        .await
+        .unwrap();
+        for event in [
+            DomainEvent::TargetConfigured {
+                origin: TargetOrigin::Local,
+            },
+            DomainEvent::InferiorAdded {
+                backend_id: "i1".into(),
+                pid: Some(u64::from(std::process::id())),
+            },
+            DomainEvent::BreakpointCreated {
+                backend_number: "1".into(),
+                enabled: true,
+                pending: true,
+            },
+        ] {
+            session.record_event(event).await.unwrap();
+        }
+        if error_names_existing {
+            session
+                .record_event(DomainEvent::BreakpointCreated {
+                    backend_number: "2".into(),
+                    enabled: true,
+                    pending: false,
+                })
+                .await
+                .unwrap();
+        }
+        let before = session.state();
+        let breakpoint_id = before.breakpoints["1"].id.clone();
+        session
+            .register_pending_module_breakpoint(PendingModuleBreakpoint {
+                id: breakpoint_id.clone(),
+                backend_number: "1".into(),
+                module: std::env::current_exe().unwrap().display().to_string(),
+                offset: 0,
+                enabled: true,
+                command: MiCommand::new("-break-insert").unwrap(),
+            })
+            .await
+            .unwrap();
+        let stopped = session
+            .wait(WaitUntil::Snapshot, Duration::from_secs(5))
+            .await
+            .unwrap();
+        session.close().await.unwrap();
+        assert!(
+            matches!(
+                stopped.stop_reason_detail,
+                Some(StopReason::Breakpoint { backend_number: Some(ref number), .. }) if number == "3"
+            ),
+            "{:?}",
+            stopped.stop_reason_detail
+        );
+        assert_eq!(stopped.breakpoints["3"].id, breakpoint_id);
+        assert_eq!(stopped.consistency, Consistency::Clean);
+        assert!(!stopped.breakpoints.contains_key("1"));
+        if error_names_existing {
+            assert_eq!(stopped.breakpoints["2"].id, before.breakpoints["2"].id);
+        } else {
+            assert!(!stopped.breakpoints.contains_key("2"));
+        }
+        let log = std::fs::read_to_string(commands_path).unwrap();
+        let commands = log
+            .lines()
+            .map(|line| line.trim_start_matches(|character: char| character.is_ascii_digit()))
+            .map(|command| {
+                if command.starts_with("-break-insert") {
+                    "-break-insert"
+                } else {
+                    command
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected = if error_names_existing {
+            vec!["-break-insert", "-break-insert", "-break-delete 1"]
+        } else {
+            vec![
+                "-break-insert",
+                "-break-delete 2",
+                "-break-insert",
+                "-break-delete 1",
+            ]
+        };
+        assert_eq!(commands, expected);
+    }
+}
+
+#[tokio::test]
 async fn live_snapshot_cache_evicts_in_fifo_order() {
     if !crate::test_support::require_commands(&["gdb"]) {
         return;

@@ -26,8 +26,8 @@ use crate::{
     },
     config::{Config, OutputEvidenceMode},
     domain::{
-        DomainEvent, InferiorStatus, OperationId, OperationRecord, OutputSource, SessionState,
-        StopId, TrackingDefinition, ValueBinding,
+        Consistency, DomainEvent, InferiorStatus, OperationId, OperationRecord, OutputSource,
+        SessionState, StopId, TrackingDefinition, ValueBinding,
     },
     journal::Journal,
     metrics::Metrics,
@@ -1463,6 +1463,9 @@ impl SessionWorker {
     }
 
     async fn rebind_pending_module_breakpoints(&mut self) -> Result<()> {
+        if self.state.borrow().reconciliation_required {
+            return Ok(());
+        }
         let pending = self
             .pending_module_breakpoints
             .values()
@@ -1747,6 +1750,69 @@ impl SessionWorker {
     }
 
     async fn execute_until(
+        &mut self,
+        command: MiCommand,
+        deadline: tokio::time::Instant,
+    ) -> Result<CommandReply> {
+        // 2026-10-08: GDB 9/10 can retain a newly numbered breakpoint after
+        // an insertion error. Roll back only a reported new number from a
+        // clean registry before retrying; existing breakpoints keep ownership.
+        let before = if command.name == "-break-insert" {
+            let state = self.state.borrow();
+            (state.consistency == Consistency::Clean && !state.reconciliation_required)
+                .then(|| state.breakpoints.keys().cloned().collect::<BTreeSet<_>>())
+        } else {
+            None
+        };
+        let reply = self.execute_until_inner(command, deadline).await;
+        if let Err(error) = &reply
+            && error.code == ErrorCode::GdbError
+            && let Some(before) = before
+            && let Some(number) = error.message.lines().find_map(|line| {
+                line.strip_prefix("Cannot insert breakpoint ")?
+                    .strip_suffix('.')?
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|number| *number > 0)
+                    .map(|number| number.to_string())
+            })
+            && !before.contains(&number)
+            && !self.fatal
+        {
+            let cleanup = match self.require_known_outcome_name("-break-delete") {
+                Ok(()) => {
+                    self.execute_until_inner(
+                        MiCommand::new("-break-delete")?.bare(number.clone())?,
+                        deadline,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            let removed = cleanup.is_ok()
+                || cleanup.as_ref().err().is_some_and(|error| {
+                    error.code == ErrorCode::GdbError
+                        && error.message == format!("No breakpoint number {number}.")
+                });
+            if removed {
+                if self.state.borrow().breakpoints.contains_key(&number) {
+                    self.apply_event(DomainEvent::BreakpointDeleted {
+                        backend_number: number,
+                    })?;
+                }
+            } else if let Err(error) = cleanup {
+                self.module_rebind_needed = false;
+                if !self.fatal {
+                    self.apply_event(DomainEvent::ConsistencyDirty {
+                        reason: format!("failed breakpoint insertion cleanup: {error}"),
+                    })?;
+                }
+            }
+        }
+        reply
+    }
+
+    async fn execute_until_inner(
         &mut self,
         command: MiCommand,
         deadline: tokio::time::Instant,
