@@ -86,3 +86,20 @@ outside the timed interval.
 These cases verify fixed evidence and measurement mechanics. They do not prove
 deadlock, complete diagnostic equivalence, or Agent diagnosis quality. Use the
 study design above for claims about Agent outcomes.
+
+## Storage checkpoint cost
+
+The storage microbenchmark writes 128 checkpoints, each containing sixteen
+operation records and session metadata, to a temporary SQLite database:
+
+```sh
+cargo test --locked --release -p gdb-ai-core --lib \
+  persistence::tests::benchmark_sqlite_checkpoint_writes \
+  -- --ignored --exact --nocapture
+```
+
+Its elapsed time covers the checkpoint writes. On Linux, `strace -f -c -e
+fsync,fdatasync` around that command also counts synchronization calls,
+including database initialization and teardown. Use the same compiler,
+filesystem, and retention settings for comparisons. This measures storage
+cost separately from GDB startup, target execution, and Agent reasoning.

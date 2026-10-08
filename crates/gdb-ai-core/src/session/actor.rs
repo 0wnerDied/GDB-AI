@@ -2504,33 +2504,36 @@ impl SessionWorker {
     }
 
     fn checkpoint(&mut self, closing: bool) -> Result<()> {
-        for id in std::mem::take(&mut self.dirty_operations) {
-            if self.store_failed {
-                break;
-            }
-            if let Some(operation) = self.operations.get(&id) {
-                let stored = self.store.upsert_operation(operation);
-                self.store_result(stored)?;
-            }
+        let mut dirty_operations = std::mem::take(&mut self.dirty_operations);
+        if self.store_failed {
+            dirty_operations.clear();
         }
-        // 2026-09-05: Rust 1.88 rejects the redundant negation. Keep the
-        // close-time retry after failed storage even without a new revision.
-        if !(self.state_dirty || closing && self.store_failed) {
+        // 2026-09-05: Retry final session metadata after failed storage even
+        // without a new revision; failed operation history stays suspended.
+        let checkpoint_state = self.state_dirty || closing && self.store_failed;
+        if !checkpoint_state && dirty_operations.is_empty() {
             return Ok(());
         }
         // 2026-09-05: Every revision copied the full state to both JSONL and
         // the shared SQLite connection. Performance mode coalesces those
         // copies at flush/close boundaries; live state remains actor-owned.
-        self.state_dirty = false;
-        let appended = {
-            let state = self.state.borrow();
-            self.journal.append_state(state.revision, &*state)
-        };
-        self.journal_result(appended)?;
+        if checkpoint_state {
+            self.state_dirty = false;
+            let appended = {
+                let state = self.state.borrow();
+                self.journal.append_state(state.revision, &*state)
+            };
+            self.journal_result(appended)?;
+        }
         if !self.store_failed || closing {
             let stored = {
                 let state = self.state.borrow();
-                self.store.upsert_session(&state, self.profile)
+                self.store.upsert_checkpoint(
+                    checkpoint_state.then_some((&*state, self.profile)),
+                    dirty_operations
+                        .iter()
+                        .filter_map(|id| self.operations.get(id)),
+                )
             };
             self.store_result(stored)?;
         }

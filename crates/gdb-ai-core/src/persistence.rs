@@ -205,22 +205,7 @@ impl Store {
     }
 
     pub fn upsert_session(&self, state: &SessionState, profile: Profile) -> Result<()> {
-        let now = unix_ms();
-        let state_json = serde_json::to_string(state)?;
-        self.with_connection(|connection| {
-            connection
-                .execute(
-                    "INSERT INTO sessions
-                 (id, profile, state_json, created_unix_ms, updated_unix_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?4)
-                 ON CONFLICT(id) DO UPDATE SET
-                   state_json=excluded.state_json,
-                   updated_unix_ms=excluded.updated_unix_ms",
-                    params![state.session_id.0, format!("{profile:?}"), state_json, now],
-                )
-                .map_err(sql_error)?;
-            Ok(())
-        })
+        self.upsert_checkpoint(Some((state, profile)), std::iter::empty())
     }
 
     pub fn get_session(&self, id: &SessionId) -> Result<Option<SessionState>> {
@@ -529,26 +514,26 @@ impl Store {
         snapshot: &Value,
     ) -> Result<()> {
         let maximum = self.storage.max_snapshots_per_session;
+        let snapshot_json = serde_json::to_string(snapshot)?;
         self.with_connection(|connection| {
-            let inserted = connection
+            // 2026-10-08: Separate insert and retention commits doubled WAL
+            // syncs once history filled. Keep the immutable snapshot and its
+            // retention in one transaction.
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let inserted = transaction
                 .execute(
                     "INSERT INTO snapshots
                  (session_id, snapshot_id, snapshot_json, created_unix_ms)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(session_id, snapshot_id) DO NOTHING",
-                    params![
-                        session_id.0,
-                        snapshot_id,
-                        serde_json::to_string(snapshot)?,
-                        unix_ms()
-                    ],
+                    params![session_id.0, snapshot_id, snapshot_json, unix_ms()],
                 )
                 .map_err(sql_error)?;
             // 2026-09-08: Snapshot upserts allowed a same-stop enrichment to
             // rewrite evidence already shared with another Agent. An ID may
             // deduplicate identical bytes, but it can never change its value.
             if inserted == 0 {
-                let existing = connection
+                let existing = transaction
                     .query_row(
                         "SELECT snapshot_json FROM snapshots
                          WHERE session_id=?1 AND snapshot_id=?2",
@@ -556,7 +541,7 @@ impl Store {
                         |row| row.get::<_, String>(0),
                     )
                     .map_err(sql_error)?;
-                if existing != serde_json::to_string(snapshot)? {
+                if existing != snapshot_json {
                     return Err(Error::new(
                         ErrorCode::Conflict,
                         "observation ID already contains different data",
@@ -565,7 +550,7 @@ impl Store {
             }
             // 2026-08-29: Repeated stops retained every snapshot for a live
             // session, so enforce the configured bound at the shared writer.
-            connection
+            transaction
                 .execute(
                     "DELETE FROM snapshots WHERE rowid IN (
                        SELECT rowid FROM snapshots WHERE session_id=?1
@@ -575,7 +560,7 @@ impl Store {
                     params![session_id.0, maximum as i64],
                 )
                 .map_err(sql_error)?;
-            Ok(())
+            transaction.commit().map_err(sql_error)
         })
     }
 
@@ -596,37 +581,77 @@ impl Store {
     }
 
     pub fn upsert_operation(&self, operation: &OperationRecord) -> Result<()> {
+        self.upsert_checkpoint(None, std::iter::once(operation))
+    }
+
+    pub(crate) fn upsert_checkpoint<'a>(
+        &self,
+        state: Option<(&SessionState, Profile)>,
+        operations: impl Iterator<Item = &'a OperationRecord>,
+    ) -> Result<()> {
         let maximum = self.storage.max_operations_per_session;
+        let state_json = state
+            .map(|(state, _)| serde_json::to_string(state))
+            .transpose()?;
+        let mut operations = operations.peekable();
+        // An actor checkpoint and the single-record public writer each
+        // contain operations from exactly one session.
+        let operation_session = operations
+            .peek()
+            .copied()
+            .map(|operation| &operation.session_id);
         self.with_connection(|connection| {
-            connection
-                .execute(
-                    "INSERT INTO operations
+            // 2026-10-08: Checkpoint rows committed separately, multiplying
+            // WAL syncs and exposing partial history on failure. Commit the
+            // session and operation batch together and prune its history once.
+            let transaction = connection.transaction().map_err(sql_error)?;
+            for operation in operations {
+                transaction
+                    .execute(
+                        "INSERT INTO operations
                  (operation_id, session_id, operation_json, updated_unix_ms)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(operation_id) DO UPDATE SET
                    operation_json=excluded.operation_json,
                    updated_unix_ms=excluded.updated_unix_ms",
-                    params![
-                        operation.operation_id.0,
-                        operation.session_id.0,
-                        serde_json::to_string(operation)?,
-                        unix_ms()
-                    ],
-                )
-                .map_err(sql_error)?;
+                        params![
+                            operation.operation_id.0,
+                            operation.session_id.0,
+                            serde_json::to_string(operation)?,
+                            unix_ms()
+                        ],
+                    )
+                    .map_err(sql_error)?;
+            }
             // 2026-08-29: Completed operations accumulated for the lifetime
             // of a live session, so keep only its configured recent history.
-            connection
-                .execute(
-                    "DELETE FROM operations WHERE operation_id IN (
+            if let Some(session_id) = operation_session {
+                transaction
+                    .execute(
+                        "DELETE FROM operations WHERE operation_id IN (
                        SELECT operation_id FROM operations WHERE session_id=?1
                        ORDER BY updated_unix_ms DESC, operation_id DESC
                        LIMIT -1 OFFSET ?2
                      )",
-                    params![operation.session_id.0, maximum as i64],
-                )
-                .map_err(sql_error)?;
-            Ok(())
+                        params![session_id.0, maximum as i64],
+                    )
+                    .map_err(sql_error)?;
+            }
+            if let Some((state, profile)) = state {
+                let now = unix_ms();
+                transaction
+                    .execute(
+                        "INSERT INTO sessions
+                     (id, profile, state_json, created_unix_ms, updated_unix_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?4)
+                     ON CONFLICT(id) DO UPDATE SET
+                       state_json=excluded.state_json,
+                       updated_unix_ms=excluded.updated_unix_ms",
+                        params![state.session_id.0, format!("{profile:?}"), state_json, now],
+                    )
+                    .map_err(sql_error)?;
+            }
+            transaction.commit().map_err(sql_error)
         })
     }
 
@@ -1620,6 +1645,122 @@ mod tests {
         assert!(store.get_snapshot(&session, "snap_0").unwrap().is_none());
         assert!(store.get_operation("op_0").unwrap().is_none());
         assert_eq!(store.audit_counts().unwrap(), (2, 2));
+    }
+
+    #[test]
+    fn checkpoint_failure_rolls_back_operation_writes_and_retention() {
+        let directory = tempdir().unwrap();
+        let storage = StorageConfig {
+            max_operations_per_session: 1,
+            ..StorageConfig::default()
+        };
+        let store =
+            Store::open_with_storage(directory.path().join("state.sqlite"), &storage).unwrap();
+        let session_id = SessionId("sess_atomic_checkpoint".into());
+        let state = SessionState::creating(session_id.clone());
+        let operation = |id: &str| OperationRecord {
+            operation_id: crate::domain::OperationId(id.into()),
+            session_id: session_id.clone(),
+            kind: "test".into(),
+            status: crate::domain::OperationStatus::Completed,
+            created_revision: 0,
+            wait_baseline: None,
+            expected_execution_epoch: None,
+            accepted_event_seq: None,
+            completed_event_seq: None,
+            error: None,
+        };
+        let existing = operation("op_00");
+        let next = operation("op_01");
+        store.upsert_session(&state, Profile::DebugControl).unwrap();
+        store.upsert_operation(&existing).unwrap();
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute_batch(
+                        "CREATE TRIGGER fail_state BEFORE UPDATE ON sessions
+                         BEGIN SELECT RAISE(FAIL, 'checkpoint fault'); END;",
+                    )
+                    .map_err(sql_error)
+            })
+            .unwrap();
+        let mut updated = state.clone();
+        updated.revision += 1;
+        assert!(
+            store
+                .upsert_checkpoint(
+                    Some((&updated, Profile::DebugControl)),
+                    std::iter::once(&next)
+                )
+                .is_err()
+        );
+        assert_eq!(store.get_session(&session_id).unwrap(), Some(state));
+        assert_eq!(store.get_operation("op_00").unwrap(), Some(existing));
+        assert!(store.get_operation("op_01").unwrap().is_none());
+
+        store
+            .with_connection(|connection| {
+                connection
+                    .execute_batch("DROP TRIGGER fail_state")
+                    .map_err(sql_error)
+            })
+            .unwrap();
+        store
+            .upsert_checkpoint(
+                Some((&updated, Profile::DebugControl)),
+                std::iter::once(&next),
+            )
+            .unwrap();
+        assert_eq!(store.get_session(&session_id).unwrap(), Some(updated));
+        assert!(store.get_operation("op_00").unwrap().is_none());
+        assert_eq!(store.get_operation("op_01").unwrap(), Some(next));
+    }
+
+    #[test]
+    #[ignore = "microbenchmark: run explicitly with an optimized build"]
+    fn benchmark_sqlite_checkpoint_writes() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(directory.path().join("state.sqlite")).unwrap();
+        let mut state = SessionState::creating(SessionId("sess_checkpoint_benchmark".into()));
+        let batches: Vec<Vec<_>> = (0..128)
+            .map(|batch| {
+                (0..16)
+                    .map(|index| OperationRecord {
+                        operation_id: crate::domain::OperationId(format!(
+                            "op_{batch:04}_{index:02}"
+                        )),
+                        session_id: state.session_id.clone(),
+                        kind: "test".into(),
+                        status: crate::domain::OperationStatus::Completed,
+                        created_revision: batch,
+                        wait_baseline: None,
+                        expected_execution_epoch: None,
+                        accepted_event_seq: None,
+                        completed_event_seq: None,
+                        error: None,
+                    })
+                    .collect()
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        for operations in &batches {
+            state.revision += 1;
+            store
+                .upsert_checkpoint(Some((&state, Profile::DebugControl)), operations.iter())
+                .unwrap();
+        }
+        let elapsed = started.elapsed();
+        assert_eq!(store.get_session(&state.session_id).unwrap(), Some(state));
+        assert!(store.get_operation("op_0127_15").unwrap().is_some());
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "benchmark": "sqlite_checkpoint_writes",
+                "checkpoints": batches.len(),
+                "operations_per_checkpoint": 16,
+                "elapsed_ns": elapsed.as_nanos()
+            })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
