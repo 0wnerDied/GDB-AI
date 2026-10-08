@@ -130,7 +130,9 @@ jobs:
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/gdb-ai-kernel/downloads
-          key: debian-kernel-${{ matrix.series }}-2026-08-28
+          # 2026-10-08: Immutable cache entries kept obsolete package pins.
+          # Bind downloads to the fetch recipe so refreshed artifacts persist.
+          key: debian-kernel-${{ matrix.series }}-${{ hashFiles('tests/kernel/fetch-debian-kernel.sh') }}
       - name: Fetch pinned Debian kernel artifacts
         run: tests/kernel/fetch-debian-kernel.sh "${{ runner.temp }}/gdb-ai-kernel" "${{ matrix.series }}" >> "$GITHUB_ENV"
       - name: Verify Linux kernel provider

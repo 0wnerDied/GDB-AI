@@ -14,6 +14,9 @@ architecture=x86_64
 busybox_url=
 busybox_sha=
 module_name=irqbypass
+# 2026-10-08: Debian pruned 6.12.105 packages; keep each refreshed image,
+# debug file, and module pinned to the same distribution build.
+# ponytail: live pools prune old builds; refresh these pins when retired.
 case $2 in
     6.1)
         release=6.1.0-50-cloud-amd64
@@ -26,22 +29,22 @@ case $2 in
         module_compression=none
         ;;
     6.12)
-        release=6.12.105+deb13-amd64
-        image_url=https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux-image-6.12.105+deb13-amd64-unsigned_6.12.105-1_amd64.deb
-        image_sha=31eb52a588ba7f34294f0ca31ea48f007351e40373e6a022ac9bf8fc7c131e3f
-        debug_url=https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux-image-6.12.105+deb13-amd64-dbg_6.12.105-1_amd64.deb
-        debug_sha=34b4c2abfa74eecbbe1e6b696e4ddf6854d3ee53b27cc9c1d0559e8baafb43f5
+        release=6.12.111+deb13-amd64
+        image_url=https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux-image-6.12.111+deb13-amd64-unsigned_6.12.111-1_amd64.deb
+        image_sha=0dd8541215c133f7df9e80a49c0b6e89e8680c4de364fc41bfb3a9ca81a6e4e4
+        debug_url=https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux-image-6.12.111+deb13-amd64-dbg_6.12.111-1_amd64.deb
+        debug_sha=3270929e0dae6fea0da5ecaf4bd250a43171352507724879bc3d134266f9f2a5
         module_layout=module_memory
         module_relative=usr/lib/modules/$release/kernel/virt/lib/irqbypass.ko.xz
         module_compression=xz
         ;;
     6.12-arm64)
         architecture=aarch64
-        release=6.12.105+deb13-cloud-arm64
-        image_url=https://deb.debian.org/debian-security/pool/updates/main/l/linux-signed-arm64/linux-image-6.12.105+deb13-cloud-arm64_6.12.105-1_arm64.deb
-        image_sha=db60fd4b4458254b824baccfb4abe46fee5a999cb1e61a493d927955bdf343da
-        debug_url=https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux-image-6.12.105+deb13-cloud-arm64-dbg_6.12.105-1_arm64.deb
-        debug_sha=bc014dcb589b987e202166a79c51f969d872a8d95389ffeb16f7a396fca596da
+        release=6.12.111+deb13-cloud-arm64
+        image_url=https://deb.debian.org/debian-security/pool/updates/main/l/linux-signed-arm64/linux-image-6.12.111+deb13-cloud-arm64_6.12.111-1_arm64.deb
+        image_sha=d7c5c91a5fe4bbe59b63b9455044fdb6727b0833d1d878918fc0893388b2c781
+        debug_url=https://deb.debian.org/debian-security/pool/updates/main/l/linux/linux-image-6.12.111+deb13-cloud-arm64-dbg_6.12.111-1_arm64.deb
+        debug_sha=eea03037048ff9bd6d6d13872435a38d465048c59c2f232c39e10b4fb4fc69cf
         # 2026-09-21: Debian pruned the b8 rebuild; pin its available b9
         # replacement and checksum so arm64 kernel CI remains reproducible.
         busybox_url=https://deb.debian.org/debian/pool/main/b/busybox/busybox-static_1.37.0-6+b9_arm64.deb

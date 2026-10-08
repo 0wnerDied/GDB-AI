@@ -19,8 +19,8 @@ unknown state-changing event taints consistency instead of being guessed.
 - AArch64 qualification includes qemu-user RSP inspection, a bare-metal ELF
   under qemu-system RSP, and a native Debian VM running launch, attach, core,
   and gdbserver scenarios.
-- QEMU TCG jobs use checksum-pinned Debian 6.1.176 and 6.12.105 x86-64 kernels
-  plus Debian 6.12.105 AArch64. They exercise architecture-specific
+- QEMU TCG jobs use checksum-pinned Debian 6.1.176 and 6.12.111 x86-64 kernels
+  plus Debian 6.12.111 AArch64. They exercise architecture-specific
   current-task resolution, both module layouts, tasks, stacks, panic context,
   and allowlisted monitor commands.
 - The required toolchain is Rust 1.88.0. Schema hashes, both SDKs, and bounded
