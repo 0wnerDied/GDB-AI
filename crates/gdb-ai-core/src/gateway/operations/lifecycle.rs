@@ -3,12 +3,15 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::Path,
     sync::{Arc, atomic::Ordering},
+    time::Duration,
 };
 
+use gdb_ai_mi::MiRecord;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
+    agent::TemporaryBreakpoint,
     context::{WaitSpec, apply_wait, apply_wait_baseline, wait_if_requested, wait_spec},
     encoding::byte_content,
     execution::{append_turn_output, validate_turn_inspection},
@@ -19,15 +22,15 @@ use crate::{
     Error, ErrorCode, Result,
     backend::MiCommand,
     domain::{
-        DomainEvent, LeaseId, SessionId, SessionState, StopReason, TargetOrigin, WaitBaseline,
-        WriteLease,
+        Address, DomainEvent, LeaseId, SessionId, SessionState, StopReason, TargetOrigin,
+        WaitBaseline, WriteLease,
     },
     gateway::{
         Caller, Controller, Gateway, RequestMode, SessionEntry, now_unix_ms, same_principal,
     },
     policy::Profile,
     protocol::{ApiRequest, CanonicalMethod, Evidence, SemanticResult},
-    session::SessionHandle,
+    session::{CommandReply, SessionHandle, WaitUntil},
 };
 
 impl Gateway {
@@ -820,7 +823,6 @@ impl Gateway {
                 .bare("same")?,
         );
         let start_policy = parameters.stop;
-        let run = start_policy.command()?;
         let mut created_breakpoints = Vec::new();
         let mut breakpoint_evidence = Vec::new();
         let mut failed_breakpoint_index = None;
@@ -853,17 +855,12 @@ impl Gateway {
                 }
                 failed_breakpoint_index = None;
             }
-            let reply = entry.handle.transaction(setup, run, Vec::new()).await?;
-            entry
-                .handle
-                .record_event(DomainEvent::TargetConfigured {
-                    origin: TargetOrigin::Local,
-                })
+            let (reply, state, entry_fallback) = self
+                .start_target(request, &entry, start_policy, setup, &baseline, wait)
                 .await?;
-            let state = apply_wait(&entry.handle, wait, Some(&baseline)).await?;
             let capabilities = entry.handle.refresh_target_capabilities().await?;
             let mut result = json!({
-                "start_policy": start_policy.as_str(),
+                "start_policy": if entry_fallback { "program_entry" } else { start_policy.as_str() },
                 "aslr": {"requested": aslr, "backend_managed": aslr_managed}
             });
             append_turn_output(&entry, output_offset, &mut result).await?;
@@ -1147,17 +1144,13 @@ impl Gateway {
         let entry = self.entry(required_session(request)?).await?;
         let baseline = entry.handle.state();
         let output_offset = entry.handle.inferior_output_position();
-        let wait_baseline = WaitBaseline::from(&baseline);
-        let reply = entry.handle.command(start_policy.command()?).await?;
-        let state = apply_wait_baseline(
-            &entry.handle,
-            wait,
-            Some(&wait_baseline),
-            Some(baseline.execution_epoch + 1),
-        )
-        .await?;
+        let (reply, state, entry_fallback) = self
+            .start_target(request, &entry, start_policy, Vec::new(), &baseline, wait)
+            .await?;
         let capabilities = entry.handle.refresh_target_capabilities().await?;
-        let mut result = json!({"start_policy": start_policy.as_str()});
+        let mut result = json!({
+            "start_policy": if entry_fallback { "program_entry" } else { start_policy.as_str() }
+        });
         append_turn_output(&entry, output_offset, &mut result).await?;
         Ok(self
             .append_stop_observations(request, &state, result)
@@ -1165,6 +1158,133 @@ impl Gateway {
             .state("state", state)
             .command(&entry.handle.id().0, "command", reply)
             .capabilities(capabilities))
+    }
+
+    async fn start_target(
+        &self,
+        request: &ApiRequest,
+        entry: &SessionEntry,
+        policy: StartPolicy,
+        setup: Vec<MiCommand>,
+        baseline: &SessionState,
+        wait: WaitSpec,
+    ) -> Result<(CommandReply, SessionState, bool)> {
+        let (reply, entry_fallback) = match entry
+            .handle
+            .transaction(setup, policy.command()?, Vec::new())
+            .await
+        {
+            // 2026-10-08: Missing main rejected valid stripped programs.
+            // Bootstrap with starti, then use the relocated ELF AT_ENTRY;
+            // a loader's _start must not be mistaken for the program entry.
+            Err(error)
+                if matches!(policy, StartPolicy::Main)
+                    && error.code == ErrorCode::GdbError
+                    && (error.message == "Function \"main\" not defined."
+                        || error.message
+                            == "No symbol table is loaded.  Use the \"file\" command.") =>
+            {
+                (
+                    entry
+                        .handle
+                        .command(StartPolicy::FirstInstruction.command()?)
+                        .await?,
+                    true,
+                )
+            }
+            result => (result?, false),
+        };
+        if request.method == CanonicalMethod::TargetLaunch {
+            entry
+                .handle
+                .record_event(DomainEvent::TargetConfigured {
+                    origin: TargetOrigin::Local,
+                })
+                .await?;
+        }
+        let wait_baseline = WaitBaseline::from(baseline);
+        let expected_epoch = (entry_fallback || request.method == CanonicalMethod::TargetRestart)
+            .then_some(baseline.execution_epoch + 1);
+        let initial_wait = || {
+            apply_wait_baseline(
+                &entry.handle,
+                wait.clone(),
+                Some(&wait_baseline),
+                expected_epoch,
+            )
+        };
+        if !entry_fallback {
+            return Ok((reply, initial_wait().await?, false));
+        }
+        let first = entry
+            .handle
+            .wait_for_operation(
+                WaitUntil::Stopped,
+                Duration::from_millis(wait.timeout_ms),
+                &wait_baseline,
+                baseline.execution_epoch + 1,
+            )
+            .await?;
+        // GDB labels its synthetic starti stop as signal 0. Preserve actual
+        // signals and caller breakpoints instead of resuming them.
+        if !matches!(&first.stop_reason_detail, Some(StopReason::Signal { name, .. })
+            if name.as_deref() == Some("0"))
+        {
+            return Ok((reply, initial_wait().await?, true));
+        }
+        let auxv = entry
+            .handle
+            .command(
+                MiCommand::new("-interpreter-exec")?
+                    .bare("console")?
+                    .string("info auxv"),
+            )
+            .await?;
+        let address = program_entry_address(&auxv)?;
+        let pc = first
+            .stopped_frame()
+            .and_then(|frame| frame.address.as_ref())
+            .ok_or_else(|| Error::new(ErrorCode::GdbError, "GDB omitted the startup PC"))?;
+        if Address::parse(pc)? == address {
+            return Ok((reply, initial_wait().await?, true));
+        }
+        // Until/advance also break at frame return, which is invalid on the
+        // loader's initial stack. Use an exact entry breakpoint instead.
+        let inserted = entry
+            .handle
+            .command(
+                MiCommand::new("-break-insert")?
+                    .bare("-t")?
+                    .string(format!("*{}", address.as_str())),
+            )
+            .await?;
+        let number = crate::normalize::breakpoint_number(&inserted.record)?;
+        let mut breakpoint = TemporaryBreakpoint::new(entry.handle.clone(), number);
+        let asynchronous = matches!(wait.until.as_str(), "accepted" | "running");
+        let resumed: Result<CommandReply> = async {
+            let reply = entry
+                .handle
+                .command(MiCommand::new("-exec-continue")?)
+                .await?;
+            apply_wait_baseline(
+                &entry.handle,
+                wait,
+                Some(&WaitBaseline::from(&first)),
+                Some(first.execution_epoch + 1),
+            )
+            .await?;
+            Ok(reply)
+        }
+        .await;
+        if resumed.is_ok() && asynchronous {
+            // GDB owns this native temporary breakpoint until its hit after
+            // an explicitly asynchronous launch/restart.
+            breakpoint.release();
+        }
+        let cleanup = breakpoint.remove().await;
+        let reply = resumed?;
+        cleanup?;
+        Ok((reply, entry.handle.state(), true))
     }
 
     pub(super) async fn target_kill(&self, request: &ApiRequest) -> Result<Value> {
@@ -1184,6 +1304,31 @@ impl Gateway {
         let state = wait_if_requested(&entry.handle, wait, Some(&baseline)).await?;
         Ok(json!({ "command": reply, "state": state }))
     }
+}
+
+fn program_entry_address(reply: &CommandReply) -> Result<Address> {
+    let output = reply
+        .stream_records
+        .iter()
+        .filter_map(|record| match record {
+            MiRecord::ConsoleStream(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    String::from_utf8_lossy(&output)
+        .lines()
+        .find(|line| line.split_whitespace().nth(1) == Some("AT_ENTRY"))
+        .and_then(|line| line.split_whitespace().last())
+        .map(Address::parse)
+        .transpose()?
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::CapabilityMissing,
+                "GDB did not report ELF AT_ENTRY",
+            )
+        })
 }
 
 #[derive(Clone, Copy, Deserialize)]

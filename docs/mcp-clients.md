@@ -222,7 +222,7 @@ covers the requested page and depth.
 
 Use `first_instruction` or `main` at launch only when setup must precede
 execution, then include the needed views in `gdb_run` action `continue`.
-`main` must resolve before execution. The
+Missing `main` falls back to the main executable's ELF entry. The
 [compatibility guide](compatibility.md#debug-information) covers stripped
 targets, separate debug files, runtime helpers, and remote firmware.
 

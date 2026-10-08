@@ -2689,19 +2689,22 @@ fn stream_len(record: &MiRecord) -> usize {
 }
 
 fn command_resumes_target(command: &MiCommand) -> bool {
-    matches!(
-        command.name.as_str(),
-        "-exec-run"
-            | "-exec-continue"
-            | "-exec-step"
-            | "-exec-next"
-            | "-exec-finish"
-            | "-exec-step-instruction"
-            | "-exec-next-instruction"
-            | "-exec-until"
-            | "-exec-jump"
-            | "-exec-return"
-    )
+    // 2026-10-08: starti reset the inferior but lost resume ownership.
+    // Keep its cancellation attribution alongside ordinary MI execution.
+    command_starts_fresh_inferior(command)
+        || matches!(
+            command.name.as_str(),
+            "-exec-run"
+                | "-exec-continue"
+                | "-exec-step"
+                | "-exec-next"
+                | "-exec-finish"
+                | "-exec-step-instruction"
+                | "-exec-next-instruction"
+                | "-exec-until"
+                | "-exec-jump"
+                | "-exec-return"
+        )
 }
 
 fn command_starts_fresh_inferior(command: &MiCommand) -> bool {
@@ -2887,6 +2890,13 @@ mod tests {
         assert!(operation_owns_resume(Some(&later), &later));
         assert!(command_resumes_target(
             &MiCommand::new("-exec-continue").unwrap()
+        ));
+        assert!(command_resumes_target(
+            &MiCommand::new("-interpreter-exec")
+                .unwrap()
+                .bare("console")
+                .unwrap()
+                .string("starti")
         ));
         assert!(resume_failed_definitively(
             &Err(Error::new(ErrorCode::GdbError, "cannot execute")),

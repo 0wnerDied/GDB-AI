@@ -53,10 +53,12 @@ GDB's search path. With raw administration enabled, `set debug-file-directory`
 can select an unpacked local debug tree before target selection. Debuginfod
 and target script auto-loading are disabled at session startup.
 
-`stop: "main"` requires a resolvable `main`; otherwise launch or restart
-fails before executing the new program. Use `first_instruction` for a
-target without that symbol, or `none` to observe a requested address
-breakpoint, signal, or exit. Explicit pending breakpoints remain available.
+`stop: "main"` stops at `main` when GDB can resolve it. Otherwise launch or
+restart stops at the main executable's relocated ELF entry and reports
+`start_policy: "program_entry"`. This also works for stripped PIE binaries.
+`first_instruction` retains GDB's `starti` behavior, which can stop in the
+dynamic loader. Use `none` to observe a requested breakpoint, signal, or
+exit. Explicit pending breakpoints remain available.
 An empty locals result is checked at its original thread, frame, and stop:
 missing debug information returns `CAPABILITY_MISSING`; a scope with debug
 information and no variables returns an empty list. Composite captures retain

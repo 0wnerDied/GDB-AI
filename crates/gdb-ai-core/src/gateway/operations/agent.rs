@@ -339,9 +339,9 @@ fn parse_observed_integer(value: &str) -> Result<i128> {
     })
 }
 
-struct ProbeBreakpoint {
+pub(super) struct TemporaryBreakpoint {
     handle: SessionHandle,
-    operation_id: OperationId,
+    operation_id: Option<OperationId>,
     breakpoint_id: Option<BreakpointId>,
     backend_number: Option<String>,
 }
@@ -350,9 +350,17 @@ struct ProbeBreakpoint {
 // leaving its temporary breakpoint in the managed registry after successful
 // cleanup. Publish the confirmed deletion once so later turns see no residue.
 async fn delete_probe_breakpoint(handle: &SessionHandle, backend_number: String) -> Result<()> {
-    handle
+    let deleted = handle
         .cleanup_command(MiCommand::new("-break-delete")?.bare(backend_number.clone())?)
-        .await?;
+        .await;
+    // 2026-10-08: Native temporary breakpoints may already be deleted at
+    // their hit. Accept only GDB's definite absence, preserving unknown outcomes.
+    if let Err(error) = deleted
+        && !(error.code == ErrorCode::GdbError
+            && error.message == format!("No breakpoint number {backend_number}."))
+    {
+        return Err(error);
+    }
     if handle.with_state(|state| state.breakpoints.contains_key(&backend_number)) {
         handle
             .record_event(DomainEvent::BreakpointDeleted { backend_number })
@@ -361,7 +369,21 @@ async fn delete_probe_breakpoint(handle: &SessionHandle, backend_number: String)
     Ok(())
 }
 
-impl ProbeBreakpoint {
+impl TemporaryBreakpoint {
+    pub(super) fn new(handle: SessionHandle, backend_number: String) -> Self {
+        Self {
+            handle,
+            operation_id: None,
+            breakpoint_id: None,
+            backend_number: Some(backend_number),
+        }
+    }
+
+    pub(super) fn release(&mut self) {
+        self.breakpoint_id = None;
+        self.backend_number = None;
+    }
+
     fn current_backend_number(&self) -> Option<String> {
         self.breakpoint_id
             .as_ref()
@@ -377,7 +399,7 @@ impl ProbeBreakpoint {
             .or_else(|| self.backend_number.clone())
     }
 
-    async fn remove(&mut self) -> Result<()> {
+    pub(super) async fn remove(&mut self) -> Result<()> {
         let Some(backend_number) = self.current_backend_number() else {
             return Ok(());
         };
@@ -389,7 +411,7 @@ impl ProbeBreakpoint {
     }
 }
 
-impl Drop for ProbeBreakpoint {
+impl Drop for TemporaryBreakpoint {
     fn drop(&mut self) {
         let Some(backend_number) = self.current_backend_number() else {
             return;
@@ -401,7 +423,9 @@ impl Drop for ProbeBreakpoint {
         // and leaked a temporary breakpoint into later Agent operations.
         tokio::spawn(async move {
             let cleanup = delete_probe_breakpoint(&handle, backend_number).await;
-            if let Ok(mut operation) = handle.operation(&operation_id.0).await {
+            if let Some(operation_id) = &operation_id
+                && let Ok(mut operation) = handle.operation(&operation_id.0).await
+            {
                 // 2026-08-28: Drop also retries failed explicit cleanup. Only
                 // an in-flight operation represents cancellation; preserve any
                 // completed, timed-out, or failed terminal result.
@@ -418,7 +442,7 @@ impl Drop for ProbeBreakpoint {
                 }
             }
             if let Err(error) = cleanup {
-                tracing::warn!(%error, %operation_id, "failed to clean up cancelled probe");
+                tracing::warn!(%error, ?operation_id, "failed to clean up temporary breakpoint");
             }
         });
     }
@@ -612,12 +636,8 @@ impl Gateway {
         };
         // 2026-08-30: Persisting the probe operation before constructing its
         // cleanup guard leaked the already-inserted breakpoint on SQLite errors.
-        let mut breakpoint = ProbeBreakpoint {
-            handle: entry.handle.clone(),
-            operation_id: operation.operation_id.clone(),
-            breakpoint_id: None,
-            backend_number: Some(backend_number.clone()),
-        };
+        let mut breakpoint = TemporaryBreakpoint::new(entry.handle.clone(), backend_number.clone());
+        breakpoint.operation_id = Some(operation.operation_id.clone());
         if let Some(fields) =
             MiResult::find(inserted.record.results(), "bkpt").and_then(MiValue::results)
         {

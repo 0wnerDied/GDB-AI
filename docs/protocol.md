@@ -112,9 +112,11 @@ An omitted launch or restart wait observes `running` for `stop: "none"`
 without inspection, and the selected stop plus its snapshot for other start
 policies. With `inspect`, `stop: "none"` instead defaults to `settled`.
 An explicit `accepted` remains non-blocking and cannot include inspection.
-`stop: "main"` fails before executing the new program if `main` cannot be
-resolved. `first_instruction` and `none` support targets without that symbol;
-explicit pending breakpoint locations still opt in to later resolution.
+`stop: "main"` falls back to the main executable's relocated ELF entry if
+`main` cannot be resolved. Launch and restart then report
+`start_policy: "program_entry"`; this is a result, not a new `stop` selector.
+`first_instruction` keeps native GDB `starti` behavior and can stop in the
+dynamic loader. Explicit pending breakpoints still opt in to later resolution.
 Canonical execution control without a wait is accepted immediately; projected
 `gdb_run` control waits until settled by default.
 Execution control and wait requests may include one bounded byte-exact `input`

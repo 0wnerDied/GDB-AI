@@ -15,14 +15,13 @@ mod support;
 use support::{call, request, successful};
 
 #[tokio::test]
-async fn rejects_missing_main_before_running_but_keeps_explicit_pending_breakpoints() {
+async fn falls_back_to_program_entry_without_main_and_keeps_pending_breakpoints() {
     if !support::require_commands(&["gdb", "cc", "strip"]) {
         return;
     }
     let directory = tempdir().unwrap();
     let source = directory.path().join("main.c");
     let executable = directory.path().join("with-symbols");
-    let stripped = directory.path().join("stripped");
     let marker = directory.path().join("executed");
     std::fs::write(
         &source,
@@ -31,24 +30,6 @@ async fn rejects_missing_main_before_running_but_keeps_explicit_pending_breakpoi
          __builtin_trap(); return argc;\n}\n",
     )
     .unwrap();
-    assert!(
-        Command::new("cc")
-            .args(["-g", "-O0", "-fPIE", "-pie"])
-            .arg(&source)
-            .arg("-o")
-            .arg(&executable)
-            .status()
-            .unwrap()
-            .success()
-    );
-    std::fs::copy(&executable, &stripped).unwrap();
-    assert!(
-        Command::new("strip")
-            .arg(&stripped)
-            .status()
-            .unwrap()
-            .success()
-    );
     let mut config = Config {
         artifacts: ArtifactConfig {
             path: directory.path().join("artifacts"),
@@ -65,67 +46,126 @@ async fn rejects_missing_main_before_running_but_keeps_explicit_pending_breakpoi
     }
     let gateway = Gateway::new(config).unwrap();
     let caller = Caller::local("stripped-main/mcp:writer");
-    let rejected = gateway
-        .dispatch_agent(
-            request(
-                "missing-main",
-                None,
-                "target.launch",
-                None,
-                json!({"program": stripped, "argv": [marker], "stop": "main"}),
-            ),
-            &caller,
-        )
-        .await;
-    assert_eq!(
-        rejected.error.as_ref().map(|error| error.code),
-        Some(ErrorCode::GdbError)
-    );
-    assert!(rejected.error.as_ref().unwrap().message.contains("main"));
-    assert_eq!(rejected.state.as_ref().unwrap().execution_epoch, 0);
-    assert!(
-        !marker.exists(),
-        "a rejected main policy must not execute the program"
-    );
-    let session = rejected.session_id.as_deref().unwrap();
-    let dispatch = |id: &str, method: &str, parameters| {
-        gateway.dispatch_agent(
-            request(id, Some(session), method, None, parameters),
-            &caller,
-        )
+    let assert_entry = |response: &gdb_ai_core::protocol::ApiResponse| {
+        let state = response.semantics.as_ref().unwrap().state.as_ref().unwrap();
+        assert_eq!(state["status"], "STOPPED");
+        assert_eq!(
+            response.result.as_ref().unwrap()["start_policy"],
+            "program_entry"
+        );
+        let pid = state["pid"].as_u64().unwrap();
+        let auxv = std::fs::read(format!("/proc/{pid}/auxv")).unwrap();
+        let word = std::mem::size_of::<usize>();
+        let entry = auxv
+            .chunks_exact(word * 2)
+            .find_map(|pair| {
+                let key = usize::from_ne_bytes(pair[..word].try_into().unwrap());
+                (key == libc::AT_ENTRY as usize)
+                    .then(|| usize::from_ne_bytes(pair[word..].try_into().unwrap()) as u64)
+            })
+            .unwrap();
+        let pc = state["frame"]["address"].as_str().unwrap();
+        assert_eq!(
+            u64::from_str_radix(pc.trim_start_matches("0x"), 16).unwrap(),
+            entry
+        );
+        assert!(
+            !marker.exists(),
+            "entry fallback must stop before main executes"
+        );
     };
-    let first = successful(
-        dispatch(
-            "first-instruction",
-            "target.launch",
-            json!({"program": stripped, "argv": [marker], "stop": "first_instruction"}),
-        )
-        .await,
-    );
-    assert!(first.semantics.as_ref().unwrap().state.as_ref().unwrap()["stop_id"].is_string());
-    assert!(!marker.exists());
-    let restart = dispatch(
-        "missing-main-restart",
-        "target.restart",
-        json!({"stop": "main"}),
-    )
-    .await;
-    assert_eq!(restart.error.unwrap().code, ErrorCode::GdbError);
-    assert!(!marker.exists());
-    let ran = successful(
-        dispatch(
-            "run-to-stop",
-            "target.restart",
-            json!({"stop": "none", "inspect": [{"view": "stack", "limit": 1}]}),
-        )
-        .await,
-    );
-    assert_eq!(
-        ran.semantics.as_ref().unwrap().state.as_ref().unwrap()["status"],
-        "STOPPED"
-    );
-    assert!(marker.exists());
-    successful(dispatch("close-stripped", "session.close", json!({})).await);
+    for (name, options) in [
+        ("pie", vec!["-fPIE", "-pie"]),
+        ("exec", vec!["-fno-pie", "-no-pie"]),
+        ("static", vec!["-static"]),
+    ] {
+        assert!(
+            Command::new("cc")
+                .args(["-g", "-O0"])
+                .args(options)
+                .arg(&source)
+                .arg("-o")
+                .arg(&executable)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let stripped = directory.path().join(name);
+        std::fs::copy(&executable, &stripped).unwrap();
+        assert!(
+            Command::new("strip")
+                .arg(&stripped)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let launched = successful(
+            gateway
+                .dispatch_agent(
+                    request(
+                        name,
+                        None,
+                        "target.launch",
+                        None,
+                        json!({"program": stripped, "argv": [marker], "stop": "main"}),
+                    ),
+                    &caller,
+                )
+                .await,
+        );
+        assert_entry(&launched);
+        let session = launched.session_id.as_deref().unwrap();
+        let dispatch = |id: &str, method: &str, parameters| {
+            gateway.dispatch_agent(
+                request(id, Some(session), method, None, parameters),
+                &caller,
+            )
+        };
+        for parameters in [json!({"stop": "main"}), json!({})] {
+            let restarted =
+                successful(dispatch("restart-entry", "target.restart", parameters).await);
+            assert_entry(&restarted);
+            assert_ne!(
+                restarted
+                    .semantics
+                    .as_ref()
+                    .unwrap()
+                    .context
+                    .as_ref()
+                    .unwrap()
+                    .stop_id,
+                launched
+                    .semantics
+                    .as_ref()
+                    .unwrap()
+                    .context
+                    .as_ref()
+                    .unwrap()
+                    .stop_id
+            );
+        }
+        let breakpoints =
+            successful(dispatch("entry-breakpoints", "breakpoint.list", json!({})).await);
+        assert_eq!(
+            breakpoints.result.as_ref().unwrap()["breakpoints"],
+            json!({})
+        );
+        let ran = successful(
+            dispatch(
+                "run-to-stop",
+                "target.restart",
+                json!({"stop": "none", "inspect": [{"view": "stack", "limit": 1}]}),
+            )
+            .await,
+        );
+        assert_eq!(
+            ran.semantics.as_ref().unwrap().state.as_ref().unwrap()["status"],
+            "STOPPED"
+        );
+        assert!(marker.exists());
+        successful(dispatch("close-stripped", "session.close", json!({})).await);
+        std::fs::remove_file(&marker).unwrap();
+    }
 
     let created = successful(
         gateway
@@ -154,14 +194,21 @@ async fn rejects_missing_main_before_running_but_keeps_explicit_pending_breakpoi
         pending.result.as_ref().unwrap()["breakpoint"]["pending"],
         true
     );
-    let launched = successful(dispatch(
-        "bind-pending", "target.launch",
-        json!({"program": executable, "argv": [marker], "stop": "none", "inspect": [{"view": "stack", "limit": 1}]}),
-    ).await);
+    let launched = successful(
+        dispatch(
+            "bind-pending",
+            "target.launch",
+            json!({"program": executable, "argv": [marker], "stop": "main",
+            "inspect": [{"view": "stack", "limit": 1}]}),
+        )
+        .await,
+    );
+    assert_eq!(launched.result.as_ref().unwrap()["start_policy"], "main");
     assert_eq!(
         launched.result.as_ref().unwrap()["observations"]["stack"]["frames"][0]["function"],
         "main"
     );
+    assert!(!marker.exists());
     successful(dispatch("close-pending", "session.close", json!({})).await);
 }
 
