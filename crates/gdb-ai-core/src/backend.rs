@@ -916,9 +916,12 @@ impl GdbBackend {
     }
 
     pub fn flush_inferior_input(&mut self) -> Result<()> {
+        // 2026-10-08: A server running as a session leader could acquire the
+        // inferior PTY and receive SIGHUP on close. Keep its terminal separate.
         let slave = OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(libc::O_NOCTTY)
             .open(&self.descriptor.pty)?;
         termios::tcflush(&slave, termios::FlushArg::TCIFLUSH).map_err(|error| {
             Error::new(
@@ -1364,6 +1367,54 @@ mod tests {
             command.encoded(7),
             b"7-file-exec-and-symbols \"/tmp/a b\"\n"
         );
+    }
+
+    #[tokio::test]
+    async fn inferior_input_flush_preserves_server_terminal() {
+        const CHILD_ENV: &str = "GDB_AI_TEST_PTY_SESSION_LEADER";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            if !crate::test_support::require_commands(&["gdb"]) {
+                return;
+            }
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "backend::tests::inferior_input_flush_preserves_server_terminal",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .await
+                .unwrap();
+            assert!(
+                status.success(),
+                "session-leader child exited with {status}"
+            );
+            return;
+        }
+
+        nix::unistd::setsid().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut backend = GdbBackend::spawn(
+            &GdbConfig::default(),
+            "mi3",
+            directory.path(),
+            MiLimits::default(),
+            &Limits::default(),
+            &OutputConfig::default(),
+            SandboxOptions {
+                mode: SandboxMode::Disabled,
+                allow_network: true,
+            },
+        )
+        .await
+        .unwrap();
+        backend.flush_inferior_input().unwrap();
+        assert_eq!(
+            std::fs::File::open("/dev/tty").unwrap_err().raw_os_error(),
+            Some(libc::ENXIO)
+        );
+        backend.shutdown().await.unwrap();
     }
 
     #[tokio::test]
