@@ -741,6 +741,11 @@ impl GdbBackend {
             .arg("set debuginfod enabled off")
             .arg("-iex")
             .arg("set disable-randomization off")
+            // 2026-10-08: Noninteractive start accepted an unresolved main
+            // breakpoint and ran past the requested start policy. Structured
+            // pending breakpoints still opt in explicitly through MI's -f.
+            .arg("-iex")
+            .arg("set breakpoint pending off")
             .arg("-iex")
             .arg("set may-call-functions off")
             .arg("-iex")

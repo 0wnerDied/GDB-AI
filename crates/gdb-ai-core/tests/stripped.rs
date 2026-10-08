@@ -1,6 +1,7 @@
 use std::process::Command;
 
 use gdb_ai_core::{
+    ErrorCode,
     config::{ArtifactConfig, Config, PersistenceConfig},
     domain::SessionId,
     gateway::{Caller, Gateway},
@@ -11,7 +12,158 @@ use tempfile::tempdir;
 
 mod support;
 
-use support::{call, request};
+use support::{call, request, successful};
+
+#[tokio::test]
+async fn rejects_missing_main_before_running_but_keeps_explicit_pending_breakpoints() {
+    if !support::require_commands(&["gdb", "cc", "strip"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("main.c");
+    let executable = directory.path().join("with-symbols");
+    let stripped = directory.path().join("stripped");
+    let marker = directory.path().join("executed");
+    std::fs::write(
+        &source,
+        "#include <stdio.h>\nint main(int argc, char **argv) {\n\
+         FILE *file = fopen(argv[1], \"w\"); fputs(\"executed\", file); fclose(file);\n\
+         __builtin_trap(); return argc;\n}\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0", "-fPIE", "-pie"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::copy(&executable, &stripped).unwrap();
+    assert!(
+        Command::new("strip")
+            .arg(&stripped)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.security.workspace_roots = vec![directory.path().to_owned()];
+    if let Some(path) = std::env::var_os("GDB_AI_GDB_PATH") {
+        config.gdb.path = path.into();
+    }
+    let gateway = Gateway::new(config).unwrap();
+    let caller = Caller::local("stripped-main/mcp:writer");
+    let rejected = gateway
+        .dispatch_agent(
+            request(
+                "missing-main",
+                None,
+                "target.launch",
+                None,
+                json!({"program": stripped, "argv": [marker], "stop": "main"}),
+            ),
+            &caller,
+        )
+        .await;
+    assert_eq!(
+        rejected.error.as_ref().map(|error| error.code),
+        Some(ErrorCode::GdbError)
+    );
+    assert!(rejected.error.as_ref().unwrap().message.contains("main"));
+    assert_eq!(rejected.state.as_ref().unwrap().execution_epoch, 0);
+    assert!(
+        !marker.exists(),
+        "a rejected main policy must not execute the program"
+    );
+    let session = rejected.session_id.as_deref().unwrap();
+    let dispatch = |id: &str, method: &str, parameters| {
+        gateway.dispatch_agent(
+            request(id, Some(session), method, None, parameters),
+            &caller,
+        )
+    };
+    let first = successful(
+        dispatch(
+            "first-instruction",
+            "target.launch",
+            json!({"program": stripped, "argv": [marker], "stop": "first_instruction"}),
+        )
+        .await,
+    );
+    assert!(first.semantics.as_ref().unwrap().state.as_ref().unwrap()["stop_id"].is_string());
+    assert!(!marker.exists());
+    let restart = dispatch(
+        "missing-main-restart",
+        "target.restart",
+        json!({"stop": "main"}),
+    )
+    .await;
+    assert_eq!(restart.error.unwrap().code, ErrorCode::GdbError);
+    assert!(!marker.exists());
+    let ran = successful(
+        dispatch(
+            "run-to-stop",
+            "target.restart",
+            json!({"stop": "none", "inspect": [{"view": "stack", "limit": 1}]}),
+        )
+        .await,
+    );
+    assert_eq!(
+        ran.semantics.as_ref().unwrap().state.as_ref().unwrap()["status"],
+        "STOPPED"
+    );
+    assert!(marker.exists());
+    successful(dispatch("close-stripped", "session.close", json!({})).await);
+
+    let created = successful(
+        gateway
+            .dispatch_agent(
+                request("pending-session", None, "session.create", None, json!({})),
+                &caller,
+            )
+            .await,
+    );
+    let session = created.session_id.as_deref().unwrap();
+    let dispatch = |id: &str, method: &str, parameters| {
+        gateway.dispatch_agent(
+            request(id, Some(session), method, None, parameters),
+            &caller,
+        )
+    };
+    let pending = successful(
+        dispatch(
+            "pending-main",
+            "breakpoint.create",
+            json!({"function": "main", "pending": true}),
+        )
+        .await,
+    );
+    assert_eq!(
+        pending.result.as_ref().unwrap()["breakpoint"]["pending"],
+        true
+    );
+    let launched = successful(dispatch(
+        "bind-pending", "target.launch",
+        json!({"program": executable, "argv": [marker], "stop": "none", "inspect": [{"view": "stack", "limit": 1}]}),
+    ).await);
+    assert_eq!(
+        launched.result.as_ref().unwrap()["observations"]["stack"]["frames"][0]["function"],
+        "main"
+    );
+    successful(dispatch("close-pending", "session.close", json!({})).await);
+}
 
 #[tokio::test]
 async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {

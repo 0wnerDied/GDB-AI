@@ -277,6 +277,10 @@ jobs:
           GDB_AI_GDB_PATH="$RUNNER_TEMP/gdb/${{ matrix.version }}/bin/gdb" \
             cargo test --locked -p gdb-ai-core --lib \
             session::tests::starts_compatible_mi3_backend -- --exact --nocapture
+      - name: Verify stripped and separate-debug targets
+        run: |
+          GDB_AI_GDB_PATH="$RUNNER_TEMP/gdb/${{ matrix.version }}/bin/gdb" \
+            cargo test --locked -p gdb-ai-core --test stripped -- --nocapture
 
   soak:
     if: startsWith(github.ref, 'refs/tags/v')
