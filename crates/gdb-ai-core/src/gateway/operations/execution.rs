@@ -615,7 +615,7 @@ impl Gateway {
         let mut rebind_command = None;
         if needs_location {
             let (location, unresolved_module) =
-                self.breakpoint_location(&request.parameters, &state)?;
+                self.breakpoint_location(&entry.handle, &request.parameters, &state)?;
             rebind_command = unresolved_module.as_ref().map(|_| command.clone());
             pending_module = unresolved_module;
             command = command.string(location);

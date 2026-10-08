@@ -615,7 +615,7 @@ impl Gateway {
             resolved_location = Some(resolved);
             (location, None)
         } else {
-            self.breakpoint_location(&request.parameters, &initial)?
+            self.breakpoint_location(&entry.handle, &request.parameters, &initial)?
         };
         let pending_module = module_offset.filter(|_| !location.starts_with('*'));
         let rebind_command = pending_module.as_ref().map(|_| insert.clone());

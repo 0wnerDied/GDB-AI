@@ -490,6 +490,19 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
     let lease_id = created.result.as_ref().unwrap()["write_lease"]["lease_id"]
         .as_str()
         .unwrap();
+    let pending_rebinding = match created.result.as_ref().unwrap()["capabilities"]["capabilities"]
+        ["module_offset_rebinding"]["status"]
+        .as_str()
+    {
+        Some("conditional") => true,
+        Some("unsupported") => false,
+        status => panic!("unexpected module-offset rebinding capability: {status:?}"),
+    };
+    let restart_stop = if pending_rebinding {
+        "first_instruction"
+    } else {
+        "main"
+    };
     let launched = gateway
         .dispatch(
             request(
@@ -531,6 +544,149 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
             &caller,
         )
         .await;
+    let probed = if pending_rebinding {
+        probed
+    } else {
+        // 2026-10-08: Legacy GDB could leave an INT3 while rebinding a
+        // loader-launched module. Refuse the unresolved request without a
+        // breakpoint, then verify mapped offsets at the executable's entry.
+        assert_eq!(
+            probed.error.as_ref().unwrap().code,
+            ErrorCode::CapabilityMissing
+        );
+        assert!(probed.state.as_ref().unwrap().breakpoints.is_empty());
+        let rejected = gateway
+            .dispatch(
+                request(
+                    "pending-breakpoint",
+                    Some(&session_id),
+                    "breakpoint.create",
+                    probed.revision,
+                    json!({"lease_id": lease_id, "module_offset": {
+                        "module": "stripped", "offset": format!("0x{marker_offset:x}")
+                    }}),
+                ),
+                &caller,
+            )
+            .await;
+        assert_eq!(
+            rejected.error.as_ref().unwrap().code,
+            ErrorCode::CapabilityMissing
+        );
+        assert!(rejected.state.as_ref().unwrap().breakpoints.is_empty());
+        let killed = call(
+            &gateway,
+            &caller,
+            request(
+                "kill-unmapped-loader",
+                Some(&session_id),
+                "target.kill",
+                rejected.revision,
+                json!({"lease_id": lease_id, "wait": {"until": "exited", "timeout_ms": 5000}}),
+            ),
+        )
+        .await;
+        let mapped = call(
+            &gateway,
+            &caller,
+            request(
+                "launch-mapped-executable",
+                Some(&session_id),
+                "target.launch",
+                killed.revision,
+                json!({"lease_id": lease_id, "program": executable,
+                    "cwd": directory.path(), "stop": "main",
+                    "wait": {"until": "snapshot", "timeout_ms": 5000}}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            mapped.result.as_ref().unwrap()["start_policy"],
+            "program_entry"
+        );
+        let running = call(
+            &gateway,
+            &caller,
+            request(
+                "run-mapped-executable",
+                Some(&session_id),
+                "execution.control",
+                mapped.revision,
+                json!({"lease_id": lease_id, "action": "continue",
+                    "stop_id": mapped.state.as_ref().unwrap().stop_id.as_ref().unwrap(),
+                    "wait": {"until": "running", "timeout_ms": 5000}}),
+            ),
+        )
+        .await;
+        let rejected_running = gateway
+            .dispatch(
+                request(
+                    "running-mapped-breakpoint",
+                    Some(&session_id),
+                    "breakpoint.create",
+                    running.revision,
+                    json!({"lease_id": lease_id, "module_offset": {
+                        "module": "stripped", "offset": format!("0x{marker_offset:x}")
+                    }}),
+                ),
+                &caller,
+            )
+            .await;
+        assert_eq!(
+            rejected_running.error.as_ref().unwrap().code,
+            ErrorCode::CapabilityMissing
+        );
+        assert!(
+            rejected_running
+                .state
+                .as_ref()
+                .unwrap()
+                .breakpoints
+                .is_empty()
+        );
+        let interrupted = call(
+            &gateway,
+            &caller,
+            request(
+                "interrupt-mapped-executable",
+                Some(&session_id),
+                "execution.control",
+                rejected_running.revision,
+                json!({"lease_id": lease_id, "action": "interrupt",
+                    "wait": {"until": "snapshot", "timeout_ms": 5000}}),
+            ),
+        )
+        .await;
+        let mapped = call(
+            &gateway,
+            &caller,
+            request(
+                "restart-mapped-executable",
+                Some(&session_id),
+                "target.restart",
+                interrupted.revision,
+                json!({"lease_id": lease_id, "stop": "main",
+                    "wait": {"until": "snapshot", "timeout_ms": 5000}}),
+            ),
+        )
+        .await;
+        gateway
+            .dispatch(
+                request(
+                    "mapped-probe",
+                    Some(&session_id),
+                    "agent.probe",
+                    mapped.revision,
+                    json!({"lease_id": lease_id,
+                    "stop_id": mapped.state.as_ref().unwrap().stop_id.as_ref().unwrap(),
+                    "module_offset": {
+                        "module": "stripped", "offset": format!("0x{marker_offset:x}")
+                    }}),
+                ),
+                &caller,
+            )
+            .await
+    };
     // 2026-10-08: Failed rebinds lost their MI ordering when the temporary
     // session was removed. Retain debugger evidence from this self-made target.
     if probed.error.is_some() {
@@ -576,7 +732,7 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
                 probed.revision,
                 json!({
                     "lease_id": lease_id,
-                    "stop": "first_instruction",
+                    "stop": restart_stop,
                     "wait": {"until": "snapshot", "timeout_ms": 5000}
                 }),
             ),
@@ -605,13 +761,9 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
         )
         .await;
     assert!(breakpoint.error.is_none(), "{:?}", breakpoint.error);
-    let pending = breakpoint.result.as_ref().unwrap()["breakpoints"]
-        .as_object()
-        .unwrap()
-        .values()
-        .find(|breakpoint| breakpoint["pending"] == true)
-        .unwrap();
-    let public_id = pending["id"].as_str().unwrap().to_owned();
+    let initial_breakpoint = &breakpoint.result.as_ref().unwrap()["breakpoint"];
+    assert_eq!(initial_breakpoint["pending"], pending_rebinding);
+    let public_id = initial_breakpoint["id"].as_str().unwrap().to_owned();
     let stopped = gateway
         .dispatch(
             request(
@@ -698,7 +850,7 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
         "restart-with-module-offset",
         "target.restart",
         disabled.revision,
-        json!({"lease_id": lease_id, "stop": "first_instruction",
+        json!({"lease_id": lease_id, "stop": restart_stop,
             "wait": {"until": "snapshot", "timeout_ms": 5000}})
     );
     let restart_stop_id = restarted.state.as_ref().unwrap().stop_id.clone().unwrap();
@@ -710,7 +862,8 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
         .values()
         .find(|breakpoint| breakpoint.id.0 == public_id)
         .unwrap();
-    assert!(parked.pending && !parked.enabled);
+    assert_eq!(parked.pending, pending_rebinding);
+    assert!(!parked.enabled);
     let enabled = call!(
         "enable-restarted-module-offset",
         "breakpoint.update",
@@ -744,8 +897,10 @@ async fn rebinds_module_offset_for_probes_and_persistent_breakpoints() {
         "relaunch-with-module-offset",
         "target.launch",
         killed.revision,
-        json!({"lease_id": lease_id, "program": loader, "argv": [executable],
-            "cwd": directory.path(), "stop": "first_instruction",
+        json!({"lease_id": lease_id,
+            "program": if pending_rebinding { &loader } else { &executable },
+            "argv": if pending_rebinding { vec![&executable] } else { Vec::new() },
+            "cwd": directory.path(), "stop": restart_stop,
             "wait": {"until": "snapshot", "timeout_ms": 5000}})
     );
     let relaunch_stop_id = relaunched.state.as_ref().unwrap().stop_id.clone().unwrap();

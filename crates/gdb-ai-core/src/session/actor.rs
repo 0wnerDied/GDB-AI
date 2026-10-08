@@ -338,6 +338,7 @@ impl SessionWorker {
                     ("memory_read".into(), capability(CapabilityStatus::Unknown, "current_target", vec!["target must be stopped; volatile ranges may have target-defined effects".into()], "probe", 0)),
                     ("memory_write".into(), capability(CapabilityStatus::Unknown, "current_target", vec!["requires lab_mutation policy and stopped target".into()], "probe", 0)),
                     ("watchpoints".into(), capability(CapabilityStatus::Unknown, "current_target", vec!["hardware resources are target-dependent".into()], "probe", 0)),
+                    ("module_offset_rebinding".into(), capability(CapabilityStatus::Unknown, "backend", vec!["GDB 9/10 require a stopped target with the module mapped; automatic rebinding requires GDB 11 or newer".into()], "gdb-version", 0)),
                     ("reverse".into(), capability(CapabilityStatus::Unknown, "current_target", vec!["target must advertise reverse execution".into()], "target-features", 0)),
                     ("execution".into(), capability(if matches!(profile, Profile::DebugControl | Profile::LabMutation | Profile::RawAdmin) { CapabilityStatus::Conditional } else { CapabilityStatus::Unsupported }, "current_target", vec!["requires a live target".into()], "policy", 0)),
                     ("target_mutation".into(), capability(if matches!(profile, Profile::LabMutation | Profile::RawAdmin) { CapabilityStatus::Conditional } else { CapabilityStatus::Unsupported }, "current_target", vec!["requires lab_mutation or raw_admin".into()], "policy", 0)),
@@ -489,6 +490,22 @@ impl SessionWorker {
         // does not include async execution in -list-features.
         self.set_capability("async_execution", CapabilityStatus::Supported);
         self.set_capability("thread_scoped_commands", CapabilityStatus::Supported);
+
+        // 2026-10-08: GDB 9/10 can leave an INT3 after failed running
+        // insertion, even after breakpoint deletion. Keep their module-offset
+        // operations at mapped, stopped targets instead of silently retrying.
+        let version = self
+            .execute(MiCommand::new("-gdb-version")?, self.command_timeout)
+            .await?;
+        let output = command_output(&version.stream_records, version.stream_truncated);
+        let status = module_rebinding_status(
+            output
+                .get("console")
+                .and_then(|console| console.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        );
+        self.set_capability("module_offset_rebinding", status);
 
         for command in [
             "-data-read-memory-bytes",
@@ -893,6 +910,26 @@ impl SessionWorker {
                 breakpoint,
                 response,
             } => {
+                let unsupported = self
+                    .capabilities
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .status("module_offset_rebinding")
+                    == Some(CapabilityStatus::Unsupported);
+                if unsupported
+                    && self
+                        .state
+                        .borrow()
+                        .breakpoints
+                        .get(&breakpoint.backend_number)
+                        .is_some_and(|state| state.pending)
+                {
+                    let _ = response.send(Err(Error::new(
+                        ErrorCode::CapabilityMissing,
+                        "GDB 9/10 require the module to be mapped at a stopped target",
+                    )));
+                    return false;
+                }
                 self.pending_module_breakpoints
                     .insert(breakpoint.backend_number.clone(), breakpoint);
                 self.module_rebind_needed = true;
@@ -1464,6 +1501,22 @@ impl SessionWorker {
 
     async fn rebind_pending_module_breakpoints(&mut self) -> Result<()> {
         if self.state.borrow().reconciliation_required {
+            return Ok(());
+        }
+        let running = self
+            .state
+            .borrow()
+            .inferiors
+            .values()
+            .any(|inferior| inferior.status == InferiorStatus::Running);
+        if running
+            && self
+                .capabilities
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .status("module_offset_rebinding")
+                == Some(CapabilityStatus::Unsupported)
+        {
             return Ok(());
         }
         let pending = self
@@ -2773,6 +2826,20 @@ fn capability(
     }
 }
 
+fn module_rebinding_status(output: &str) -> CapabilityStatus {
+    let major = output
+        .lines()
+        .find(|line| line.starts_with("GNU gdb "))
+        .and_then(|line| line.split_whitespace().last())
+        .and_then(|version| version.split('.').next())
+        .and_then(|major| major.parse::<u32>().ok());
+    match major {
+        Some(0..=10) => CapabilityStatus::Unsupported,
+        Some(_) => CapabilityStatus::Conditional,
+        None => CapabilityStatus::Unknown,
+    }
+}
+
 fn command_status(commands: &BTreeSet<String>, command: &str) -> CapabilityStatus {
     if commands.contains(command) {
         CapabilityStatus::Conditional
@@ -2966,6 +3033,27 @@ fn tracking_change(before: &Value, after: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_rebinding_requires_supported_running_insertion() {
+        assert_eq!(
+            module_rebinding_status("GNU gdb (GDB) 9.2\nCopyright"),
+            CapabilityStatus::Unsupported
+        );
+        assert_eq!(
+            module_rebinding_status("GNU gdb (Ubuntu 10.2-0ubuntu1) 10.2"),
+            CapabilityStatus::Unsupported
+        );
+        assert_eq!(
+            module_rebinding_status("GNU gdb (GDB) 11.2"),
+            CapabilityStatus::Conditional
+        );
+        assert_eq!(
+            module_rebinding_status("GNU gdb (GDB) 17.2.50.20261008-git"),
+            CapabilityStatus::Conditional
+        );
+        assert_eq!(module_rebinding_status(""), CapabilityStatus::Unknown);
+    }
 
     #[test]
     fn reads_mi_command_probe_value() {

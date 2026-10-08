@@ -59,6 +59,13 @@ restart stops at the main executable's relocated ELF entry and reports
 `first_instruction` retains GDB's `starti` behavior, which can stop in the
 dynamic loader. Use `none` to observe a requested breakpoint, signal, or
 exit. Explicit pending breakpoints remain available.
+GDB 9 and 10 support module offsets when the target is stopped and the module
+is already mapped. Start at `main` or the executable's ELF entry before
+creating an offset breakpoint. Unmapped or running-target module offsets
+return `CAPABILITY_MISSING` before breakpoint insertion. Automatic rebinding
+requires GDB 11 or newer and is reported by `module_offset_rebinding`.
+After restarting with retained offset breakpoints on GDB 9/10, stop at `main`
+or the ELF entry before continuing; rebinding occurs at that stopped target.
 An empty locals result is checked at its original thread, frame, and stop:
 missing debug information returns `CAPABILITY_MISSING`; a scope with debug
 information and no variables returns an empty list. Composite captures retain

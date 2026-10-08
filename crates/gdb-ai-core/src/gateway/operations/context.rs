@@ -13,7 +13,7 @@ use crate::{
     domain::{InferiorStatus, StopId, WaitBaseline},
     gateway::Gateway,
     providers::live_module_offset,
-    session::{SessionHandle, WaitUntil},
+    session::{CapabilityStatus, SessionHandle, WaitUntil},
 };
 
 impl Gateway {
@@ -78,6 +78,7 @@ impl Gateway {
 
     pub(super) fn breakpoint_location(
         &self,
+        session: &SessionHandle,
         parameters: &Value,
         state: &crate::domain::SessionState,
     ) -> Result<(String, Option<(String, u64)>)> {
@@ -96,6 +97,22 @@ impl Gateway {
             let offset = crate::domain::Address::parse(&string(module_offset, "offset")?)?;
             let offset = u64::from_str_radix(&offset.as_str()[2..], 16)
                 .map_err(|_| Error::new(ErrorCode::InvalidArgument, "invalid module offset"))?;
+            // 2026-10-08: Older GDB patched a module breakpoint during
+            // execution and left a stray trap after cleanup. Keep these
+            // versions on stopped targets with an already mapped module.
+            let stopped_mapping_required = session.capabilities().status("module_offset_rebinding")
+                == Some(CapabilityStatus::Unsupported);
+            if stopped_mapping_required
+                && state
+                    .inferiors
+                    .values()
+                    .any(|inferior| inferior.status == InferiorStatus::Running)
+            {
+                return Err(Error::new(
+                    ErrorCode::CapabilityMissing,
+                    "this GDB requires a stopped target for module-offset breakpoints",
+                ));
+            }
             // 2026-08-28: GDB does not report a loader-launched stripped PIE
             // as a shared library, so `module+offset` remained pending. The
             // existing local mapping provider supplies the actual load bias.
@@ -103,6 +120,12 @@ impl Gateway {
                 // 2026-09-01: Dropping metadata after immediate resolution
                 // left the absolute breakpoint stale on the next ASLR run.
                 return Ok((format!("*{address}"), Some((module, offset))));
+            }
+            if stopped_mapping_required {
+                return Err(Error::new(
+                    ErrorCode::CapabilityMissing,
+                    "this GDB requires the module to be mapped before setting a module-offset breakpoint",
+                ));
             }
             return Ok((breakpoint_location(parameters)?, Some((module, offset))));
         }

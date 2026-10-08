@@ -729,7 +729,7 @@ impl Gateway {
         // target's modules as addresses in the new process.
         let breakpoint_context = SessionState::creating(entry.handle.id().clone());
         for location in &parameters.breakpoints {
-            self.breakpoint_location(location, &breakpoint_context)?;
+            self.breakpoint_location(&entry.handle, location, &breakpoint_context)?;
         }
         let output_offset = entry.handle.inferior_output_position();
         let aslr = parameters.aslr.clone();

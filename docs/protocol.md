@@ -132,6 +132,11 @@ exactly one of `function`, `source: {path, line}`, `address`, `expression`, or
 image base, not an absolute symbol address. Locations are validated before
 target commands, then installed after executable symbols load and before
 execution.
+On GDB 9/10, a module-offset location requires a stopped target with the
+module mapped; unresolved and running-target selections return
+`CAPABILITY_MISSING` before insertion. Use `main` or the ELF-entry fallback
+for launch and restart. `module_offset_rebinding` advertises whether automatic
+rebinding is available; GDB 11 and newer report it as target-dependent.
 They are ordinary persistent software breakpoints with pending resolution
 enabled; existing breakpoints are not replaced. The `stop` and wait policies
 are unchanged: use `stop: "none"` with inspection to collect at the first
