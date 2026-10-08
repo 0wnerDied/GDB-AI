@@ -1,4 +1,3 @@
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -23,7 +22,7 @@ pub const API_VERSION: &str = "gdb.ai/v1";
 // and the published schema drift into four different canonical method sets.
 macro_rules! canonical_methods {
     ($( $variant:ident => $name:literal ),+ $(,)?) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         pub enum CanonicalMethod {
             $(#[serde(rename = $name)] $variant,)+
         }
@@ -209,7 +208,7 @@ pub fn canonical_request_schema() -> Value {
     })
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiRequest {
     pub api_version: String,
