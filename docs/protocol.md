@@ -112,6 +112,9 @@ An omitted launch or restart wait observes `running` for `stop: "none"`
 without inspection, and the selected stop plus its snapshot for other start
 policies. With `inspect`, `stop: "none"` instead defaults to `settled`.
 An explicit `accepted` remains non-blocking and cannot include inspection.
+`stop: "main"` fails before executing the new program if `main` cannot be
+resolved. `first_instruction` and `none` support targets without that symbol;
+explicit pending breakpoint locations still opt in to later resolution.
 Canonical execution control without a wait is accepted immediately; projected
 `gdb_run` control waits until settled by default.
 Execution control and wait requests may include one bounded byte-exact `input`
@@ -201,6 +204,10 @@ to standalone reads, inspection plans, and snapshot profiles. Scalar-only
 frames need no aggregate query. Partial reads retain valid variables and
 `variables_error`; profiles place that error in `failures.locals` beside the
 retained `locals` array. These captures remain explicitly incomplete.
+An empty native variable list is checked for missing debug information at the
+same thread, frame, and stop. Missing information returns
+`CAPABILITY_MISSING`; an empty scope with usable debug information stays a
+complete empty list. Nonempty scalar scopes need only the normal MI query.
 
 Composite responses expose the captured stop, execution epoch, revision, and
 available inferior/thread/frame identity through `semantics.context` in the

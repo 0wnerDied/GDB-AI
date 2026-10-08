@@ -222,6 +222,9 @@ covers the requested page and depth.
 
 Use `first_instruction` or `main` at launch only when setup must precede
 execution, then include the needed views in `gdb_run` action `continue`.
+`main` must resolve before execution. The
+[compatibility guide](compatibility.md#debug-information) covers stripped
+targets, separate debug files, runtime helpers, and remote firmware.
 
 Share `context.observation_id` with authorized observers through
 `gdb_inspect` view `observation` and `snapshot_id: "<observation-id>"`.
@@ -244,6 +247,10 @@ Inferior stdin, stdout, and stderr use `stream: "pty"`; `stream: "target"`
 selects GDB/MI `@` output, not the inferior's stdout.
 If `output.truncated` is true, continue with `gdb_io` action `read`,
 `stream: "pty"`, and `offset` set to `output.next_offset`.
+`gdb_raw` action `console` also includes the bounded PTY delta observed during
+its turn. `source: "pty"` and the requested/next offsets describe that shared
+stream interval; stdout from other writers can occur in it. Its `console`,
+`target`, and `log` fields remain separate MI streams.
 
 A `gdb_io` write may replace one `text` or `data_base64` payload with `steps`.
 Each step contains one payload and an optional `wait_for` substring. Matching

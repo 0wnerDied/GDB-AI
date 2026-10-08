@@ -200,7 +200,7 @@ projected MCP calls, and bounded resources over HTTP.
 | Connect an Agent | [Client setup](docs/mcp-clients.md) for supported MCP clients and the first debugging turn |
 | Use the APIs | [Canonical protocol](docs/protocol.md), [schemas](schemas), and [Python and TypeScript SDKs](sdk/README.md) |
 | Operate the server | [Operations](docs/operations.md), [architecture](docs/architecture.md), and the [security model](docs/security.md) |
-| Qualify or extend | [Compatibility](docs/compatibility.md), [kernel debugging](docs/kernel.md), the [provider boundary](docs/provider-sdk.md), and [evaluation](docs/evaluation.md) |
+| Qualify or extend | [Compatibility and target requirements](docs/compatibility.md), [kernel debugging](docs/kernel.md), the [provider boundary](docs/provider-sdk.md), and [evaluation](docs/evaluation.md) |
 
 ## Scope and trust boundary
 
@@ -213,10 +213,12 @@ releases, target prerequisites, and qualification boundary.
 Linux user-space coverage includes launch, attach, cores, threads,
 breakpoints, values, registers, memory, and disassembly. Remote coverage uses
 gdbserver and QEMU RSP. Conditional Linux kernel views cover tasks, modules,
-stacks, symbols, and selected page-table operations. Node.js/V8, PHP, CGI,
+stacks, symbols, and selected page-table operations. Node.js/V8, d8, PHP, CGI,
 LLVM, Clang, and JIT checks exercise native debugging with matching GDB and
 runtime builds; language-specific decoding still depends on matching symbols
-and caller-supplied helpers.
+and caller-supplied helpers. Bare-metal AArch64 qualification exercises
+control, registers, memory, and disassembly through QEMU RSP without host
+process facilities.
 
 Native Windows and macOS hosts, non-stop execution, an LLDB backend, and
 restoration of a live inferior after GDB exits are outside the current

@@ -2,12 +2,13 @@
 
 The `linux-kernel` provider is enabled by default and runs above the ordinary
 GDB/MI remote target. Set `security.kernel_enabled=false` to disable it. Typed
-task traversal requires a trusted, matching `vmlinux`. An x86-64 QEMU stub can
-also provide the bounded symbol-free bootstrap and module views below. GDB/AI
-does not auto-load target scripts or invent typed symbols.
+task and module traversal require a trusted, matching `vmlinux` and GDB with
+Python support. An x86-64 QEMU stub can also provide the bounded symbol-free
+bootstrap and module views below. GDB/AI does not auto-load target scripts or
+invent typed symbols.
 
 `gdb_kernel` exposes two actions. Requesting `dmesg` may execute the exact
-[`vmlinux-gdb.py` companion](https://docs.kernel.org/dev-tools/gdb-kernel-debugging.html)
+[`vmlinux-gdb.py` companion](https://docs.kernel.org/process/debugging/gdb-kernel-debugging.html)
 generated beside the current `vmlinux`; no separate configuration is required:
 
 - `inspect` returns bounded semantic observations;
@@ -35,8 +36,16 @@ The `inspect` views are:
 
 On x86-64, `current_task` is a per-CPU offset and is resolved from `$gs_base`.
 On AArch64, the provider uses `$sp_el0`. Task traversal uses debug type
-information from `vmlinux`. Module inspection supports both the legacy
-`core_layout` and Linux 6.4-or-newer `mem[]` layouts.
+information from `vmlinux`. Typed task and module pages traverse their lists
+inside one bounded GDB Python command, with a continuation offset and cycle
+detection. Follow that offset at the same stop; a page is not a full-list
+snapshot. Module inspection supports both the legacy `core_layout` and Linux
+6.4-or-newer `mem[]` layouts.
+
+The `capabilities` view distinguishes typed symbols from a retained
+`init_task` name. Views requiring unverified CPU state, module layouts,
+runtime kallsyms, or matching Linux helpers remain conditional; their actual
+read establishes availability.
 
 When an x86-64 QEMU target is stopped without usable `vmlinux` symbols,
 `bootstrap` compacts QEMU's memory map and a bounded GDB search into the runtime
@@ -84,10 +93,11 @@ explicit kernel base/version data. It cross-checks symbol/type-based traversal
 against [pwndbg](https://github.com/pwndbg/pwndbg). Neither project is loaded
 into GDB or linked as a runtime dependency.
 
-[Hex-Rays rax](https://github.com/HexRaysSA/rax) is a useful future RSP
-interoperability and checkpoint-safe-point test target. It is not required by
-the provider; QEMU and public Debian and Arch Linux artifacts are the current
-release oracles.
+[Hex-Rays RAX](https://github.com/HexRaysSA/rax) provides a separate RSP and
+whole-machine checkpoint model. RAX interoperability is unqualified here;
+QEMU and public distribution artifacts are the kernel verification targets.
+The [compatibility guide](compatibility.md#remote-and-bare-metal-targets)
+distinguishes machine restoration from retained debugger observations.
 
 ## Verification
 
