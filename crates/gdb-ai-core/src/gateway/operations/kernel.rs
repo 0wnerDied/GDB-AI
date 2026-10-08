@@ -184,6 +184,23 @@ async fn qemu_memory_map(
 const KERNEL_SYMBOL_PREFIX: &str = "gdbai-kernel-symbols:";
 const KERNEL_PAGE_TABLE_PREFIX: &str = "gdbai-kernel-page-table:";
 const KERNEL_DMESG_PREFIX: &str = "gdbai-kernel-dmesg:";
+const KERNEL_TYPED_PREFIX: &str = "gdbai-kernel-typed:";
+
+fn require_kernel_python(entry: &SessionEntry) -> Result<()> {
+    if !entry
+        .handle
+        .capabilities()
+        .features
+        .iter()
+        .any(|feature| feature == "python")
+    {
+        return Err(Error::new(
+            ErrorCode::CapabilityMissing,
+            "typed kernel task and module inspection requires GDB with Python support",
+        ));
+    }
+    Ok(())
+}
 
 fn prefixed_json_output(output: &[u8], prefix: &str, missing: &str) -> Result<Value> {
     let output = String::from_utf8_lossy(output);
@@ -196,7 +213,12 @@ fn prefixed_json_output(output: &[u8], prefix: &str, missing: &str) -> Result<Va
         .map_or(output.len(), |end| start + end);
     let value: Value = serde_json::from_str(&output[start..end])?;
     if let Some(error) = value.get("error").and_then(Value::as_str) {
-        return Err(Error::new(ErrorCode::CapabilityMissing, error));
+        let code = if value["error_code"] == "OUTPUT_LIMIT" {
+            ErrorCode::OutputLimit
+        } else {
+            ErrorCode::CapabilityMissing
+        };
+        return Err(Error::new(code, error));
     }
     Ok(value)
 }
@@ -390,6 +412,37 @@ async fn kernel_address(
 }
 
 impl Gateway {
+    async fn kernel_typed_query(
+        &self,
+        entry: &SessionEntry,
+        parameters: &Value,
+        state: &crate::domain::SessionState,
+        call: String,
+    ) -> Result<(Value, u64)> {
+        // 2026-10-08: Per-field MI evaluation repeated guard changes and
+        // round trips. Keep the bounded typed walk inside one GDB command.
+        let script = format!("{}\n{call}", include_str!("kernel_typed.py"),);
+        let reply = entry
+            .handle
+            .command_with_timeout(
+                context_options(
+                    MiCommand::new("-interpreter-exec")?
+                        .bare("console")?
+                        .string(format!("python exec({})", serde_json::to_string(&script)?)),
+                    parameters,
+                    state,
+                )?,
+                kernel_observation_timeout(self.config.server.command_timeout()),
+            )
+            .await?;
+        let result = prefixed_json_output(
+            &command_output(&reply),
+            KERNEL_TYPED_PREFIX,
+            "GDB omitted the typed kernel page",
+        )?;
+        Ok((result, reply.evidence_seq))
+    }
+
     pub(super) async fn resolve_kernel_module_offset(
         &self,
         entry: &SessionEntry,
@@ -1117,14 +1170,20 @@ impl Gateway {
                     } else {
                         ("unknown", "unavailable")
                     };
+                // 2026-10-08: A minimal init_task symbol did not prove typed
+                // kernel views. Require its task-list field and keep views
+                // that have not been read conditional.
                 let typed_symbols =
-                    match kernel_address(&entry, &request.parameters, &state, "&init_task").await {
+                    match kernel_address(&entry, &request.parameters, &state, "&init_task.tasks")
+                        .await
+                    {
                         Ok(symbols) => Some(symbols),
                         Err(error) if error.code == ErrorCode::GdbError => None,
                         Err(error) => return Err(error),
                     };
                 let runtime_kallsyms =
                     architecture == "x86-64" && matches!(state.target_origin, TargetOrigin::Remote);
+                let python = require_kernel_python(&entry).is_ok();
                 Ok(json!({
                     "view": view,
                     "architecture": architecture,
@@ -1143,8 +1202,10 @@ impl Gateway {
                         },
                         "mode": if typed_symbols.is_some() {
                             "trusted-vmlinux"
-                        } else {
+                        } else if runtime_kallsyms {
                             "runtime-kallsyms"
+                        } else {
+                            "unavailable"
                         }
                     },
                     "bootstrap": {
@@ -1166,26 +1227,42 @@ impl Gateway {
                     "current_task": {
                         "status": if current_task == "unavailable" {
                             "unsupported"
-                        } else if typed_symbols.is_some() {
-                            "supported"
-                        } else {
+                        } else if typed_symbols.is_some() || runtime_kallsyms {
                             "conditional"
+                        } else {
+                            "unsupported"
                         },
                         "mechanism": current_task
                     },
-                    "modules": {
-                        "status": if typed_symbols.is_some() {
+                    "tasks": {
+                        "status": if typed_symbols.is_some() && python {
                             "supported"
-                        } else if runtime_kallsyms {
+                        } else {
+                            "unsupported"
+                        },
+                        "mechanism": "task_struct.tasks"
+                    },
+                    "modules": {
+                        "status": if typed_symbols.is_some() || runtime_kallsyms {
                             "conditional"
                         } else {
                             "unsupported"
                         },
                         "mechanism": if typed_symbols.is_some() {
                             "trusted-vmlinux"
-                        } else {
+                        } else if runtime_kallsyms {
                             "runtime-kallsyms+modules-list"
+                        } else {
+                            "unavailable"
                         }
+                    },
+                    "dmesg": {
+                        "status": if typed_symbols.is_some() && python {
+                            "conditional"
+                        } else {
+                            "unsupported"
+                        },
+                        "mechanism": "matching Linux GDB scripts"
                     },
                     "monitor": {
                         "status": if self.config.security.monitor_allowlist.is_empty() {
@@ -1258,16 +1335,9 @@ impl Gateway {
             self.config.limits.value_children,
             "kernel task",
         )?;
-        let (init_task, mut evidence_seq) =
-            kernel_address(entry, &request.parameters, state, "&init_task").await?;
-        let (head, seq) =
-            kernel_address(entry, &request.parameters, state, "&init_task.tasks").await?;
-        evidence_seq = evidence_seq.max(seq);
-        let (mut cursor, seq) =
-            kernel_address(entry, &request.parameters, state, "init_task.tasks.next").await?;
-        evidence_seq = evidence_seq.max(seq);
-        // 2026-08-28: Optional current-task metadata previously swallowed
-        // timeouts and could send more MI commands after an unknown outcome.
+        require_kernel_python(entry)?;
+        // 2026-08-28: Optional current-task metadata must not swallow
+        // timeouts or send more commands after an unknown outcome.
         let current = match kernel_current_text(entry, &request.parameters, state).await {
             Ok((value, _)) => Some(parse_gdb_u64(&value)?),
             Err(error)
@@ -1280,85 +1350,23 @@ impl Gateway {
             }
             Err(error) => return Err(error),
         };
-        let mut task_addresses = vec![init_task];
-        let mut seen = BTreeSet::new();
-        while cursor != head && task_addresses.len() < offset.saturating_add(limit + 1) {
-            if !seen.insert(cursor) {
-                return Err(Error::new(
-                    ErrorCode::GdbError,
-                    "kernel task list contains a cycle outside init_task",
-                ));
-            }
-            let expression = format!(
-                "(struct task_struct *)((char *)0x{cursor:x} - (unsigned long)&((struct task_struct *)0)->tasks)"
-            );
-            let (task, seq) =
-                kernel_address(entry, &request.parameters, state, &expression).await?;
-            evidence_seq = evidence_seq.max(seq);
-            task_addresses.push(task);
-            let expression = format!("((struct list_head *)0x{cursor:x})->next");
-            let (next, seq) =
-                kernel_address(entry, &request.parameters, state, &expression).await?;
-            evidence_seq = evidence_seq.max(seq);
-            cursor = next;
-        }
-        let truncated = cursor != head || task_addresses.len() > offset.saturating_add(limit);
-        let mut tasks = Vec::new();
-        for task in task_addresses.into_iter().skip(offset).take(limit) {
-            let (pid, seq) = kernel_text(
+        let current = current.map_or_else(|| "None".to_owned(), |value| format!("0x{value:x}"));
+        let (mut result, evidence_seq) = self
+            .kernel_typed_query(
                 entry,
                 &request.parameters,
                 state,
-                &format!("((struct task_struct *)0x{task:x})->pid"),
+                format!("_gdbai_kernel_tasks({offset}, {limit}, {current})"),
             )
             .await?;
-            evidence_seq = evidence_seq.max(seq);
-            let (tgid, seq) = kernel_text(
-                entry,
-                &request.parameters,
-                state,
-                &format!("((struct task_struct *)0x{task:x})->tgid"),
-            )
-            .await?;
-            evidence_seq = evidence_seq.max(seq);
-            let (name, seq) = kernel_text(
-                entry,
-                &request.parameters,
-                state,
-                &format!("((struct task_struct *)0x{task:x})->comm"),
-            )
-            .await?;
-            evidence_seq = evidence_seq.max(seq);
-            tasks.push(json!({
-                "address": format!("0x{task:016x}"),
-                "pid": parse_gdb_u64(&pid)?,
-                "tgid": parse_gdb_u64(&tgid)?,
-                "name": gdb_c_string(&name),
-                "current": current.map(|current| current == task)
-            }));
-        }
-        let next_offset = offset + tasks.len();
-        Ok(json!({
-            "view": "tasks",
-            "tasks": tasks,
-            "offset": offset,
-            "limit": limit,
-            "truncated": truncated,
-            "continuation": truncated.then(|| json!({"offset": next_offset})),
-            "partial": current.is_none(),
-            "warnings": if current.is_none() {
-                vec!["current task could not be resolved"]
-            } else {
-                Vec::new()
-            },
-            "stop_id": state.stop_id,
-            "source": {
-                "provider": "linux-kernel",
-                "version": LINUX_KERNEL_PROVIDER_VERSION,
-                "mechanism": "task_struct.tasks"
-            },
-            "evidence_seq": evidence_seq
-        }))
+        result["stop_id"] = json!(state.stop_id);
+        result["source"] = json!({
+            "provider": "linux-kernel",
+            "version": LINUX_KERNEL_PROVIDER_VERSION,
+            "mechanism": "task_struct.tasks"
+        });
+        result["evidence_seq"] = Value::from(evidence_seq);
+        Ok(result)
     }
 
     pub(super) async fn kernel_modules(
@@ -1374,7 +1382,7 @@ impl Gateway {
             "kernel module",
         )?;
         let head = kernel_address(entry, &request.parameters, state, "&modules").await;
-        let (head, mut evidence_seq) = match head {
+        let (head, _) = match head {
             Ok(value) => value,
             // 2026-09-04: Stripped guests previously made the typed module
             // view fail before returning even the stable list/name prefix.
@@ -1430,120 +1438,23 @@ impl Gateway {
             }
             Err(error) => return Err(error),
         };
-        let (mut cursor, seq) =
-            kernel_address(entry, &request.parameters, state, "modules.next").await?;
-        evidence_seq = evidence_seq.max(seq);
-        let mut module_addresses = Vec::new();
-        let mut seen = BTreeSet::new();
-        while cursor != head && module_addresses.len() < offset.saturating_add(limit + 1) {
-            if !seen.insert(cursor) {
-                return Err(Error::new(
-                    ErrorCode::GdbError,
-                    "kernel module list contains a cycle outside modules",
-                ));
-            }
-            let expression = format!(
-                "(struct module *)((char *)0x{cursor:x} - (unsigned long)&((struct module *)0)->list)"
-            );
-            let (module, seq) =
-                kernel_address(entry, &request.parameters, state, &expression).await?;
-            evidence_seq = evidence_seq.max(seq);
-            module_addresses.push(module);
-            let expression = format!("((struct list_head *)0x{cursor:x})->next");
-            let (next, seq) =
-                kernel_address(entry, &request.parameters, state, &expression).await?;
-            evidence_seq = evidence_seq.max(seq);
-            cursor = next;
-        }
-        let truncated = cursor != head || module_addresses.len() > offset.saturating_add(limit);
-        let mut modules = Vec::new();
-        for module in module_addresses.into_iter().skip(offset).take(limit) {
-            let (name, seq) = kernel_text(
+        require_kernel_python(entry)?;
+        let (mut result, evidence_seq) = self
+            .kernel_typed_query(
                 entry,
                 &request.parameters,
                 state,
-                &format!("((struct module *)0x{module:x})->name"),
+                format!("_gdbai_kernel_modules(0x{head:x}, {offset}, {limit})"),
             )
             .await?;
-            evidence_seq = evidence_seq.max(seq);
-            let modern_base = format!("((struct module *)0x{module:x})->mem[0].base");
-            let legacy_base = format!("((struct module *)0x{module:x})->core_layout.base");
-            let legacy_size = format!("((struct module *)0x{module:x})->core_layout.size");
-            let (base, size, layout, seq) = match kernel_text(
-                entry,
-                &request.parameters,
-                state,
-                &modern_base,
-            )
-            .await
-            {
-                Ok((base, base_seq)) => {
-                    let count_expression =
-                        "sizeof(((struct module *)0)->mem) / sizeof(((struct module *)0)->mem[0])";
-                    let (count, mut size_seq) =
-                        kernel_text(entry, &request.parameters, state, count_expression).await?;
-                    let count = parse_gdb_u64(&count)?;
-                    if count == 0 || count > 32 {
-                        return Err(Error::new(
-                            ErrorCode::OutputLimit,
-                            "kernel module memory layout count is invalid",
-                        ));
-                    }
-                    let mut size = 0_u64;
-                    for index in 0..count {
-                        let expression =
-                            format!("((struct module *)0x{module:x})->mem[{index}].size");
-                        let (part, seq) =
-                            kernel_text(entry, &request.parameters, state, &expression).await?;
-                        size = size.checked_add(parse_gdb_u64(&part)?).ok_or_else(|| {
-                            Error::new(ErrorCode::OutputLimit, "kernel module size exceeds 64 bits")
-                        })?;
-                        size_seq = size_seq.max(seq);
-                    }
-                    (
-                        base,
-                        size.to_string(),
-                        "module_memory",
-                        base_seq.max(size_seq),
-                    )
-                }
-                // 2026-08-28: Only an absent legacy field justifies trying
-                // the alternate layout. Preserve timeout and transport errors
-                // so an unknown command outcome remains fenced.
-                Err(error) if error.code == ErrorCode::GdbError => {
-                    let (base, base_seq) =
-                        kernel_text(entry, &request.parameters, state, &legacy_base).await?;
-                    let (size, size_seq) =
-                        kernel_text(entry, &request.parameters, state, &legacy_size).await?;
-                    (base, size, "core_layout", base_seq.max(size_seq))
-                }
-                Err(error) => return Err(error),
-            };
-            evidence_seq = evidence_seq.max(seq);
-            modules.push(json!({
-                "address": format!("0x{module:016x}"),
-                "name": gdb_c_string(&name),
-                "base": format!("0x{:016x}", parse_gdb_u64(&base)?),
-                "size": parse_gdb_u64(&size)?,
-                "layout": layout
-            }));
-        }
-        let next_offset = offset + modules.len();
-        Ok(json!({
-            "view": "modules",
-            "modules": modules,
-            "offset": offset,
-            "limit": limit,
-            "truncated": truncated,
-            "continuation": truncated.then(|| json!({"offset": next_offset})),
-            "stop_id": state.stop_id,
-            "source": {
-                "provider": "linux-kernel",
-                "version": LINUX_KERNEL_PROVIDER_VERSION,
-                "mechanism": "modules-list"
-            },
-            "evidence_seq": evidence_seq
-        }))
+        result["stop_id"] = json!(state.stop_id);
+        result["source"] = json!({
+            "provider": "linux-kernel",
+            "version": LINUX_KERNEL_PROVIDER_VERSION,
+            "mechanism": "modules-list"
+        });
+        result["evidence_seq"] = Value::from(evidence_seq);
+        Ok(result)
     }
 
     pub(super) async fn kernel_monitor(&self, request: &ApiRequest) -> Result<Value> {

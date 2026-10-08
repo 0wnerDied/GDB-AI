@@ -70,6 +70,70 @@ fn kernel_artifacts() -> Option<(PathBuf, PathBuf, PathBuf)> {
     None
 }
 
+#[test]
+fn pages_typed_module_memory_layouts_in_gdb() {
+    if !support::require_commands(&["cc", "gdb"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("modules.c");
+    let executable = directory.path().join("modules");
+    std::fs::write(
+        &source,
+        r#"
+struct list_head { struct list_head *next, *prev; };
+struct module_memory { void *base; unsigned size; };
+struct module { struct list_head list; char name[56]; struct module_memory mem[7]; };
+extern struct module first, second;
+struct list_head modules = { &first.list, &second.list };
+struct module first = { { &second.list, &modules }, "first", {{(void *)0x1000, 256}, {(void *)0x4000, 32}} };
+struct module second = { { &modules, &first.list }, "second", {{(void *)0x9000, 64}} };
+int main(void) { return 0; }
+"#,
+    )
+    .unwrap();
+    assert!(
+        Command::new("cc")
+            .args(["-g", "-O0"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let helper =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/gateway/operations/kernel_typed.py");
+    let gdb = std::env::var_os("GDB_AI_GDB_PATH").unwrap_or_else(|| "gdb".into());
+    let output = Command::new(gdb)
+        .args(["-nx", "-q", "-batch"])
+        .arg(&executable)
+        .args(["-ex", "start", "-x"])
+        .arg(helper)
+        .args([
+            "-ex",
+            "python [_gdbai_kernel_modules(int(gdb.parse_and_eval('&modules')), offset, 1) for offset in range(3)]",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let pages = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("gdbai-kernel-typed:"))
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(pages.len(), 3);
+    assert_eq!(pages[0]["modules"][0]["name"], "first");
+    assert_eq!(pages[0]["modules"][0]["base"], "0x0000000000001000");
+    assert_eq!(pages[0]["modules"][0]["size"], 288);
+    assert_eq!(pages[0]["modules"][0]["layout"], "module_memory");
+    assert_eq!(pages[0]["continuation"]["offset"], 1);
+    assert_eq!(pages[1]["modules"][0]["name"], "second");
+    assert_eq!(pages[1]["truncated"], false);
+    assert_eq!(pages[2]["modules"], json!([]));
+}
+
 fn build_initramfs(directory: &std::path::Path, module: &std::path::Path) -> PathBuf {
     let root = directory.join("initramfs");
     for path in ["bin", "dev", "proc", "sys"] {
@@ -119,7 +183,11 @@ async fn loads_matching_kernel_helpers_for_bounded_dmesg() {
     let directory = tempdir().unwrap();
     let executable = directory.path().join("vmlinux");
     let source = directory.path().join("kernel.c");
-    std::fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+    std::fs::write(
+        &source,
+        "int init_task = 42; int main(void) { return init_task; }\n",
+    )
+    .unwrap();
     assert!(
         Command::new("cc")
             .args(["-g", "-O0"])
@@ -184,6 +252,24 @@ async fn loads_matching_kernel_helpers_for_bounded_dmesg() {
         .unwrap()
         .0
         .clone();
+    let capabilities = call(
+        &gateway,
+        &caller,
+        request(
+            "inspect-userland-capabilities",
+            Some(session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "capabilities", "stop_id": stop_id}),
+        ),
+    )
+    .await;
+    let capabilities = capabilities.result.as_ref().unwrap();
+    assert_eq!(capabilities["symbols"]["status"], "unsupported");
+    assert_eq!(capabilities["symbols"]["mode"], "unavailable");
+    assert_eq!(capabilities["current_task"]["status"], "unsupported");
+    assert_eq!(capabilities["tasks"]["status"], "unsupported");
+    assert_eq!(capabilities["modules"]["status"], "unsupported");
     let dmesg = call(
         &gateway,
         &caller,
@@ -423,6 +509,18 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
         capabilities.result.as_ref().unwrap()["transport"],
         "gdb-remote"
     );
+    assert_eq!(
+        capabilities.result.as_ref().unwrap()["tasks"]["status"],
+        "supported"
+    );
+    assert_eq!(
+        capabilities.result.as_ref().unwrap()["current_task"]["status"],
+        "conditional"
+    );
+    assert_eq!(
+        capabilities.result.as_ref().unwrap()["modules"]["status"],
+        "conditional"
+    );
 
     let version = call(
         &gateway,
@@ -602,6 +700,44 @@ async fn inspects_a_public_debian_kernel_over_qemu_rsp() {
     if let Ok(layout) = std::env::var("GDB_AI_KERNEL_MODULE_LAYOUT") {
         assert_eq!(loaded_module["layout"], layout);
     }
+    let mut task_pages = Vec::new();
+    for (offset, limit) in [(0, 16), (0, 8), (8, 8)] {
+        let page = call(
+            &gateway,
+            &caller,
+            request(
+                format!("kernel-task-page-{offset}-{limit}"),
+                Some(&session_id),
+                "kernel.inspect",
+                None,
+                json!({"view": "tasks", "stop_id": module_stop_id, "offset": offset, "limit": limit}),
+            ),
+        )
+        .await;
+        task_pages.push(page.result.unwrap());
+    }
+    let tasks = task_pages[0]["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 16);
+    assert_eq!(task_pages[1]["tasks"], json!(tasks[..8]));
+    assert_eq!(task_pages[2]["tasks"], json!(tasks[8..]));
+    assert_eq!(task_pages[1]["continuation"]["offset"], 8);
+    assert_eq!(task_pages[2]["continuation"]["offset"], 16);
+    let empty_module_page = call(
+        &gateway,
+        &caller,
+        request(
+            "kernel-module-page-after-end",
+            Some(&session_id),
+            "kernel.inspect",
+            None,
+            json!({"view": "modules", "stop_id": module_stop_id, "offset": 1, "limit": 8}),
+        ),
+    )
+    .await;
+    let empty_module_page = empty_module_page.result.unwrap();
+    assert_eq!(empty_module_page["modules"], json!([]));
+    assert_eq!(empty_module_page["truncated"], false);
+    assert_eq!(empty_module_page["continuation"], serde_json::Value::Null);
     if has_kernel_helpers {
         let dmesg = call(
             &gateway,
