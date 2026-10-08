@@ -112,10 +112,7 @@ enum TranscriptCommand {
     Inspect { journal: PathBuf },
 }
 
-// 2026-09-01: Tokio's host-CPU default created 194 threads per server on the
-// benchmark host, starving short-lived GDB sessions under concurrent load.
-#[tokio::main(worker_threads = 4)]
-async fn main() {
+fn main() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -123,7 +120,14 @@ async fn main() {
         )
         .with_writer(std::io::stderr)
         .try_init();
-    if let Err(error) = run().await {
+    // 2026-10-08: Four workers oversubscribed small CPU allocations. Keep
+    // the host-CPU limit capped at four without wasting workers on one core.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(std::thread::available_parallelism().map_or(1, |count| count.get().min(4)))
+        .enable_all()
+        .build()
+        .expect("failed to build Tokio runtime");
+    if let Err(error) = runtime.block_on(run()) {
         eprintln!("gdb-ai: {error}");
         std::process::exit(1);
     }
