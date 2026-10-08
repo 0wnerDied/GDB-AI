@@ -99,13 +99,17 @@ pub(super) async fn append_turn_output(
     }
     let end = entry.handle.inferior_output_position();
     let mut output = Value::Object(byte_content(read.bytes));
+    // A PTY delta includes all writers observed after this cursor; it does
+    // not attribute stdout exclusively to the debugger command or helper.
+    output["source"] = Value::String("pty".into());
+    output["requested_offset"] = Value::from(read.requested_offset);
+    output["next_offset"] = Value::from(read.next_offset);
     if read.gap {
         output["gap"] = Value::Bool(true);
         output["available_from"] = Value::from(read.available_from);
     }
     if read.next_offset < end {
         output["truncated"] = Value::Bool(true);
-        output["next_offset"] = Value::from(read.next_offset);
     }
     result["output"] = output;
     Ok(())

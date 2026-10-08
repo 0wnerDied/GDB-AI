@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use super::{
     encoding::first_word,
+    execution::append_turn_output,
     reconciliation::{
         reconcile_breakpoints, reconcile_inferiors, reconcile_libraries, reconcile_threads,
         reconciliation_command,
@@ -48,6 +49,9 @@ impl Gateway {
                 ),
             })
             .await?;
+        // 2026-10-08: Runtime helpers can print through the inferior PTY
+        // instead of MI streams. Return its bounded delta in this same turn.
+        let output_offset = entry.handle.inferior_output_position();
         let reply = entry
             .handle
             .command_with_timeout(
@@ -68,6 +72,7 @@ impl Gateway {
             &reply.stream_records,
             reply.stream_truncated,
         ));
+        append_turn_output(&entry, output_offset, &mut result).await?;
         Ok(result)
     }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare native GDB and projected MCP on native runtime breakpoints."""
+"""Compare native GDB and MCP runtime stops and caller-supplied VM helpers."""
 
 import argparse
 import json
@@ -23,6 +23,10 @@ def main():
     parser.add_argument("server", type=executable)
     for name in ("gdb", "clang", "lli", "node", "php", "php-cgi"):
         parser.add_argument(f"--{name}", default=name, type=executable)
+    parser.add_argument("--d8", type=executable, help="optional V8 shell")
+    parser.add_argument("--d8-helper", type=Path, help="matching trusted V8 tools/gdbinit")
+    parser.add_argument("--php-helper", type=Path, help="matching trusted PHP .gdbinit")
+    parser.add_argument("--debug-file-directory", type=Path, help="local matching GDB debug files")
     parser.add_argument("--library-path", help="target LD_LIBRARY_PATH for unpacked runtimes")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="gdb-ai-runtimes-") as temporary:
@@ -38,21 +42,35 @@ def main():
         for options, output in (([], native), (["-emit-llvm", "-c"], bitcode)):
             subprocess.run([args.clang, "-g", "-O0", *options, str(source), "-o", str(output)], check=True)
         php_source = root / "request.php"
-        php_source.write_text('<?php echo "runtime-result=42\\n"; ?>\n')
+        php_source.write_text(
+            '<?php function runtime_inner($x) { usleep(1); return $x + 1; }\n'
+            'function runtime_outer($x) { return runtime_inner($x); }\n'
+            'echo "runtime-result=" . runtime_outer(41) . "\\n"; ?>\n'
+        )
         helper = root / "runtime.gdb"
         helper.write_text('printf "helper-result=%d\\n", 42\n')
         cases = [
-            ("clang", str(native), [], "runtime_increment"),
-            ("llvm-jit", args.lli, ["--jit-kind=mcjit", str(bitcode)], "runtime_increment"),
-            ("node-v8", args.node, ["--eval", 'console.log("runtime-result=42")'], "v8::Isolate::Initialize"),
-            ("php", args.php, ["-n", str(php_source)], "php_request_startup"),
-            ("php-cgi", args.php_cgi, ["-n", "-f", str(php_source)], "php_request_startup"),
+            ("clang", str(native), [], "runtime_increment", None, None),
+            ("llvm-jit", args.lli, ["--jit-kind=mcjit", str(bitcode)], "runtime_increment", None, None),
+            ("node-v8", args.node, ["--eval", 'console.log("runtime-result=42")'], "v8::Isolate::Initialize", None, None),
+            ("php", args.php, ["-n", str(php_source)],
+             "zif_usleep" if args.php_helper else "php_request_startup", args.php_helper, "zbacktrace"),
+            ("php-cgi", args.php_cgi, ["-n", "-f", str(php_source)], "php_request_startup", None, None),
         ]
+        if args.d8:
+            js_source = root / "request.js"
+            js_source.write_text(
+                'function runtime_inner(x) { print("runtime-result=" + (x + 1)); }\n'
+                'function runtime_outer(x) { runtime_inner(x); }\n'
+                'runtime_outer(41);\n'
+            )
+            cases.append(("d8-v8", args.d8, [str(js_source)], "v8::Shell::Print",
+                          args.d8_helper, "jstc"))
         environment = {"REDIRECT_STATUS": "200", "REQUEST_METHOD": "GET",
                        "SCRIPT_FILENAME": str(php_source)}
         if args.library_path:
             environment["LD_LIBRARY_PATH"] = args.library_path
-        roots = sorted({str(root), *(str(Path(program).parent) for _, program, _, _ in cases)})
+        roots = sorted({str(root), *(str(Path(program).parent) for _, program, *_ in cases)})
         config = root / "server.toml"
         config.write_text(
             f'[gdb]\npath = {json.dumps(args.gdb)}\n'
@@ -84,12 +102,20 @@ def main():
                 return response["result"]["structuredContent"]
 
             try:
-                for label, program, argv, breakpoint in cases:
-                    commands = ["set pagination off", "set breakpoint pending on"]
+                for label, program, argv, breakpoint, runtime_helper, runtime_command in cases:
+                    commands = ["set pagination off", "set breakpoint pending on", "set may-call-functions off"]
+                    if runtime_helper:
+                        commands.append(f"source {runtime_helper.resolve()}")
                     commands += [f"set environment {name}={value}" for name, value in environment.items()]
-                    commands += [f"tbreak {breakpoint}", "run", "bt 2", f"source {helper}", "continue"]
+                    commands += [f"tbreak {breakpoint}", "run", "bt 2", f"source {helper}"]
+                    if runtime_helper:
+                        if label == "d8-v8":
+                            commands += [runtime_command, "set may-call-functions on"]
+                        commands.append(runtime_command)
+                    commands.append("continue")
+                    initial = ["-iex", f"set debug-file-directory {args.debug_file_directory.resolve()}"] if args.debug_file_directory else []
                     reference = subprocess.run(
-                        [args.gdb, "-q", "-nx", "-batch", *(arg for command in commands for arg in ("-ex", command)),
+                        [args.gdb, "-q", "-nx", "-batch", *initial, *(arg for command in commands for arg in ("-ex", command)),
                          "--args", program, *argv],
                         capture_output=True, text=True, timeout=30,
                         env={**os.environ, "LC_ALL": "C"},
@@ -103,8 +129,18 @@ def main():
                         assert [line for line in reference.stdout.splitlines()
                                 if line.startswith(marker + "=")] == [marker + "=42"], reference.stdout
                     assert "exited normally" in reference.stdout, reference.stdout
+                    if runtime_helper:
+                        assert "runtime_inner" in reference.stdout and "runtime_outer" in reference.stdout, reference.stdout
+                        if label == "d8-v8":
+                            assert "may-call-functions is off" in reference.stderr, reference.stderr
                     session = call("gdb_session", action="create")["result"]["session_id"]
                     try:
+                        if args.debug_file_directory:
+                            call("gdb_raw", action="console", session_id=session,
+                                 command=f"set debug-file-directory {args.debug_file_directory.resolve()}")
+                        if runtime_helper:
+                            call("gdb_raw", action="console", session_id=session,
+                                 command=f"source {runtime_helper.resolve()}")
                         call("gdb_session", action="launch", session_id=session, program=program,
                              argv=argv, environment=environment, stop="first_instruction")
                         call("gdb_breakpoints", action="create", session_id=session,
@@ -117,6 +153,18 @@ def main():
                                       command=f"source {helper}")
                         assert output["result"]["console"]["text"] == "helper-result=42\n", output
                         assert "command" not in output["result"], output
+                        if runtime_helper:
+                            if label == "d8-v8":
+                                call("gdb_raw", action="console", session_id=session,
+                                     command="set may-call-functions on")
+                            vm = call("gdb_raw", action="console", session_id=session,
+                                      command=runtime_command)
+                            channel = vm["result"]["output"] if label == "d8-v8" else vm["result"]["console"]
+                            assert "runtime_inner" in channel["text"] and "runtime_outer" in channel["text"], vm
+                            if label == "d8-v8":
+                                assert channel["source"] == "pty", vm
+                                assert channel["next_offset"] > channel["requested_offset"], vm
+                            assert vm["state"]["stop_id"] == stopped["state"]["stop_id"], vm
                         finished = call("gdb_run", action="continue", session_id=session)
                         assert finished["result"]["settled_by"] == "exited", finished
                         assert finished["state"]["exit_code"] == 0, finished

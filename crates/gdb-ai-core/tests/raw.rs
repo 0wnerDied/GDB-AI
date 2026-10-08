@@ -12,6 +12,133 @@ mod support;
 use support::{call, request};
 
 #[tokio::test]
+async fn raw_helper_returns_bounded_pty_output_without_changing_call_permission() {
+    if !support::require_commands(&["gdb", "cc"]) {
+        return;
+    }
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("helper.c");
+    let program = directory.path().join("helper");
+    std::fs::write(
+        &source,
+        "#include <stdio.h>\n\
+         void emit_helper_output(void) {\n\
+           puts(\"helper-result=42\");\n\
+           for (int i = 0; i < 6000; ++i) putchar('x');\n\
+           putchar('\\n'); fflush(stdout);\n\
+         }\n\
+         int main(void) { return 0; }\n",
+    )
+    .unwrap();
+    assert!(
+        std::process::Command::new("cc")
+            .args(["-g", "-O0"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&program)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let gateway = Gateway::new(Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        security: gdb_ai_core::config::SecurityConfig {
+            default_profile: Profile::RawAdmin,
+            workspace_roots: vec![directory.path().into()],
+            ..Default::default()
+        },
+        ..Config::default()
+    })
+    .unwrap();
+    let caller = Caller {
+        identity: "raw-helper-test".into(),
+        admin: true,
+    };
+    let created = gateway
+        .dispatch_agent(
+            request("create", None, "session.create", None, json!({})),
+            &caller,
+        )
+        .await;
+    let session_id = created.session_id.unwrap();
+    let dispatch = async |method: &str, parameters| {
+        gateway
+            .dispatch_agent(
+                request(method, Some(&session_id), method, None, parameters),
+                &caller,
+            )
+            .await
+    };
+    let launched = support::successful(
+        dispatch("target.launch", json!({"program": program, "stop": "main"})).await,
+    );
+    let baseline = launched
+        .semantics
+        .as_ref()
+        .unwrap()
+        .context
+        .as_ref()
+        .unwrap();
+    let command = "call (void) emit_helper_output()";
+    let denied = dispatch("raw.console", json!({"command": command})).await;
+    assert_eq!(
+        denied.error.as_ref().unwrap().code,
+        gdb_ai_core::ErrorCode::GdbError
+    );
+    assert!(denied.error.unwrap().message.contains("may-call-functions"));
+    support::successful(
+        dispatch(
+            "raw.console",
+            json!({"command": "set may-call-functions on"}),
+        )
+        .await,
+    );
+    let emitted = support::successful(dispatch("raw.console", json!({"command": command})).await);
+    let output = &emitted.result.as_ref().unwrap()["output"];
+    assert_eq!(output["source"], "pty");
+    assert_eq!(output["requested_offset"], 0);
+    assert_eq!(output["next_offset"], 4096);
+    assert_eq!(output["truncated"], true);
+    assert_eq!(output["text"].as_str().unwrap().len(), 4096);
+    assert!(
+        output["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("helper-result=42\n")
+    );
+    let state = emitted.state.as_ref().unwrap();
+    assert_eq!(state.stop_id.as_ref(), Some(&baseline.stop_id));
+    assert_eq!(state.execution_epoch, baseline.execution_epoch);
+
+    let remainder = support::successful(
+        dispatch(
+            "inferior_io.read",
+            json!({"stream": "pty", "after_offset": 4096}),
+        )
+        .await,
+    );
+    let remainder = remainder.result.unwrap();
+    assert_eq!(remainder["next_offset"], 17 + 6000 + 1);
+    assert!(remainder["text"].as_str().unwrap().ends_with('\n'));
+    let permission = support::successful(
+        dispatch("raw.console", json!({"command": "show may-call-functions"})).await,
+    );
+    assert!(
+        permission.result.unwrap()["console"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("on")
+    );
+    support::successful(dispatch("session.close", json!({})).await);
+}
+
+#[tokio::test]
 async fn raw_admin_defers_reconciliation_until_structured_inspection() {
     if !support::require_commands(&["gdb"]) {
         return;
