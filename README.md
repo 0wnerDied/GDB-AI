@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>GDB Agent Interface</strong><br>
-  Stateful, bounded access to GNU GDB for software Agents.
+  Stateful debugging · bounded observations · explicit evidence
 </p>
 
 <p align="center">
@@ -24,19 +24,15 @@
   <a href="#reproducible-verification">Verification</a>
 </p>
 
-GDB/AI is the **GDB Agent Interface**, a Rust server that gives software Agents
-stateful, bounded access to GNU GDB through MCP and a canonical JSON-RPC API.
-GNU GDB retains target execution, symbols, unwinding, expressions, and JIT
-registration. GDB/AI manages sessions, typed operations, concurrency, and
-evidence around those semantics.
+GDB/AI is the **GDB Agent Interface**, a Rust server for debugging through MCP
+and a canonical JSON-RPC API. GNU GDB owns execution, symbols, unwinding,
+expressions, and JIT registration. GDB/AI gives Agents persistent sessions,
+bounded observations, and evidence tied to the state in which it was captured.
 
-The interface is organized around an Agent's debugging turn. A launch request
-can create a session, install breakpoints, run to a stop, and collect a
-stop-bound inspection plan. Later run-control requests can provide target input,
-wait for another stop or exit, and return requested observations. Responses
-identify their execution context and any incomplete evidence. This reduces
-protocol bookkeeping and output parsing while preserving the facts needed to
-support a diagnosis.
+One debugging turn can create a session, install breakpoints, run to a stop,
+and collect an inspection plan. Later turns reuse that session to send input,
+resume execution, and inspect the next stop. Responses identify the capture
+context and incomplete evidence; an exit is returned as an execution outcome.
 
 The primary workflow is native Linux crash and blocked-thread diagnosis in a
 trusted development workspace. Attach, core, gdbserver, QEMU, Linux kernel,
@@ -110,18 +106,19 @@ they do not imply that the Agent should repeat the run-control operation.
 
 <p align="center">
   <a href="docs/assets/gdb-ai-operation-sequence.svg">
-    <img src="docs/assets/gdb-ai-operation-sequence.svg" width="900"
-         alt="One launch request optionally creates a session, configures GDB and breakpoints, runs a local target, captures independent PTY bytes, inspects the stop, records an observation, and returns contextual evidence.">
+    <img src="docs/assets/gdb-ai-operation-sequence.svg" width="1120"
+         alt="A launch and inspection turn: one request configures and runs GDB, then returns either a stop-bound observation or an exit outcome. Local target I/O follows an independent PTY path.">
   </a>
 </p>
-<p align="center"><em>Figure 1. The stop path of a fused launch and inspection turn.</em></p>
+<p align="center"><strong>Figure 1.</strong> Execution and evidence within one debugging turn.</p>
 
-The sequence records logical dependencies, not a shared clock.
+The arrows show causal dependencies between the stages.
 [GDB/MI][gdb-mi] state records and local inferior PTY bytes are independent
 streams. GDB/AI checks the stop ID and execution epoch before publishing the
 requested observation. A normal exit reports exit state without a stopped
-observation. An HTTP response timeout does not cancel target execution; query
-the returned `operation_id` with `gdb_session` action `operation_status`.
+observation. Reuse the returned session for another turn. An HTTP response
+timeout does not cancel target execution. Query the returned `operation_id`
+with `gdb_session` action `operation_status`.
 
 ## System model
 
@@ -132,11 +129,11 @@ separate control path so they do not wait behind a pending normal operation.
 
 <p align="center">
   <a href="docs/assets/gdb-ai-architecture.svg">
-    <img src="docs/assets/gdb-ai-architecture.svg" width="900"
+    <img src="docs/assets/gdb-ai-architecture.svg" width="1120"
          alt="Agents and SDK clients pass through transport adapters and the Gateway to one session actor and GDB process; control, MI reduction, evidence, and local PTY paths remain separate.">
   </a>
 </p>
-<p align="center"><em>Figure 2. One-session ownership and the separate control, MI reduction, target I/O, and evidence paths.</em></p>
+<p align="center"><strong>Figure 2.</strong> Session ownership and the paths for commands, state, I/O, and evidence.</p>
 
 Stop IDs and execution epochs bind observations to debugger state. Resuming a
 target invalidates earlier frame and value handles. A context change during a
@@ -155,12 +152,21 @@ continuations and evidence gaps. Local target input and output use a PTY; GDB
 console, target, and log streams remain separate. PTY stdout and stderr share
 one terminal and cannot be attributed as distinct streams.
 
+The workspace has three crates: `gdb-ai-mi` frames and parses MI, `gdb-ai-core`
+owns sessions and observations, and `gdb-ai` serves the CLI and transports.
 The default `performance` journal mode keeps live debugging available when
 history storage fails and reports the evidence gap. `durable` mode requires
 evidence writes to succeed. Replay reconstructs recorded debugger state and
 observations without executing or restoring the inferior. Detailed ownership,
 cancellation, and persistence invariants live in
 [architecture](docs/architecture.md) and [operations](docs/operations.md).
+
+For a small machine, use one local stdio server, reuse its debugging session,
+and request only the views needed for the current question. The server uses
+one to four Tokio workers according to available CPU parallelism. GDB and the
+target have their own resource costs; concurrent GDB sessions multiply those
+costs. The [operations guide](docs/operations.md#small-machines) shows the
+existing settings for bounding sessions and retained output.
 
 ## Interface
 

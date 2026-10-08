@@ -167,7 +167,7 @@ finished. Supply `stop_id` only when a later read must reject a newer stop.
 
 ## Native crash and thread diagnosis
 
-Launch a native program and collect its initial crash evidence in one
+Launch a native program and request a compact stop snapshot in one
 `tools/call` request. Omitting `session_id` creates the session too:
 
 ```json
@@ -183,15 +183,21 @@ Launch a native program and collect its initial crash evidence in one
 ```
 
 With this inspection plan, launch waits for a stop or exit and returns bounded
-target output with the collected observations. Keep `result.session.session_id`
-for later calls. A failure after creation retains that metadata under
-`error.details.session`, so the session can still be inspected or closed.
+target output with the collected observations. Read `state.status` and
+`state.stop_reason` to classify the outcome; the `crash` view is a bounded
+snapshot of a stopped target.
+
+Keep `result.session.session_id` for later calls. A failure after creation
+retains that metadata under `error.details.session`, so the session can still
+be inspected or closed.
 Launch may include `breakpoints: [{"function": "main"}]` to install ordinary
 software breakpoints before execution. Keep `result.created_breakpoints` for
 later updates or deletion; these breakpoints persist across restart. Use
 `create` separately for other pre-launch configuration.
-A normal exit has no stopped
-observations. Inspection failure preserves the execution outcome; do not repeat
+
+A target that exits before inspection returns
+`result.observation_status: "not_collected"` and `complete: false`.
+Inspection failure preserves the execution outcome; do not repeat
 execution merely to recover a failed read. Use `gdb_run` action `restart` with
 the same `inspect` plan for another run in the existing session.
 
@@ -204,17 +210,20 @@ stacks in one call:
   "arguments": {
     "action": "interrupt",
     "session_id": "<session-id>",
-    "inspect": [{"view": "threads", "stack_depth": 8}]
+    "inspect": [{"view": "threads", "limit": 8, "stack_depth": 8}]
   }
 }
 ```
 
 All returned stacks belong to the same stop; per-thread unwind failures remain
-explicit. A captured stop supports diagnosis, not proof of a reproducible race.
+explicit. Add `include_locals: true` when typed local and aggregate values are
+needed. Follow `next_offset` to read another thread page; a complete capture
+covers the requested page and depth.
+
 Use `first_instruction` or `main` at launch only when setup must precede
 execution, then include the needed views in `gdb_run` action `continue`.
 
-Share a returned `observation_id` with authorized observers through
+Share `context.observation_id` with authorized observers through
 `gdb_inspect` view `observation` and `snapshot_id: "<observation-id>"`.
 This reads immutable historical evidence without another GDB command. Only
 the session controller may mutate the target; see [control handoff and
@@ -233,6 +242,8 @@ additional output is needed. Projected tools do not expose lease or revision
 fields and bind omitted reads to the current stop.
 Inferior stdin, stdout, and stderr use `stream: "pty"`; `stream: "target"`
 selects GDB/MI `@` output, not the inferior's stdout.
+If `output.truncated` is true, continue with `gdb_io` action `read`,
+`stream: "pty"`, and `offset` set to `output.next_offset`.
 
 A `gdb_io` write may replace one `text` or `data_base64` payload with `steps`.
 Each step contains one payload and an optional `wait_for` substring. Matching

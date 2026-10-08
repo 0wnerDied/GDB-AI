@@ -10,6 +10,48 @@ Without an explicit config, persistent state lives under
 without either variable should configure absolute artifact, SQLite, and
 session paths instead of relying on the process-scoped temporary fallback.
 
+## Small machines
+
+Use stdio for one local Agent and reuse the same session across inspection
+and target restarts. Each additional live session starts another GDB process.
+The server's Tokio runtime uses the available CPU parallelism, capped at four
+workers; blocking storage work can use additional runtime threads.
+
+The following optional configuration bounds concurrent debuggers, retained
+output, and history using the existing settings:
+
+```toml
+[server]
+max_sessions = 1
+
+[limits]
+inferior_output_ring_bytes = 1048576
+console_output_ring_bytes = 262144
+
+[storage]
+max_snapshots_per_session = 32
+max_operations_per_session = 256
+```
+
+Start it with `gdb-ai --config /absolute/path/to/gdb-ai.toml serve --stdio`.
+Keep the default `journal.durability = "performance"` unless every evidence
+boundary must be synchronized. It coalesces history writes and commits each
+SQLite checkpoint as one transaction; it retains SQLite's synchronization
+policy. A storage failure is still reported as an evidence gap.
+
+Request a small `stack` or `crash` view first, then add memory, locals, or
+thread stacks as the diagnosis requires. A stopped turn can combine those
+reads with `inspect` or `gdb_batch`. Retrieve a completed `observation_id`
+when reusing evidence from that capture. Resume invalidates live frame and
+value handles, so a historical observation cannot establish the current stop.
+
+Rings grow as output arrives. Smaller rings discard older bytes sooner and
+report cursor gaps; smaller history limits expire earlier observations and
+operation records. GDB's symbol data and the target's own memory remain
+separate from these server limits.
+
+## Session control
+
 MCP-created sessions keep control with their caller identity until close or
 an explicit transfer; they do not create, expire, or renew write leases.
 Other callers may observe within the same principal's access rights but
@@ -53,6 +95,8 @@ queryable after that waiter disconnects or expires. Only an explicit
 cancellation notification or transport-session DELETE applies the request's
 cancellation behavior.
 
+## Evidence and replay
+
 Journals are stored per session. Use `gdb-ai transcript inspect`, `transcript
 export`, and `replay` for diagnosis without executing the inferior again.
 The default `journal.durability = "performance"` coalesces full-state
@@ -82,6 +126,8 @@ New journals declare `normalization_version: 2` in `session.created` to retain
 frame module paths. A missing version or version 1 uses the legacy frame
 representation, without backfilling that metadata during replay. Replay
 keeps event and checkpoint comparisons strict and rejects unknown versions.
+
+## Storage and retention
 
 Artifact storage has per-session, per-owner, and daemon-wide byte limits. Use
 `gdb-ai storage status` for metadata and filesystem inventory, `storage verify`

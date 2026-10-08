@@ -1,88 +1,118 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="770"
-     viewBox="0 0 1200 770" role="img" aria-labelledby="title description">
-  <title id="title">GDB/AI fused launch and inspection sequence</title>
-  <desc id="description">An Agent sends one launch request with optional
-    breakpoints and an inspection plan. GDB/AI configures and runs GNU GDB,
-    local PTY bytes arrive independently, GDB reports a stop, GDB/AI binds its
-    stop ID and execution epoch, performs bounded inspection, records an
-    immutable observation, and returns context, results, completeness, and
-    output.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900"
+     viewBox="0 0 1200 900" role="img" aria-labelledby="title description">
+  <title id="title">Execution and evidence within one debugging turn</title>
+  <desc id="description">A local launch request can create its session,
+    install breakpoints, and run an inspection plan. GDB/AI validates the plan
+    before target commands. A settled wait completes at a stop or exit. The
+    stopped path captures one stop ID and execution epoch, reads the bounded
+    inspection plan, and rechecks context in the actor before committing an
+    immutable observation. Independent read failures retain successful facts;
+    a changed context returns STALE_CONTEXT. The exited path preserves the
+    execution outcome but has no stopped observation. PTY bytes drain through
+    a separate bounded output path and have no total ordering with MI state.
+    The Agent receives execution outcome, context, available results,
+    completeness, and output. This is a dependency diagram, not a time axis.</desc>
   <defs>
-    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5"
             orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,4 L0,8 Z" fill="#274c77"/>
-    </marker>
-    <marker id="event-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
-            orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,4 L0,8 Z" fill="#697582"/>
-    </marker>
-    <marker id="io-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
-            orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L8,4 L0,8 Z" fill="#9a5b3f"/>
+      <path d="M0 0 L7 3.5 L0 7 Z" fill="#42617b"/>
     </marker>
     <style>
-      text { fill: #182433; font-family: Inter, "DejaVu Sans", Arial, sans-serif; }
-      .title { font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
-               font-size: 22px; font-weight: 600; }
-      .label { font-size: 16px; }
-      .small { fill: #596675; font-size: 14px; }
-      .canvas { fill: #fffefa; stroke: #c7c2b8; stroke-width: 1.2; }
-      .participant { fill: #f6f7f6; stroke: #8b96a1; stroke-width: 1.3; }
-      .interface { fill: #eef3f7; stroke: #274c77; stroke-width: 1.5; }
-      .store { fill: #fbfaf7; stroke: #697582; stroke-width: 1.3; }
-      .life { stroke: #aab2ba; stroke-width: 1.2; stroke-dasharray: 5 6; }
-      .flow { fill: none; stroke: #274c77; stroke-width: 1.8;
-              marker-end: url(#arrow); }
-      .event { fill: none; stroke: #697582; stroke-width: 1.7;
-               stroke-dasharray: 7 5; marker-end: url(#event-arrow); }
-      .io { fill: none; stroke: #9a5b3f; stroke-width: 1.8;
-            marker-end: url(#io-arrow); }
+      text { fill: #233647; font-family: "DejaVu Sans", Arial, sans-serif; }
+      .heading { font-family: "DejaVu Serif", Georgia, serif; font-size: 27px; }
+      .title { font-family: "DejaVu Serif", Georgia, serif; font-size: 22px; }
+      .step-title { font-family: "DejaVu Serif", Georgia, serif; font-size: 20px; }
+      .body { fill: #526575; font-size: 17px; }
+      .small { fill: #607382; font-size: 15px; }
+      .code { fill: #526575; font-family: "DejaVu Sans Mono", monospace; font-size: 14px; }
+      .section { fill: #42617b; font-size: 13px; font-weight: 600; letter-spacing: 1.3px; }
+      .card { fill: #ffffff; stroke: #c7d3de; stroke-width: 1.2; }
+      .accent { fill: #f4f7fa; stroke: #9db1c3; stroke-width: 1.2; }
+      .branch { fill: #fafbfd; stroke: #c7d3de; stroke-width: 1.2; }
+      .flow { fill: none; stroke: #42617b; stroke-width: 1.7; marker-end: url(#arrow); }
+      .stream { fill: none; stroke: #7d8e9e; stroke-width: 1.6; marker-end: url(#arrow); }
     </style>
   </defs>
 
-  <rect class="canvas" x="1" y="1" width="1198" height="768" rx="9"/>
+  <rect width="1200" height="900" fill="#ffffff"/>
+  <text class="heading" x="44" y="51">Execution and evidence within one debugging turn</text>
+  <text class="body" x="44" y="81">Logical dependencies; MI state and PTY bytes are independently ordered</text>
 
-  <rect class="participant" x="30" y="25" width="160" height="58" rx="5"/>
-  <text class="title" x="110" y="62" text-anchor="middle">Agent</text>
-  <rect class="interface" x="270" y="25" width="160" height="58" rx="5"/>
-  <text class="title" x="350" y="62" text-anchor="middle">GDB/AI</text>
-  <rect class="participant" x="520" y="25" width="160" height="58" rx="5"/>
-  <text class="title" x="600" y="62" text-anchor="middle">GNU GDB</text>
-  <rect class="participant" x="760" y="25" width="180" height="58" rx="5"/>
-  <text class="title" x="850" y="62" text-anchor="middle">Local target</text>
-  <rect class="store" x="1010" y="25" width="160" height="58" rx="5"/>
-  <text class="title" x="1090" y="62" text-anchor="middle">Evidence</text>
+  <rect class="accent" x="44" y="120" width="300" height="120" rx="4"/>
+  <text class="section" x="68" y="147">1 · REQUEST</text>
+  <text class="title" x="68" y="179">Agent request</text>
+  <text class="body" x="68" y="206">launch · breakpoints · inspect</text>
+  <text class="code" x="68" y="229">session_id optional</text>
 
-  <path class="life" d="M110 83 V740 M350 83 V740 M600 83 V740 M850 83 V740 M1090 83 V740"/>
+  <rect class="accent" x="448" y="120" width="300" height="120" rx="4"/>
+  <text class="section" x="472" y="147">2 · SETUP</text>
+  <text class="title" x="472" y="179">GDB/AI</text>
+  <text class="body" x="472" y="206">validate plan · configure GDB</text>
+  <text class="body" x="472" y="229">install breakpoints · run</text>
 
-  <path class="flow" d="M110 145 H350"/>
-  <text class="label" x="230" y="119" text-anchor="middle">launch · breakpoints · inspect</text>
-  <text class="small" x="230" y="138" text-anchor="middle">session_id optional</text>
+  <rect class="accent" x="852" y="120" width="304" height="120" rx="4"/>
+  <text class="section" x="876" y="147">3 · EXECUTE</text>
+  <text class="title" x="876" y="179">GNU GDB + target</text>
+  <text class="body" x="876" y="206">wait until stop or exit</text>
+  <text class="small" x="876" y="229">local launch · settled wait</text>
 
-  <path class="flow" d="M350 220 H600"/>
-  <text class="label" x="475" y="205" text-anchor="middle">configure · insert · run</text>
+  <path class="flow" d="M344 180 H448"/>
+  <path class="flow" d="M748 180 H852"/>
 
-  <path class="flow" d="M600 295 H850"/>
-  <text class="label" x="725" y="280" text-anchor="middle">launch / resume</text>
+  <!-- 2026-10-08: A settled exit has no stopped observation; preserve its execution outcome. -->
+  <path class="flow" d="M1004 240 V279 H396 V325"/>
+  <text class="code" x="690" y="268" text-anchor="middle">MI *stopped</text>
+  <path class="flow" d="M1004 279 V325"/>
+  <text class="small" x="1022" y="304">inferior exited</text>
 
-  <path class="io" d="M850 370 H350"/>
-  <text class="label" x="600" y="354" text-anchor="middle">PTY bytes</text>
-  <text class="small" x="600" y="390" text-anchor="middle">independent of MI state</text>
+  <rect class="branch" x="44" y="325" width="704" height="246" rx="4"/>
+  <text class="section" x="68" y="354">STOPPED</text>
+  <text class="title" x="68" y="388">Bounded inspection</text>
 
-  <path class="event" d="M600 445 H350"/>
-  <text class="label" x="475" y="429" text-anchor="middle">MI *stopped</text>
-  <text class="small" x="475" y="466" text-anchor="middle">GDB/AI binds stop ID · epoch</text>
+  <rect class="card" x="68" y="413" width="188" height="112" rx="3"/>
+  <text class="step-title" x="162" y="444" text-anchor="middle">Pin context</text>
+  <text class="code" x="162" y="472" text-anchor="middle">stop_id + epoch</text>
+  <text class="small" x="162" y="501" text-anchor="middle">one capture baseline</text>
 
-  <path class="flow" d="M350 520 H600"/>
-  <text class="label" x="475" y="504" text-anchor="middle">bounded inspection plan</text>
+  <rect class="card" x="276" y="413" width="208" height="112" rx="3"/>
+  <text class="step-title" x="380" y="444" text-anchor="middle">Inspect views</text>
+  <text class="small" x="380" y="472" text-anchor="middle">MI queries, one stop</text>
+  <text class="small" x="380" y="501" text-anchor="middle">retain available facts</text>
 
-  <path class="flow" d="M600 590 H350"/>
-  <text class="label" x="475" y="574" text-anchor="middle">MI result records</text>
+  <rect class="card" x="504" y="413" width="220" height="112" rx="3"/>
+  <text class="step-title" x="614" y="444" text-anchor="middle">Actor commit</text>
+  <text class="small" x="614" y="472" text-anchor="middle">recheck stop + epoch</text>
+  <text class="small" x="614" y="501" text-anchor="middle">immutable observation</text>
 
-  <path class="event" d="M350 655 H1090"/>
-  <text class="label" x="720" y="639" text-anchor="middle">commit immutable observation</text>
+  <path class="flow" d="M256 468 H276"/>
+  <path class="flow" d="M484 468 H504"/>
+  <text class="small" x="68" y="552">Independent failures retain successful reads.</text>
+  <text class="small" x="724" y="552" text-anchor="end">Context change → STALE_CONTEXT</text>
 
-  <path class="flow" d="M350 720 H110"/>
-  <text class="label" x="230" y="696" text-anchor="middle">state · observation</text>
-  <text class="small" x="230" y="714" text-anchor="middle">completeness · output</text>
+  <rect class="branch" x="852" y="325" width="304" height="246" rx="4"/>
+  <text class="section" x="876" y="354">EXITED</text>
+  <text class="title" x="876" y="388">Exit state</text>
+  <text class="body" x="876" y="434">No stopped observation</text>
+  <text class="small" x="876" y="463">Requested inspection was</text>
+  <text class="small" x="876" y="487">not collected.</text>
+  <text class="code" x="876" y="525">complete: false</text>
+  <text class="small" x="876" y="552">Execution outcome is retained.</text>
+
+  <path d="M396 571 V623 H1004 V571" fill="none" stroke="#42617b" stroke-width="1.7"/>
+  <path class="flow" d="M600 623 V665"/>
+
+  <rect class="accent" x="240" y="665" width="790" height="106" rx="4"/>
+  <text class="title" x="635" y="706" text-anchor="middle">Agent receives one response</text>
+  <text class="body" x="635" y="739" text-anchor="middle">execution outcome · context · results · completeness · output</text>
+
+  <rect class="branch" x="44" y="805" width="1112" height="68" rx="4"/>
+  <text class="section" x="68" y="833">LOCAL TARGET I/O</text>
+  <text class="small" x="68" y="856">independent of MI</text>
+  <text class="body" x="408" y="846" text-anchor="middle">Local target</text>
+  <text class="body" x="652" y="846" text-anchor="middle">PTY reader</text>
+  <text class="body" x="974" y="846" text-anchor="middle">Bounded ring / spool</text>
+  <path class="stream" d="M468 840 H586"/>
+  <path class="stream" d="M714 840 H866"/>
+  <path class="stream" d="M980 805 V771"/>
+  <text class="small" x="998" y="794">output read</text>
 </svg>

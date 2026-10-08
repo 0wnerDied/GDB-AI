@@ -1,9 +1,8 @@
 # GDB/AI architecture
 
 GDB/AI is a Rust control plane above GNU GDB and its built-in GDB/MI
-protocol. It gives Agents bounded semantic operations for dynamic debugging,
-vulnerability validation, and authorized vulnerability exploitation. GDB/AI
-does not define or replace GDB/MI.
+protocol. Agents send semantic debugging requests; GNU GDB remains responsible
+for target execution, symbols, expressions, and unwinding.
 
 The server is one Rust process with a Gateway and one Tokio session actor per
 GDB child. A session actor is the only writer of MI commands and the only
@@ -11,35 +10,23 @@ owner of its reducer. GDB output is framed, parsed, journaled, normalized, and
 reduced before it becomes public state. Inferior input and output use a
 separate PTY data path.
 
+<p align="center">
+  <a href="assets/gdb-ai-architecture.svg">
+    <img src="assets/gdb-ai-architecture.svg" width="1120"
+         alt="Three crate boundaries and one session's command, live-state, PTY, and retained-evidence paths.">
+  </a>
+</p>
+<p align="center"><strong>Figure 1.</strong> Runtime ownership and evidence flow. The actor's live state is authoritative; recorded history may lag it.</p>
+
 ## Workspace boundaries
 
-The implementation keeps three Rust crates because these are the dependency
-boundaries used by the product today:
+Three crates separate protocol parsing, debugger ownership, and transport:
 
-```text
-crates/
-├── gdb-ai-mi/                 byte-oriented GDB/MI codec and lossless AST
-├── gdb-ai-core/               domain, Gateway, sessions, policy, evidence
-│   └── src/
-│       ├── gateway.rs         policy and concurrency trust boundary
-│       ├── gateway/
-│       │   ├── operations/    canonical operation domains
-│       │   └── tests.rs       Gateway boundary regressions
-│       ├── session.rs         public SessionHandle and session data types
-│       └── session/
-│           ├── actor.rs       SessionWorker loop, control lane, MI input
-│           ├── state.rs       live reduction and atomic state publication
-│           └── tests.rs       session facade and wait regressions
-└── gdb-ai/                    executable, CLI, MCP and JSON-RPC adapters
-    └── src/
-        ├── main.rs            CLI commands and local administrative client
-        └── server/
-            ├── mod.rs         shared MCP/JSON-RPC dispatch
-            ├── stream.rs      stdio and Unix stream lifecycle
-            ├── http.rs        HTTP sessions, auth, versions, cancellation
-            ├── resources.rs   MCP resource and artifact URI projection
-            └── tests.rs       shared protocol regressions
-```
+| Crate | Responsibility | Main entry points |
+| --- | --- | --- |
+| `gdb-ai-mi` | Byte framing, bounded parsing, lossless MI AST, C-string encoding | `framer.rs`, `parser.rs`, `encoder.rs` |
+| `gdb-ai-core` | Policy, sessions, live state, operations, observations, evidence | `gateway.rs`, `session.rs`, `session/actor.rs`, `session/state.rs` |
+| `gdb-ai` | CLI, MCP and JSON-RPC transport, response projection | `main.rs`, `server/mod.rs`, `server/stream.rs`, `server/http.rs`, `server/resources.rs` |
 
 The canonical operation modules are grouped by their actual state and helper
 dependencies:
@@ -64,9 +51,9 @@ request        request parsing and common validation
 values         stop-scoped variable objects
 ```
 
-These are modules below the Gateway rather than independent crates. They use
-the same policy, caller control, stable-observation, and audit boundary, so a
-crate split would add public interfaces without separating runtime ownership.
+These operation modules share the Gateway's policy, caller control,
+observation, and audit boundary. They call the session facade rather than
+writing to GDB directly.
 
 ## Request and event flow
 
@@ -135,6 +122,20 @@ starve debugger state events.
 
 ## State and evidence invariants
 
+Three identifiers distinguish ownership, capture context, and retained evidence:
+
+| Identifier | Meaning | Lifetime |
+| --- | --- | --- |
+| `session_id` | The session owning the GDB process | Reused across target restarts; remains a history key after close |
+| `stop_id` and `execution_epoch` | The stop and execution generation of a capture | A resume invalidates earlier frame and value handles |
+| `observation_id` | One immutable capture | Retained independently of the current stop, within storage limits |
+
+A command acknowledgement records acceptance. Async MI events determine the
+target state. A running wait can therefore complete after a fast target has
+already stopped or exited; callers read the returned state to determine its
+actual status. Historical observations describe their original capture and
+never imply that the inferior is still at that stop.
+
 - MI result records acknowledge commands; async events advance target state.
 - A running edge invalidates all prior stop-scoped frame and value handles.
 - Snapshot, batch, and chunked memory success belongs to one stop and one
@@ -163,9 +164,12 @@ starve debugger state events.
 - Raw MI and normalized events share one monotonic sequence before reducer
   application. In default `performance` mode, full-state journal checkpoints
   and operation history are coalesced at the 250 ms flush, transcript-read, and
-  close boundaries. The actor reduces directly into its watched live state and
-  publishes related capability and value invalidation with that transition;
-  scalar inspections borrow it and returned snapshots own their data.
+  close boundaries. Each SQLite checkpoint commits the changed operations and
+  session metadata in one transaction and applies operation retention once.
+  Snapshot insertion and its retention also share a transaction. The actor
+  reduces directly into its watched live state and publishes related capability
+  and value invalidation with that transition; scalar inspections borrow it
+  and returned snapshots own their data.
 - A full or unwritable performance journal stops recording and publishes an
   evidence-gap limitation; it does not stop GDB or invalidate live stop handles.
   SQLite failure leaves live snapshots and operation waits available, suspends

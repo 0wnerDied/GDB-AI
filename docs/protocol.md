@@ -13,7 +13,7 @@ Stop-sensitive canonical reads require the current `stop_id` or an explicit
 `accept_current_stop` binding.
 MCP-created sessions use fixed caller control without write-lease renewal.
 Projected tools omit canonical revision and lease fields. An omitted projected
-`stop_id` binds the current stop; a supplied ID remains a stale-stop pin.
+`stop_id` binds the current stop; a supplied ID requires that exact stop.
 
 `target.launch` without `session_id` creates and controls a new session using
 the same profile selection as `session.create`. Do not supply an existing
@@ -95,8 +95,19 @@ Canonical operations expose `operation.get` through `gdb_session` action
 waiter detachment and target control are distinct operations.
 
 Wait objects accept `accepted`, `running`, `stopped`, `settled`, `snapshot`,
-and `exited`. `settled` completes at the first attributable stop or terminal
-inferior state; execution control/wait reports that branch in `settled_by`.
+and `exited`. `accepted` returns without waiting for a target-state transition.
+For an attributed execution wait, `running` confirms a new running edge;
+the target may already be stopped or terminal when the response arrives.
+Read the returned target state: MCP exposes compact `state.status`, while
+canonical responses retain per-inferior records in `state.inferiors`.
+`settled` completes at the first attributable stop or terminal inferior state;
+execution control/wait reports `settled_by: "stopped"` or `"exited"`.
+The `exited` condition and branch also include detached or disconnected
+inferiors; the returned target status distinguishes those outcomes from
+process exit.
+`snapshot` waits for a ready snapshot, which may contain partial evidence;
+read the capture's completeness metadata before using its facts.
+
 An omitted launch or restart wait observes `running` for `stop: "none"`
 without inspection, and the selected stop plus its snapshot for other start
 policies. With `inspect`, `stop: "none"` instead defaults to `settled`.
@@ -132,10 +143,12 @@ watchpoints use the existing separate breakpoint API.
 An explicit wait with inspection must be `stopped`, `settled`, or `snapshot`.
 Launch/restart and run/wait `inspect`, `inspection.batch.requests`, and
 `inspection.snapshot.inspect` use the same item contract. Each turn accepts
-1–16 uniquely named items (`name` defaults to `view`), at most 16 total
-expressions, and at most `limits.memory_read_bytes` total bytes across
-explicit memory reads. The whole plan is validated before target startup,
-run control, or input delivery.
+1–16 items, at most 16 total expressions, and at most
+`limits.memory_read_bytes` total bytes across explicit memory reads.
+Explicit `name` values must be unique. An omitted name defaults to `view`;
+repeated unnamed views receive suffixes such as `evaluate_2` and `evaluate_3`.
+The whole plan is validated before target startup, run control, or input
+delivery.
 For snapshots, `inspect` without `profile` selects only those items and
 reports `profile: "custom"`. An explicit profile expands into standard read
 items in the same plan; its items also count toward the sixteen-item limit.
@@ -146,6 +159,14 @@ Alongside existing inspection views, items accept `view: "evaluate"` with
 `around` or `range` selectors. Applicable thread, frame, source, paging, and
 format selectors are shared across these entry points. Expressions remain
 read-only; resolved memory ranges retain the session profile's access policy.
+
+Disassembly `range` endpoints accept complete hexadecimal address literals
+or read-only GDB expressions, for example
+`{"start": "main", "end": "main+0x20"}`. This applies to standalone,
+batch, launch/run, and snapshot reads. Symbolic endpoints resolve at the
+captured stop; the resulting range must be positive and at most 64 KiB.
+Literal ranges are also checked before execution.
+
 `view: "tracked"` samples configured tracking definitions and returns both
 their current values and changes from the preceding sample, advancing the
 existing bounded tracking history. `view: "diff"` accepts
