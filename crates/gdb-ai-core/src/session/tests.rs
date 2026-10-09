@@ -1617,6 +1617,181 @@ async fn stale_snapshot_commit_leaves_no_snapshot() {
 }
 
 #[tokio::test]
+async fn module_rebinding_cannot_cross_an_unknown_command_outcome() {
+    use std::io::Write;
+
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+
+    use crate::domain::TargetOrigin;
+
+    let directory = tempdir().unwrap();
+    let release_path = directory.path().join("release");
+    nix::unistd::mkfifo(
+        &release_path,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .unwrap();
+    let mut release = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&release_path)
+        .unwrap();
+    let backend_path = directory.path().join("gdb");
+    std::fs::write(
+        &backend_path,
+        format!(
+            r#"#!/bin/sh
+printf '(gdb) \n'
+while IFS= read -r line; do
+    token=${{line%%-*}}
+    case "$line" in
+        *-exec-continue*)
+            printf '=library-loaded,id="mapped",host-name="mapped",symbols-loaded="1"\n'
+            IFS= read -r release < '{}'
+            printf '%s^done\n' "$token"
+            ;;
+        *-break-insert*) printf '%s^done,bkpt={{number="2"}}\n' "$token" ;;
+        *-gdb-exit*) exit 0 ;;
+        *) printf '%s^done\n' "$token" ;;
+    esac
+done
+"#,
+            release_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&backend_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.gdb.path = backend_path;
+    config.journal.durability = crate::config::JournalDurability::Durable;
+    let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+    let session = SessionHandle::start(
+        Arc::new(config),
+        Profile::DebugControl,
+        store,
+        Arc::new(Metrics::default()),
+    )
+    .await
+    .unwrap();
+    for event in [
+        DomainEvent::InferiorAdded {
+            backend_id: "i1".into(),
+            pid: Some(u64::from(std::process::id())),
+        },
+        DomainEvent::BreakpointCreated {
+            backend_number: "1".into(),
+            enabled: true,
+            pending: true,
+        },
+    ] {
+        session.record_event(event).await.unwrap();
+    }
+    let breakpoint_id = session.state().breakpoints["1"].id.clone();
+    session
+        .register_pending_module_breakpoint(PendingModuleBreakpoint {
+            id: breakpoint_id.clone(),
+            backend_number: "1".into(),
+            module: std::env::current_exe().unwrap().display().to_string(),
+            offset: 0,
+            enabled: true,
+            command: MiCommand::new("-break-insert").unwrap(),
+        })
+        .await
+        .unwrap();
+    session
+        .record_event(DomainEvent::TargetConfigured {
+            origin: TargetOrigin::Local,
+        })
+        .await
+        .unwrap();
+    let mut events = session.subscribe();
+    let running = session.clone();
+    let command = tokio::spawn(async move {
+        running
+            .command_with_timeout(
+                MiCommand::new("-exec-continue").unwrap(),
+                Duration::from_secs(1),
+            )
+            .await
+    });
+    let mapped = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(mapped.event, DomainEvent::LibraryLoaded { .. }));
+    let timed_out = command.await.unwrap().unwrap_err();
+    assert_eq!(timed_out.code, ErrorCode::Timeout);
+    // This control-lane barrier flushes evidence while the late reply is held.
+    session.record_api(serde_json::json!({})).await.unwrap();
+    let unknown = session.state().outcome_unknown_tokens;
+    let journal = std::fs::read_to_string(session.journal_path()).unwrap();
+    let inputs = journal
+        .lines()
+        .map(|line| serde_json::from_str::<crate::journal::JournalEntry>(line).unwrap())
+        .filter(|entry| entry.kind == "mi.input")
+        .map(|entry| {
+            String::from_utf8(
+                BASE64
+                    .decode(entry.data["raw_base64"].as_str().unwrap())
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    release.write_all(b"release\n").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                events.recv().await.unwrap().event,
+                DomainEvent::CommandOutcomeResolved { .. }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(session.state().reconciliation_required);
+    // Reconciliation observes mapped libraries before restoring consistency.
+    session
+        .record_event(DomainEvent::LibraryLoaded {
+            id: "mapped".into(),
+            target_name: None,
+            host_name: Some("mapped".into()),
+            symbols_loaded: Some(true),
+        })
+        .await
+        .unwrap();
+    session
+        .record_event(DomainEvent::ConsistencyRestored {
+            warnings: Vec::new(),
+        })
+        .await
+        .unwrap();
+    session.flush_journal().await.unwrap();
+    let recovered = session.state();
+    session.close().await.unwrap();
+    assert!(!unknown.is_empty());
+    assert!(
+        !inputs.iter().any(|input| input.contains("-break-insert")),
+        "{inputs:?}"
+    );
+    assert!(recovered.outcome_unknown_tokens.is_empty());
+    assert!(!recovered.breakpoints.contains_key("1"));
+    assert_eq!(recovered.breakpoints["2"].id, breakpoint_id);
+    assert!(!recovered.breakpoints["2"].pending);
+}
+
+#[tokio::test]
 async fn module_rebind_stop_waits_for_breakpoint_identity() {
     use std::io::Write;
 

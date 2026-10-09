@@ -680,7 +680,12 @@ impl SessionWorker {
         let mut journal_flush = tokio::time::interval(Duration::from_millis(250));
         journal_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            if self.module_rebind_needed {
+            // 2026-10-09: Consuming rebind work during timeout or reconciliation
+            // left mapped breakpoints pending; retain it until recovery finishes.
+            if self.module_rebind_needed
+                && self.timed_out_tokens.is_empty()
+                && !self.state.borrow().reconciliation_required
+            {
                 self.module_rebind_needed = false;
                 if let Err(error) = self.rebind_pending_module_breakpoints().await {
                     tracing::warn!(%error, "failed to rebind a pending module breakpoint");
@@ -1504,9 +1509,6 @@ impl SessionWorker {
     }
 
     async fn rebind_pending_module_breakpoints(&mut self) -> Result<()> {
-        if self.state.borrow().reconciliation_required {
-            return Ok(());
-        }
         let running = self
             .state
             .borrow()
@@ -2236,6 +2238,9 @@ impl SessionWorker {
     }
 
     async fn begin_command(&mut self, command: &MiCommand) -> Result<u64> {
+        // 2026-10-09: Automatic rebinding bypassed the request timeout fence;
+        // only interruption may write MI while an earlier outcome is unknown.
+        self.require_known_outcome(command)?;
         let token = self.next_token;
         self.next_token = self
             .next_token
