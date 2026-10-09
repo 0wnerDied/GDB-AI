@@ -1459,6 +1459,75 @@ async fn transaction_resume_is_owned_and_interrupt_acknowledgement_stops() {
 }
 
 #[tokio::test]
+async fn idle_cancellation_escalates_an_acknowledged_interrupt() {
+    let directory = tempdir().unwrap();
+    let backend_path = directory.path().join("gdb");
+    std::fs::write(
+        &backend_path,
+        r#"#!/bin/sh
+trap 'printf "*stopped,reason=\"signal-received\",signal-name=\"SIGINT\",thread-id=\"1\",thread-group=\"i1\"\n"' INT
+printf '(gdb) \n'
+while :; do
+    IFS= read -r line || continue
+    token=${line%%-*}
+    case "$line" in
+        *-exec-continue*)
+            printf '%s^running\n*running,thread-id="all"\n' "$token"
+            ;;
+        *-gdb-exit*) exit 0 ;;
+        *) printf '%s^done\n' "$token" ;;
+    esac
+done
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&backend_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut config = Config {
+        artifacts: ArtifactConfig {
+            path: directory.path().join("artifacts"),
+        },
+        persistence: PersistenceConfig {
+            sqlite: directory.path().join("state.sqlite"),
+            sessions: directory.path().join("sessions"),
+        },
+        ..Config::default()
+    };
+    config.gdb.path = backend_path;
+    let store = Arc::new(Store::open(&config.persistence.sqlite).unwrap());
+    let session = SessionHandle::start(
+        Arc::new(config),
+        Profile::DebugControl,
+        store,
+        Arc::new(Metrics::default()),
+    )
+    .await
+    .unwrap();
+    let operation_id = OperationId::new();
+    let operation = ActiveOperation::new(operation_id.clone(), Arc::new(AtomicBool::new(false)));
+    scope_operation(
+        operation,
+        session.command(MiCommand::new("-exec-continue").unwrap()),
+    )
+    .await
+    .unwrap();
+    session
+        .wait(WaitUntil::Running, Duration::from_secs(2))
+        .await
+        .unwrap();
+    // The normal queue barrier makes cancellation take the idle control path.
+    session.flush_journal().await.unwrap();
+    session
+        .cancel_operation(operation_id, OperationCancelMode::InterruptTarget)
+        .await
+        .unwrap();
+    let stopped = session
+        .wait(WaitUntil::Snapshot, Duration::from_secs(2))
+        .await;
+    session.close().await.unwrap();
+    assert!(stopped.is_ok(), "{stopped:?}");
+}
+
+#[tokio::test]
 async fn stable_observation_serializes_ordinary_commands() {
     let Some(session) = control_test_session().await else {
         return;

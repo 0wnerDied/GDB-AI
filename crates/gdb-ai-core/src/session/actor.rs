@@ -1276,7 +1276,11 @@ impl SessionWorker {
                     OperationCancelMode::InterruptTarget => {
                         match self.owned_interrupt_command(&operation_id) {
                             Ok(command) => {
-                                self.execute(command, self.command_timeout).await.map(drop)
+                                let result = self.execute(command, self.command_timeout).await;
+                                // 2026-10-09: Idle cancellation skipped the
+                                // acknowledged-interrupt fallback; successful
+                                // cancellation must still stop the target.
+                                self.finish_interrupt(result).map(drop)
                             }
                             Err(error) => Err(error),
                         }
