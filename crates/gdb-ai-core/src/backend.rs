@@ -592,12 +592,13 @@ struct AsyncPty(AsyncFd<File>);
 
 impl AsyncRead for AsyncPty {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         loop {
             let mut readable = ready!(self.0.poll_read_ready(context))?;
+            let hung_up = readable.ready().is_read_closed();
             match readable.try_io(|inner| {
                 let mut reader = inner.get_ref();
                 reader.read(buffer.initialize_unfilled())
@@ -607,7 +608,14 @@ impl AsyncRead for AsyncPty {
                     return Poll::Ready(Ok(()));
                 }
                 Ok(Err(error)) => return Poll::Ready(Err(error)),
-                Err(_) => continue,
+                Err(_) => {
+                    if hung_up {
+                        // 2026-10-09: Tokio keeps hangup readiness forever;
+                        // re-register reopened idle PTYs instead of spinning.
+                        drop(readable);
+                        self.0 = AsyncFd::new(self.0.get_ref().try_clone()?)?;
+                    }
+                }
             }
         }
     }
@@ -1499,6 +1507,45 @@ mod tests {
             std::fs::read_to_string("/proc/self/limits").unwrap(),
             inherited
         );
+    }
+
+    #[tokio::test]
+    async fn reopened_idle_pty_waits_for_fresh_data() {
+        let pty = openpty(None, None).unwrap();
+        configure_inferior_pty(&pty.slave, true).unwrap();
+        let path = ttyname(&pty.slave).unwrap();
+        let master = std::fs::File::from(pty.master);
+        fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+        drop(pty.slave);
+        let mut reader = AsyncPty(AsyncFd::new(master).unwrap());
+        let mut buffer = [0; 64];
+        assert_eq!(
+            reader.read(&mut buffer).await.unwrap_err().raw_os_error(),
+            Some(libc::EIO)
+        );
+        let mut slave = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(path)
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reader.read(&mut buffer))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), reader.0.readable())
+                .await
+                .is_err(),
+            "an open idle PTY must wait for a fresh readiness edge"
+        );
+        let expected = b"runtime-result=42\n";
+        slave.write_all(expected).unwrap();
+        let length = tokio::time::timeout(Duration::from_secs(1), reader.read(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buffer[..length], expected);
     }
 
     #[tokio::test]
